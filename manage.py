@@ -343,19 +343,26 @@ def _pip_install(app_dir: Path) -> int:
     if not req.exists():
         print("    (no requirements.txt — skipped)")
         return 0
-    args = [str(_venv_python(app_dir)), "-m", "pip", "install", "--quiet",
+    base = [str(_venv_python(app_dir)), "-m", "pip", "install", "--quiet",
             "--disable-pip-version-check", "-r", str(req)]
     constraints = app_dir / "constraints.txt"
     if constraints.exists():
-        args += ["-c", str(constraints)]
-    # offline bundle: wheels/ shipped next to the code
-    if (app_dir / "wheels").is_dir():
-        args += ["--no-index", "--find-links", str(app_dir / "wheels")]
+        base += ["-c", str(constraints)]
     mirror = os.environ.get("DOGBUDDY_PIP_INDEX")
     if mirror:
-        args += ["-i", mirror]
+        base += ["-i", mirror]
+
+    # offline-first: wheels/ shipped next to the code
+    if (app_dir / "wheels").is_dir():
+        offline = base + ["--no-index", "--find-links", str(app_dir / "wheels")]
+        try:
+            if subprocess.run(offline, timeout=PIP_TIMEOUT).returncode == 0:
+                return 0
+            print("    本地 wheels 不满足新依赖，改为联网安装…")
+        except subprocess.SubprocessError as e:
+            print(f"    本地安装失败（{e}），改为联网安装…")
     try:
-        return subprocess.run(args, timeout=PIP_TIMEOUT).returncode
+        return subprocess.run(base, timeout=PIP_TIMEOUT).returncode
     except subprocess.SubprocessError as e:
         print(f"    pip failed: {e}")
         return 1
