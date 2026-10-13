@@ -301,6 +301,13 @@ python scripts/audit_ui.py --strict   # 有发现则非零退出，可挂 CI
    如果外包环境能稳定访问 GitHub，可改回 HTTPS。
 9. **升级后的前端缓存**：静态资源 URL 没有版本指纹，浏览器可能继续用旧 JS/CSS，
    表现为"代码升了但界面没变"。排查 UI 问题前先 Ctrl+Shift+R（详见 2.1）。
+10. **新增工具必须同步角色白名单**（本项目最容易漏的一步）：把工具注册进 `ToolRegistry` **不代表模型能用**——
+    `AgentLoop` 用 `tool_names=role_spec.tool_names` 过滤，所以还必须加进
+   `agents/core/roles.py` 的 `ADMIN_TOOLS` 或 `WORKER_PROGRAMMER_TOOLS`。
+   实例：`self_version` / `self_update` 就漏了这一步，结果是要求管理员"升级你自己"时，
+   它看不到升级工具，只好把任务派给员工工位（员工既没有部署上下文、也无法重启服务）。
+   现在有不变量测试守着：`tests/test_self_upgrade_tool.py::test_admin_role_exposes_every_registered_tool`，
+   **新增工具后跑一次，不一致会直接失败**。
 
 ---
 
