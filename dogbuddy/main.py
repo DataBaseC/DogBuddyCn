@@ -73,12 +73,13 @@ class DogBuddyApp:
         self.workspaces = WorkspaceManager(config.paths.workspaces, self.db)
         self.job_store = JobStore(self.db)
         self.jobs = JobManager(self.job_store, self.windows)
-        self.config_svc = ConfigService(self.db, config)
+        self.config_svc = ConfigService(self.db, config, persist=self.persist_config)
         self.files = FileService(self._file_roots())
         self.admin = AdminService(
             db=self.db, llm_factory=self.llm_factory, windows=self.windows, jobs=self.jobs,
             sessions=self.sessions, workspaces=self.workspaces, memory=self.memory,
-            config=self.config_svc, bus=self.bus)
+            config=self.config_svc, bus=self.bus,
+            self_status=self.update_status, self_update=self.start_self_update)
         self.notifiers = build_notifiers(config.notify, self.adapter, config.gateway.push_target)
         # worker questions / confirm requests must reach the admin conversation:
         # in v1.3 `AdminService.notify()` was never called, so a worker could ask
@@ -137,6 +138,46 @@ class DogBuddyApp:
             logger.warning("LLM provider cache invalidation failed", exc_info=True)
         logger.info("configuration saved to %s", path)
         return str(path)
+
+    # ------------------------------------------------------------ self upgrade
+    def update_status(self, check_remote: bool = False) -> dict:
+        """What version we are, where the code came from, and how the last upgrade went."""
+        from .config import config_path
+        from .updater import git_info, read_result, remote_head
+
+        stamp_file = Path(__file__).resolve().parent.parent / "VERSION"
+        try:
+            build = stamp_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            build = ""
+        info: dict = {
+            "version": __version__,
+            "build": build,
+            "config": str(config_path()),
+            "git": git_info(),
+            "last_update": read_result(self.config.paths.data),
+        }
+        if check_remote:
+            info["remote"] = remote_head()
+        return info
+
+    def start_self_update(self, ref: str = "", force: bool = False,
+                          start_delay: int = 45) -> dict:
+        """Launch `manage.py update` detached; it restarts this very process.
+
+        The agent cannot upgrade itself in-process — the update replaces the code
+        and restarts the service — so we hand the work to a new session and let
+        the outcome land in `update_result.json` for the next turn to report.
+        """
+        from .config import config_path
+        from .updater import spawn_update
+
+        try:
+            return spawn_update(config_path(), self.config.paths.data, ref=ref,
+                                force=force, start_delay=max(0, int(start_delay)))
+        except Exception as e:  # noqa: BLE001
+            logger.exception("failed to start self-update")
+            return {"started": False, "error": str(e)}
 
     def _on_llm_wait(self, profile: str, attempt: int, delay: float) -> None:
         """Rate-limit backoff surfaced for the console badge (per profile)."""

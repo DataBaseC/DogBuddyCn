@@ -86,6 +86,44 @@ python scripts/make_bundle.py --with-wheels \
 # → dist/dogbuddy-<version>.tar.gz（代码 + wheels/，目标机无网也能装）
 ```
 
+### 让 DBC 自己升级自己
+
+管理员 Agent 有两个工具，可以直接对它说「升级你自己」：
+
+| 工具 | 作用 |
+|---|---|
+| `self_version` | 当前版本、代码来源（git 还是 bundle）、上次升级结果；`check_remote=true` 时顺带问一次远端有没有新提交 |
+| `self_update` | 在**后台独立进程**里跑 `manage.py update`，随后重启服务 |
+
+为什么必须是独立进程：自升级会替换代码并重启服务，**进程内做不到**。所以
+`self_update` 立刻返回、延迟 45 秒再动手（留时间让当前这轮回复落盘），升级结果写进
+`<data_dir>/update_result.json`，下一轮对话用 `self_version` 就能回答「升级好了吗」。
+`/api/status` 也会带上 `last_update`。
+
+### 首次接入 GitHub（一次性）
+
+```bash
+# 1) 服务器上生成专用部署密钥
+ssh-keygen -t ed25519 -N "" -f /root/.ssh/dogbuddy_deploy
+cat /root/.ssh/dogbuddy_deploy.pub
+# 2) 把公钥加到 GitHub: 仓库 → Settings → Deploy keys → Add deploy key，勾选 Allow write access
+# 3) 让 git@github.com 使用这把密钥
+cat >> /root/.ssh/config <<'EOF'
+Host github.com
+  User git
+  IdentityFile /root/.ssh/dogbuddy_deploy
+  IdentitiesOnly yes
+EOF
+chmod 600 /root/.ssh/config
+
+# 4) 把部署目录变成 git 检出并推送
+cd /opt/dogbuddy && bash scripts/bootstrap_git.sh
+```
+
+之后：**拉取走匿名 HTTPS，完全不需要凭据**（公开仓库），推送才需要那把密钥。
+`git remote -v` 会显示 fetch 是 `https://…`、push 是 `git@…`，这是刻意的。
+
+
 数据目录（默认 `/etc/dogbuddy/`）：`config.yaml` · `dogbuddy.db` · `memory/` · `logs/` · `checkpoints/` · `workspaces/`。
 
 `manage.py start|stop|status|logs|backup|restore` 负责进程与运维自查。

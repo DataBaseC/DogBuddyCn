@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
+from ..updater import read_result
 from .routes import auth as auth_routes
 from .routes import chat as chat_routes
 from .routes import files as files_routes
@@ -153,6 +154,7 @@ def create_app(svc: WebServices) -> FastAPI:
             # agent uses this same default, so workers inherit the admin's model
             "llm_model": default_model,
             "llm_profile": (app_cfg.active_llm_profile if app_cfg is not None else ""),
+            "last_update": (read_result(app_cfg.paths.data) if app_cfg is not None else None),
         }
 
     @base.get("/api/overview", dependencies=auth_deps)

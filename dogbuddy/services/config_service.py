@@ -7,9 +7,21 @@ from typing import Any
 
 
 class ConfigService:
-    def __init__(self, db: Any, app_config: Any = None):
+    def __init__(self, db: Any, app_config: Any = None, persist: Any = None):
         self.db = db
         self.app = app_config  # AppConfig (pydantic), hot-applied fields mutate here
+        # callable() -> path: writes the live AppConfig to disk. Without it every
+        # admin-agent config edit dies with the process (the v1.3 defect).
+        self._persist = persist
+
+    def persist(self) -> str:
+        """Flush the live AppConfig to YAML (and drop cached LLM providers)."""
+        if self._persist is None:
+            return ""
+        try:
+            return str(self._persist())
+        except Exception:  # noqa: BLE001 — persistence failure must not break the tool
+            return ""
 
     def get(self, key: str, default: Any = None) -> Any:
         val = self.db.get_config(key)
@@ -18,6 +30,7 @@ class ConfigService:
     def set(self, key: str, value: Any) -> None:
         self.db.set_config(key, value)
         self._hot_apply(key, value)
+        self.persist()
         self.db.audit("system", "config:set", f"{key}={value!r}")
 
     def _hot_apply(self, key: str, value: Any) -> None:

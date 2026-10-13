@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dogbuddy import __version__  # noqa: E402
 from dogbuddy.config import default_data_dir, load_config, config_path  # noqa: E402
+from dogbuddy.updater import write_result  # noqa: E402
 
 IS_WINDOWS = sys.platform == "win32"
 TMP = Path(tempfile.gettempdir())
@@ -681,10 +682,16 @@ def _finish(app_dir: Path, args: argparse.Namespace, stamp: str, rollback) -> in
 
     cfg = load_config(args.config)
     host, port = cfg.web.host, cfg.web.port
+    data_dir = _data_dir(args.config)
+    previous = args._previous_version if getattr(args, "_previous_version", None) is not None \
+        else _installed_version(app_dir)
 
     if args.no_restart:
         print(f"==> 已跳过重启（--no-restart）。盘上版本 {new_version or '?'}")
         _write_version_stamp(app_dir)
+        write_result(data_dir, status="installed", ok=True, previous=previous,
+                     version=new_version, detail="installed without restart (--no-restart)",
+                     source=_source_label(args))
         return 0
 
     print(f"==> 重启服务（新版本 {new_version or '未知'}）")
@@ -702,20 +709,46 @@ def _finish(app_dir: Path, args: argparse.Namespace, stamp: str, rollback) -> in
                          tries=args.health_tries, delay=args.health_delay)
         if rolled is None:
             print("错误: 回滚后健康检查仍失败！请立即查看日志排查。", file=sys.stderr)
+            write_result(data_dir, status="rollback-failed", ok=False, previous=previous,
+                         version=new_version, rolled_back_to="",
+                         detail="rollback did not come up either — manual intervention needed",
+                         source=_source_label(args))
             return 1
         print(f"已回滚并恢复运行（版本 {rolled.get('version')}）", file=sys.stderr)
+        write_result(data_dir, status="rolled-back", ok=False, previous=previous,
+                     version=new_version, rolled_back_to=rolled.get("version", ""),
+                     detail="new version failed the health check; previous code restored and healthy",
+                     source=_source_label(args))
         return 1
 
     stamp_value = _write_version_stamp(app_dir)
     print(f"==> 升级完成: version={health.get('version')} build={stamp_value} "
           f"schema={health.get('schema_version')}")
+    write_result(data_dir, status="success", ok=True, previous=previous,
+                 version=health.get("version", new_version), build=stamp_value,
+                 schema_version=health.get("schema_version"), source=_source_label(args),
+                 detail="healthy after restart")
     return 0
+
+
+def _source_label(args: argparse.Namespace) -> str:
+    if getattr(args, "from_bundle", None):
+        return f"bundle:{Path(args.from_bundle).name}"
+    if getattr(args, "from_url", None):
+        return f"url:{args.from_url}"
+    return f"git:{getattr(args, 'ref', '') or 'origin/main'}"
 
 
 def cmd_update(args: argparse.Namespace) -> int:
     app_dir = Path(args.app_dir).resolve() if args.app_dir else APP_DIR
     if not IS_WINDOWS and hasattr(os, "geteuid") and os.geteuid() != 0:
         print("警告: 未以 root 运行；若代码/数据目录受限，升级可能失败", file=sys.stderr)
+
+    if getattr(args, "start_delay", 0):
+        # launched detached by the agent: give the current turn time to finish and
+        # persist its reply before we restart the process underneath it
+        print(f"==> 延迟 {args.start_delay}s 后开始（留时间给当前对话落盘）")
+        time.sleep(int(args.start_delay))
 
     try:
         cfg = load_config(args.config)
@@ -740,6 +773,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     current = _installed_version(app_dir) or __version__
     print(f"==> 当前版本 {current}（{app_dir}）")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    args._previous_version = current
 
     if args.check:
         source = (args.from_url or args.from_bundle) if (args.from_bundle or args.from_url) \
@@ -747,6 +781,9 @@ def cmd_update(args: argparse.Namespace) -> int:
         print(f"    更新源: {source}")
         print("    --check 模式：不执行任何变更。")
         return 0
+
+    write_result(_data_dir(args.config), status="running", ok=False, previous=current,
+                 version="", source=_source_label(args), detail="upgrade in progress")
 
     try:
         with _update_lock(app_dir):
@@ -803,6 +840,9 @@ def main() -> int:
     up.add_argument("--no-backup", action="store_true", help="skip the config backup step")
     up.add_argument("--no-restart", action="store_true", help="install only, do not restart the service")
     up.add_argument("--check", action="store_true", help="report the update source and exit")
+    up.add_argument("--start-delay", type=int, default=0,
+                    help="seconds to wait before touching anything (agent-triggered upgrades "
+                         "use this so the current reply is persisted before the restart)")
     up.add_argument("--health-tries", type=int, default=None,
                     help="/healthz poll attempts (default: config update.health_tries = 30)")
     up.add_argument("--health-delay", type=float, default=None,

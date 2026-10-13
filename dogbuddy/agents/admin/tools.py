@@ -19,7 +19,9 @@ class AdminServices:
 
     def __init__(self, windows: Any = None, jobs: Any = None, sessions: Any = None,
                  workspaces: Any = None, memory: Any = None, config: Any = None,
-                 progress: Callable[[], dict] | None = None):
+                 progress: Callable[[], dict] | None = None,
+                 self_status: Callable[[bool], dict] | None = None,
+                 self_update: Callable[..., dict] | None = None):
         self.windows = windows      # WindowManager: create/list/get/update/pause/resume/delete/status/dispatch
         self.jobs = jobs            # JobManager: create/list/get/update/pause/resume/remove/run_now
         self.sessions = sessions    # SessionManager: get/compress/reset/inject
@@ -27,6 +29,9 @@ class AdminServices:
         self.memory = memory        # MemoryService
         self.config = config        # get/set/report_set
         self.progress = progress
+        # self-upgrade: (check_remote: bool) -> dict  /  (ref, force, start_delay) -> dict
+        self.self_status = self_status
+        self.self_update = self_update
 
 
 class FnTool:
@@ -364,5 +369,70 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
 
     tools.append(FnTool("progress_report", "Summarize all windows, tasks and recent runs.",
         _OBJ, progress_report))
+
+    # ---------------------------------------------------------- self upgrade
+    async def self_version(args: dict, ctx: ToolContext) -> ToolResult:
+        need(svc.self_status, "self_status")
+        info = svc.self_status(bool(args.get("check_remote")))
+        lines = [f"当前版本: {info.get('version')}",
+                 f"构建标记: {info.get('build') or '(none)'}"]
+        g = info.get("git") or {}
+        if g.get("is_git"):
+            lines.append(f"代码来源: git {g.get('describe') or g.get('short') or '?'}"
+                         f" @ {g.get('remote') or '(no remote)'}")
+        else:
+            lines.append("代码来源: 离线 bundle 安装（无 .git）——只能从本机升级")
+        lu = info.get("last_update")
+        if lu:
+            lines.append("上次升级: {status} {prev} → {ver} @ {when}{extra}".format(
+                status=lu.get("status"), prev=lu.get("previous") or "?",
+                ver=lu.get("version") or "?", when=lu.get("finished_at_iso") or "?",
+                extra=("（" + str(lu.get("detail")) + "）") if lu.get("detail") else ""))
+        else:
+            lines.append("上次升级: 无记录")
+        remote = info.get("remote")
+        if isinstance(remote, dict):
+            if not remote.get("ok"):
+                lines.append(f"远端检查: 失败（{remote.get('error')}）")
+            elif remote.get("update_available"):
+                lines.append(f"远端检查: 有新版本可升级（{str(remote.get('remote'))[:10]}）")
+            else:
+                lines.append("远端检查: 已是最新")
+        return ToolResult.success("\n".join(lines),
+                                  version=info.get("version"), last_update=lu or {})
+
+    tools.append(FnTool("self_version",
+        "Show DogBuddyCn's own version, where its code came from, the result of the last "
+        "self-upgrade, and (with check_remote=true) whether the remote has a newer commit.",
+        _props(check_remote=_p("boolean", "also ask the git remote (needs network)")),
+        self_version))
+
+    async def self_update(args: dict, ctx: ToolContext) -> ToolResult:
+        need(svc.self_update, "self_update")
+        res = svc.self_update(
+            ref=str(args.get("ref") or "").strip(),
+            force=bool(args.get("force")),
+            start_delay=int(args.get("start_delay") or 45))
+        if not res.get("started"):
+            return ToolResult.failure(f"无法启动自升级: {res.get('error') or res}")
+        return ToolResult.success(
+            "自升级已在后台启动（pid {pid}）。\n"
+            "流程：等待 {d}s（让本轮对话落盘）→ 拉取代码 → 装依赖 → 重启服务 → "
+            "健康检查断言新版本号 → 不通过则自动回滚。\n"
+            "**请立刻结束本轮回复**，不要继续调用工具（服务马上会重启）。\n"
+            "告诉用户：升级进行中，约 1~2 分钟后可以再问一次「现在什么版本」查看结果。\n"
+            "升级日志: {log}".format(pid=res.get("pid"), d=res.get("start_delay"),
+                                     log=res.get("log")),
+            started=True, pid=res.get("pid"))
+
+    tools.append(FnTool("self_update",
+        "Upgrade DogBuddyCn's own code from the git remote (fetch → install deps → restart → "
+        "health check → rollback on failure). Returns immediately; the service restarts ~45s "
+        "later, so end the turn right after calling it. Only call when the user asks to "
+        "upgrade/update the software.",
+        _props(ref=_p("string", "git ref, default origin/main"),
+               force=_p("boolean", "stash local code changes instead of aborting"),
+               start_delay=_p("integer", "seconds to wait before switching code (default 45)")),
+        self_update, "shell"))
 
     return tools

@@ -37,6 +37,8 @@ class AdminService:
         config: Any,           # ConfigService
         bus: Any = None,
         max_iterations: int = 20,
+        self_status: Callable[[bool], dict] | None = None,
+        self_update: Callable[..., dict] | None = None,
     ):
         self.db = db
         self.llm_factory = llm_factory
@@ -48,6 +50,8 @@ class AdminService:
         self.config = config
         self.bus = bus
         self.max_iterations = max_iterations
+        self.self_status = self_status
+        self.self_update = self_update
 
         self.builder = ContextBuilder(memory_service=memory)
         self._sessions: dict[str, WindowSession] = {}
@@ -59,7 +63,8 @@ class AdminService:
 
         svc = AdminServices(windows=windows, jobs=jobs, sessions=sessions,
                             workspaces=workspaces, memory=memory, config=config,
-                            progress=self._progress_dict)
+                            progress=self._progress_dict,
+                            self_status=self_status, self_update=self_update)
         self.registry = ToolRegistry(gate=None, audit=db)
         self.registry.gate = _AdminGate()
         for tool in build_admin_tools(svc):
