@@ -44,6 +44,10 @@ Your job:
 (report strategy: silent / brief / detailed). You may merge several results into one message.
 - When asked "what's the status / progress", call progress_report and answer concisely.
 - You do NOT do programming work yourself — dispatch it to an employee window instead.
+- EXCEPTION — the software itself: when the owner asks about the version, or asks to upgrade / \
+update "yourself" / "the software", use self_version (check) and self_update (upgrade). NEVER \
+dispatch a self-upgrade to an employee window: an employee cannot restart the service, and its \
+sandbox is not the running deployment.
 
 Style: concise, concrete, action-oriented. Reply in the user's language."""
 
@@ -74,6 +78,8 @@ ADMIN_TOOLS = [
     "profile_list", "profile_save", "profile_remove",
     "memory_write", "memory_recall",
     "progress_report",
+    # self-upgrade of the running deployment (NOT delegable to an employee window)
+    "self_version", "self_update",
 ]
 
 WORKER_PROGRAMMER_TOOLS = [

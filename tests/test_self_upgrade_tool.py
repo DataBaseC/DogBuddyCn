@@ -191,6 +191,21 @@ def test_self_tools_fail_clearly_when_not_wired(tmp_path):
     assert not u.ok and "self_update" in u.output
 
 
+def test_admin_role_exposes_every_registered_tool():
+    """Regression: the registry had `self_version`/`self_update` but ADMIN_TOOLS did
+    not list them, so AgentLoop never showed them to the model — the agent then
+    'solved' a self-upgrade request by dispatching it to an employee window."""
+    from dogbuddy.agents.core.roles import ADMIN_TOOLS
+    from dogbuddy.agents.admin.tools import AdminServices, build_admin_tools
+
+    registered = {t.name for t in build_admin_tools(AdminServices())}
+    exposed = set(ADMIN_TOOLS)
+    assert exposed == registered, (
+        f"ADMIN_TOOLS 与注册表不一致；模型看不到: {sorted(registered - exposed)}；"
+        f"白名单里有但没注册: {sorted(exposed - registered)}")
+    assert {"self_version", "self_update"} <= exposed
+
+
 def test_status_endpoint_exposes_last_update(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from dogbuddy.config import AppConfig, LLMConfig, PathsConfig, WebConfig
