@@ -118,6 +118,15 @@ def cmd_start(args: argparse.Namespace) -> int:
     if PID_FILE.exists() and _alive(_read_pid()):
         print(f"already running (pid {_read_pid()})")
         return 1
+    try:
+        cfg = load_config(args.config)
+        if _health(cfg.web.host, cfg.web.port, expect_version=None, tries=1, delay=0) is not None:
+            print(f"already running (another instance is serving "
+                  f"http://{cfg.web.host}:{cfg.web.port}/healthz — supervised by the panel?)")
+            print("  use `manage.py update` to upgrade it, or `manage.py stop --force` first")
+            return 1
+    except Exception:  # noqa: BLE001 - config problems must not block a start attempt
+        pass
     env = dict(os.environ, DOGBUDDY_CONFIG=args.config)
     log = open(OUT_FILE, "a", encoding="utf-8")
     proc = subprocess.Popen(
@@ -131,6 +140,10 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 def cmd_stop(args: argparse.Namespace) -> int:
     pid = _read_pid()
+    if getattr(args, "force", False):
+        extra = _kill_app_processes()
+        if extra:
+            print(f"terminated {extra} supervised dogbuddy process(es)")
     if not _alive(pid):
         print("not running")
         PID_FILE.unlink(missing_ok=True)
@@ -171,6 +184,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     running = _alive(pid)
     print(f"version: {__version__}")
     print(f"process: {'running pid=' + str(pid) if running else 'stopped'}")
+    try:
+        cfg = load_config(args.config)
+        live = _health(cfg.web.host, cfg.web.port, expect_version=None, tries=1, delay=0)
+    except Exception:  # noqa: BLE001
+        live = None
+    if live is not None:
+        print(f"service: up  pid={live.get('pid')} version={live.get('version')} "
+              f"build={live.get('build')} schema={live.get('schema_version')}")
+        running = True
+    else:
+        print("service: /healthz not answering")
     data = _data_dir(args.config)
     db = data / "dogbuddy.db"
     print(f"database: {db} ({'ok' if db.exists() else 'missing'})")
@@ -362,23 +386,41 @@ def _health(host: str, port: int, expect_version: str | None = None,
 
 
 def _panel_restart() -> bool:
+    """Restart through the AegisServerPanel managed-app API.
+
+    The panel's `/api/panel/apps/{id}/restart` route is guarded by
+    `require_internal` (session + internal mode) — an **agent token is not
+    enough**, it returns 401. So this only fires when a session is available
+    (`DOGBUDDY_PANEL_PASSWORD`), and `_kill_app_processes` is the default path
+    for agent-token deployments.
+    """
     app_id = os.environ.get("DOGBUDDY_PANEL_APP_ID", "")
-    if not app_id:
+    password = os.environ.get("DOGBUDDY_PANEL_PASSWORD", "")
+    if not app_id or not password:
         return False
     try:
         cfg = load_config(DEFAULT_CONFIG)
     except Exception:  # noqa: BLE001
         cfg = None
     base = os.environ.get("DOGBUDDY_PANEL_URL") or (cfg.panel.base_url if cfg else "")
-    token = os.environ.get("DOGBUDDY_PANEL_TOKEN") or (cfg.panel.agent_token if cfg else "")
-    if not base or not token:
-        print("    面板重启跳过：缺少 base_url / agent_token")
+    if not base:
         return False
-    url = f"{base.rstrip('/')}/api/panel/apps/{app_id}/restart"
-    req = urllib.request.Request(url, method="POST", data=b"{}",
-                                 headers={"X-Agent-Token": token, "Content-Type": "application/json"})
+
+    import http.cookiejar
+
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        login = urllib.request.Request(
+            f"{base.rstrip('/')}/api/auth/login", method="POST",
+            data=json.dumps({"password": password}).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        with opener.open(login, timeout=20):
+            pass
+        req = urllib.request.Request(f"{base.rstrip('/')}/api/panel/apps/{app_id}/restart",
+                                     method="POST", data=b"{}",
+                                     headers={"Content-Type": "application/json"})
+        with opener.open(req, timeout=30) as resp:
             ok = 200 <= resp.status < 300
         print(f"    已请求面板重启托管应用 {app_id}: {'ok' if ok else 'failed'}")
         return ok
@@ -387,18 +429,77 @@ def _panel_restart() -> bool:
         return False
 
 
-def _restart_service(args: argparse.Namespace) -> int:
+def _kill_app_processes(app_dir: Path | None = None) -> int:
+    """TERM every `python -m dogbuddy.main` process except ourselves.
+
+    Used when the app is supervised externally (panel managed app / supervisor
+    script): killing it is how we hand the restart to the supervisor, which
+    brings it back **with the new code on disk**. Without this, a supervised
+    deployment keeps running the old process and the port never frees up.
+    """
+    if IS_WINDOWS:
+        return 0
+    import signal
+
+    me = os.getpid()
+    killed = 0
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == me:
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue
+        if "dogbuddy.main" not in cmdline and "dogbuddy/main.py" not in cmdline:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed += 1
+        except OSError:
+            pass
+    return killed
+
+
+def _port_answers(host: str, port: int) -> bool:
+    return _health(host, port, expect_version=None, tries=1, delay=0) is not None
+
+
+def _restart_service(args: argparse.Namespace, host: str = "", port: int = 0) -> int:
     cmd = os.environ.get("DOGBUDDY_RESTART_CMD", "")
     if cmd:
         print(f"==> 重启（DOGBUDDY_RESTART_CMD）: {cmd}")
-        return subprocess.run(cmd, shell=True).returncode
+        rc = subprocess.run(cmd, shell=True).returncode
+        if port:
+            _health(host, port, expect_version=None, tries=15, delay=1.0)
+        return rc
+
     if _panel_restart():
         print("==> 已委托面板重启")
         return 0
+
     if not IS_WINDOWS and Path("/run/systemd/system").is_dir():
         print(f"==> systemctl restart {SERVICE_NAME}")
-        return subprocess.run(["systemctl", "restart", SERVICE_NAME]).returncode
+        rc = subprocess.run(["systemctl", "restart", SERVICE_NAME]).returncode
+        if port:
+            _health(host, port, expect_version=None, tries=15, delay=1.0)
+        return rc
+
+    # externally supervised (panel managed app): kill it and wait for the supervisor
+    supervised = bool(os.environ.get("DOGBUDDY_PANEL_APP_ID"))
+    if supervised or _port_answers(host, port):
+        killed = _kill_app_processes()
+        if killed:
+            print(f"==> 已终止 {killed} 个 dogbuddy 进程，等待外部守护拉起（新代码已在磁盘）")
+            if port and _health(host, port, expect_version=None, tries=20, delay=1.0) is not None:
+                return 0
+            print("    外部守护未在 20s 内拉起，改由 manage.py 自行启动")
+
     print("==> 本地 stop/start 重启")
+    if port and not os.environ.get("DOGBUDDY_PANEL_APP_ID"):
+        _kill_app_processes()
     rc = cmd_stop(args)
     if rc != 0:
         return rc
@@ -587,7 +688,7 @@ def _finish(app_dir: Path, args: argparse.Namespace, stamp: str, rollback) -> in
         return 0
 
     print(f"==> 重启服务（新版本 {new_version or '未知'}）")
-    if _restart_service(args) != 0:
+    if _restart_service(args, host, port) != 0:
         print("错误: 重启命令返回非 0", file=sys.stderr)
 
     print("==> 健康检查")
@@ -596,7 +697,7 @@ def _finish(app_dir: Path, args: argparse.Namespace, stamp: str, rollback) -> in
     if health is None:
         print("新版本未通过健康检查，回滚中…", file=sys.stderr)
         rollback()
-        _restart_service(args)
+        _restart_service(args, host, port)
         rolled = _health(host, port, expect_version=None,
                          tries=args.health_tries, delay=args.health_delay)
         if rolled is None:
@@ -669,7 +770,10 @@ def main() -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("start").set_defaults(func=cmd_start)
-    sub.add_parser("stop").set_defaults(func=cmd_stop)
+    st = sub.add_parser("stop")
+    st.add_argument("--force", action="store_true",
+                    help="also terminate externally supervised dogbuddy processes")
+    st.set_defaults(func=cmd_stop)
     sub.add_parser("restart").set_defaults(func=cmd_restart)
     sub.add_parser("status").set_defaults(func=cmd_status)
 
