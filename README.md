@@ -38,9 +38,52 @@ skills/ 目录钩子 · TaskRunner 新任务类型 · 群聊工作区 group 字�
 
 ```bash
 git clone <this repo> dogbuddy && cd dogbuddy
-sudo ./install.sh          # venv + 依赖 + /etc/dogbuddy/ + systemd 单元
+sudo bash install.sh         # venv + 依赖 + /etc/dogbuddy/config.yaml + /var/lib/dogbuddy/
 sudo vim /etc/dogbuddy/config.yaml   # 填 LLM key/base_url/model、面板 token、白名单
-sudo systemctl enable --now dogbuddy # 或 python manage.py start
+sudo systemctl enable --now dogbuddy # 有 systemd；容器/PRoot 见下
+```
+
+无 systemd 的环境（容器 / PRoot / Termux）把本软件注册为 **AegisServerPanel 常驻应用**
+即可获得崩溃拉起、日志轮转、开机自启：
+
+```bash
+python3 scripts/register_panel_app.py \
+  --panel http://127.0.0.1:8787 --password '<面板密码>' \
+  --app-dir "$PWD" --config /etc/dogbuddy/config.yaml
+```
+
+安装脚本输出里也能看到同样的指引。离线安装（目标机无 PyPI 通路）在执行 `install.sh`
+之前放一个 `wheels/` 目录即可，pip 会自动切 `--no-index`。
+
+## 自我更新 / 升级
+
+升级链与 AegisServerPanel 的 `serverpanel --update` 同构：**锁 → 脏树检查 → 备份配置 →
+切换代码 → 装依赖 → 重启 → `/healthz` 断言新版本号 → 失败自动回滚**。
+
+```bash
+python manage.py version                    # 当前运行 / 磁盘 / git 版本
+python manage.py update --check             # 只看更新源，不改任何东西
+python manage.py update                     # git：跟随 config update.ref（默认 origin/main）
+python manage.py update --from-bundle x.tar.gz   # 离线包（推荐在无 GitHub 通路的机器上）
+python manage.py update --from-url https://…/dogbuddy-x.tar.gz
+```
+
+关键行为：
+
+- **旧服务全程不中断**，直到新版本通过健康检查；检查不过会自动回退代码、重装依赖、重启并复查
+- 配置在代码目录之外（`/etc/dogbuddy/config.yaml`），升级永不触碰；升级前仍会额外备份一份
+- 版本权威是 `dogbuddy/__init__.py` 的 `__version__`；`VERSION` 文件只是部署来源标记
+- 数据库升级走 `schema_version` 表 + `dogbuddy/db.py` 的 `_MIGRATIONS`，启动时幂等执行
+- 重启方式按优先级自动选择：`DOGBUDDY_RESTART_CMD` → 面板会话 API → systemd → 终止被托管的
+  进程并等外部守护拉起 → 本地 stop/start
+- 有本地 git 改动时默认中止（`--force` 会先 `git stash`）；`update.lock` 自身不算改动
+
+打包一个可离线安装的发布包（在开发机上执行）：
+
+```bash
+python scripts/make_bundle.py --with-wheels \
+  --platform manylinux2014_aarch64 --python-version 3.12 --abi cp312
+# → dist/dogbuddy-<version>.tar.gz（代码 + wheels/，目标机无网也能装）
 ```
 
 数据目录（默认 `/etc/dogbuddy/`）：`config.yaml` · `dogbuddy.db` · `memory/` · `logs/` · `checkpoints/` · `workspaces/`。

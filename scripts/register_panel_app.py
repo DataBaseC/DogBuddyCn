@@ -69,6 +69,11 @@ def main() -> int:
     ap.add_argument("--agent-token", default="", help="panel agent token (stored in the app env)")
     ap.add_argument("--port", type=int, default=8100, help="web console port (documentation only)")
     ap.add_argument("--autostart", action="store_true", default=True)
+    ap.add_argument("--restart", default="always", choices=["never", "on-failure", "always"],
+                    help="panel restart policy (default always — a crash loop during a bad "
+                         "upgrade must not exhaust the retry budget before the rollback runs)")
+    ap.add_argument("--max-restarts", type=int, default=100)
+    ap.add_argument("--restart-delay", type=float, default=5.0)
     ap.add_argument("--no-start", action="store_true", help="register but do not start")
     ap.add_argument("--unregister", action="store_true", help="stop and delete the managed app")
     args = ap.parse_args()
@@ -120,9 +125,9 @@ def main() -> int:
         "cwd": str(app_dir),
         "env": env,
         "autostart": bool(args.autostart),
-        "restart": "on-failure",
-        "max_restarts": 10,
-        "restart_delay": 3.0,
+        "restart": args.restart,
+        "max_restarts": args.max_restarts,
+        "restart_delay": args.restart_delay,
     }
 
     if existing:
