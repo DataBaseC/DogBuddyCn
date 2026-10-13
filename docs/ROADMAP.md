@@ -100,22 +100,52 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 
 ## 2. P0 — 用户明确反馈的问题（优先修）
 
-### 2.1 【UI】弹窗关闭按钮 & 任务表没有任何样式
+### 2.1 【UI】"按钮不显示" —— 需要视觉复现（静态样式/图标缺失已被排除）
 
-**现象**：控制台里弹窗右上角的关闭按钮、任务视图的表格看起来"没有/错位/不显示"。
+**先说结论：我没有复现出来，原因不在静态标记或 CSS。**
 
-**证据**：以下 class 在代码里被使用，但 CSS 里**完全没有定义**：
+已做的静态审计（脚本已入库，可随时重跑）：
 
-| class | 使用位置 | 后果 |
+```bash
+python scripts/audit_ui.py            # 报告
+python scripts/audit_ui.py --strict   # 有发现则非零退出，可挂 CI
+```
+
+结果：
+
+```
+[CSS] 静态使用 244 个 class，其中 3 个没有定义
+    ★ .chat-time   ★ .jobs-table   ★ .modal-x
+[图标] 引用 21 个，#ic- 定义 44 个，缺失 0 个
+```
+
+那 3 个未定义的类**经人工核对都是冗余钩子，不会造成任何元素不可见**：
+
+| class | 依赖的已有样式 | 影响 |
 |---|---|---|
-| `modal-x` | `dogbuddy/web/static/js/ui.js:124`、`:158`、`:192` | 弹窗关闭按钮裸奔（无尺寸/位置/悬停样式），看起来像消失 |
-| `jobs-table` | `dogbuddy/web/static/index.html:207` | 任务表格无表格样式，列错位 |
+| `modal-x`（`js/ui.js:124/158/192` 弹窗关闭按钮） | `.icon-btn`(`css/base.css:253` 尺寸/边框/悬停齐全) + `.modal-head`(`base.css:478` 已是 `flex` + `space-between`) | 无 |
+| `jobs-table`（`index.html:207` 任务表） | `.table`(`base.css:383`) + `.th-actions`(`base.css:399`) | 无 |
+| `chat-time`（`js/views-chat.js` 时间戳） | `.chat-meta` | 无 |
 
-**修法**：在 `dogbuddy/web/static/css/views.css`（或 `base.css`）补 `.modal-x`（绝对定位右上、
-尺寸 28×28、配色用现有变量 `--tx-3` / `--bg-4`）和 `.jobs-table`（沿用 `.table` 的写法）。
+图标引用 21 个、定义 44 个、**缺失 0** → 所有图标按钮都能渲染。
 
-**验收**：打开任意弹窗能看到右上角关闭按钮且有悬停态；任务视图表格列对齐、有表头样式。
-建议顺带做一次全量审计：把 `class="..."` 里出现的所有 class 与 CSS 定义集合做差集。
+**因此请按下面的清单在浏览器里复现并定位**（这是外包接手的第一件事）：
+
+1. 打开页面 → `F12` → **Console**：任何视图抛 JS 异常，都会导致该视图后续 DOM 不再渲染。
+   这是最可能的原因，请把报错原文记下来。
+2. **Network**：确认 `/assets/js/*.js`、`/assets/css/*.css` 返回 200 而不是 304 缓存了旧版本
+   （升级后前端文件同名，浏览器缓存很容易导致"新版后端 + 旧版前端"）。**先 Ctrl+Shift+R 强刷一次**。
+3. 确认已登录：未登录时是 `login-mask` 覆盖层，页面元素看起来像"消失"。
+4. **逐视图截图**：总览 / 对话 / 工位 / 任务 / 文件管理器 / 日志审计 / 设置 —— 记录哪几个视图正常、哪几个异常。
+5. 若某视图整体空白：检查 `js/app.js` 的 `renderView()` 里对应 `case` 分支，
+   以及 `global.DogBuddyViews.X` 是否存在（`index.html` 底部的 `<script>` 顺序错了会让 `X` 为 `undefined`，
+   新增视图模块必须排在 `app.js` **之前**）。
+6. 窄窗口下是否被 `css/views.css` 末尾的响应式规则隐藏。
+
+**验收**：修复前后各一张截图 + Console 报错文本；`python scripts/audit_ui.py --strict` 通过。
+
+> 顺带建议：控制台的静态资源没有版本指纹（`/assets/js/app.js` 永远是同一个 URL）。
+> 建议加 `?v=<__version__>` 或改成长缓存 + hash 文件名，从根上消除"升级后 UI 看着没变"的假象。
 
 ### 2.2 【UI】工具调用不显示工具名
 
