@@ -95,6 +95,27 @@ class OpenAICompatProvider(Provider):
             content=msg.get("content"),
             tool_calls=tool_calls,
             finish_reason=choice.get("finish_reason", "stop"),
-            usage={k: int(v or 0) for k, v in usage.items()} if usage else {},
+            usage=_usage_dict(usage),
             raw=data,
         )
+
+
+def _usage_dict(usage: dict[str, Any]) -> dict[str, Any]:
+    """Normalise `usage` without assuming every value is a number.
+
+    Real endpoints return nested objects (OpenAI-compatible relays add
+    `prompt_tokens_details`, `completion_tokens_details`, cached/reasoning
+    counters, …). A blind `int(v)` blew up the first real turn with
+    "int() argument must be ... not 'dict'".
+    """
+    out: dict[str, Any] = {}
+    for key, value in (usage or {}).items():
+        if isinstance(value, bool):
+            out[key] = int(value)
+        elif isinstance(value, (int, float)):
+            out[key] = int(value)
+        elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            out[key] = int(value)
+        else:
+            out[key] = value  # keep nested detail objects as-is
+    return out
