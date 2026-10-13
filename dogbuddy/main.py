@@ -16,7 +16,7 @@ from .config import AppConfig, load_config, save_config
 from .cron.jobs import JobStore
 from .cron.scheduler import CronScheduler
 from .db import Database
-from .events.bus import Event, EventBus
+from .events.bus import CONFIRM_REQUEST, WORKER_QUESTION, Event, EventBus
 from .gateway.adapters.onebot_v11 import OneBotV11Adapter
 from .gateway.router import Router
 from .llm.profile_registry import LLMProfileRegistry
@@ -75,6 +75,11 @@ class DogBuddyApp:
             sessions=self.sessions, workspaces=self.workspaces, memory=self.memory,
             config=self.config_svc, bus=self.bus)
         self.notifiers = build_notifiers(config.notify, self.adapter, config.gateway.push_target)
+        # worker questions / confirm requests must reach the admin conversation:
+        # in v1.3 `AdminService.notify()` was never called, so a worker could ask
+        # and nobody would ever answer. The admin decides what to do with them.
+        self.bus.subscribe(WORKER_QUESTION, self._on_worker_question)
+        self.bus.subscribe(CONFIRM_REQUEST, self._on_worker_confirm)
         self.report = ReportService(
             bus=self.bus, notifiers=self.notifiers, llm_factory=self.llm_factory,
             default_strategy=self.config_svc.get("report.default_strategy", "brief"))
@@ -133,6 +138,40 @@ class DogBuddyApp:
         self._rate_limit = {"waiting": True, "attempt": attempt, "window_id": profile or ""}
         self.bus.emit(Event(type="rate_limit.status",
                             payload={"attempt": attempt, "delay": delay, "profile": profile}))
+
+    def _llm_ready(self) -> bool:
+        return bool(self.config.llm.api_key) or self.config.llm.provider == "ollama"
+
+    async def _on_worker_question(self, event: Event) -> None:
+        """Feed a worker's pending question into the admin session and let it react."""
+        if not self._llm_ready():
+            logger.info("worker question (no LLM configured): %s", event.payload.get("question", ""))
+            return
+        payload = event.payload or {}
+        question = str(payload.get("question") or "").strip()
+        if not question:
+            return
+        who = payload.get("window_name") or payload.get("window_id") or "?"
+        try:
+            await self.admin.notify(f"工位「{who}」提问：{question}")
+        except Exception:  # noqa: BLE001
+            logger.exception("admin notify failed for worker question")
+
+    async def _on_worker_confirm(self, event: Event) -> None:
+        """A dangerous command needs a human decision — surface it to the admin."""
+        payload = event.payload or {}
+        reason = str(payload.get("reason") or "").strip()
+        if not reason:
+            return
+        who = payload.get("window_name") or payload.get("window_id") or "?"
+        logger.warning("confirm requested by %s: %s", who, reason)
+        if not self._llm_ready():
+            return
+        try:
+            await self.admin.notify(
+                f"工位「{who}」请求确认危险操作：{reason}。请判断是否放行，并说明理由。")
+        except Exception:  # noqa: BLE001
+            logger.exception("admin notify failed for confirm request")
 
     def _file_roots(self) -> list[str]:
         roots = [self.config.paths.workspaces]
