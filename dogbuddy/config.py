@@ -104,6 +104,16 @@ class NotifyConfig(BaseModel):
     channels: list[NotifyChannelConfig] = Field(default_factory=list)  # empty → console only
 
 
+class UpdateConfig(BaseModel):
+    """Self-upgrade defaults (see manage.py update)."""
+
+    source: Literal["git", "bundle"] = "git"
+    ref: str = "origin/main"           # git ref followed when source=git
+    bundle_url: str = ""               # used when source=bundle
+    health_tries: int = Field(default=30, ge=1, le=600)
+    health_delay: float = Field(default=1.0, ge=0.1, le=60.0)
+
+
 class AppConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     llm_profiles: dict[str, LLMConfig] = Field(
@@ -114,6 +124,7 @@ class AppConfig(BaseModel):
     panel: PanelConfig = Field(default_factory=PanelConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     notify: NotifyConfig = Field(default_factory=NotifyConfig)
+    update: UpdateConfig = Field(default_factory=UpdateConfig)
 
     # ---- LLM profiles ----
     def llm_for(self, profile: str | None = None) -> LLMConfig:

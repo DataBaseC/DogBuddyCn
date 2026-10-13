@@ -1,0 +1,7 @@
+# DogBuddyCn — keep shell scripts LF so they run on the Ubuntu target
+* text=auto eol=lf
+*.sh text eol=lf
+*.service text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf

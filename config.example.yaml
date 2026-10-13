@@ -35,9 +35,15 @@ web:
 
 panel:                             # AegisServerPanel integration (never modified)
   enabled: true
-  base_url: http://127.0.0.1:8080
+  base_url: http://127.0.0.1:8787
   agent_token: ""                  # or DOGBUDDY_PANEL_TOKEN
 
 paths:
-  data_dir: /etc/dogbuddy
-  workspaces_dir: /etc/dogbuddy/workspaces
+  data_dir: /var/lib/dogbuddy
+  workspaces_dir: /var/lib/dogbuddy/workspaces
+
+update:                            # self-upgrade (manage.py update)
+  source: git                      # git | bundle
+  ref: origin/main                 # git ref to follow when source=git
+  health_tries: 30                 # /healthz polls before declaring failure (×1s)
+

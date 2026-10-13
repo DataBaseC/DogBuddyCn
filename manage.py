@@ -616,6 +616,20 @@ def cmd_update(args: argparse.Namespace) -> int:
     if not IS_WINDOWS and hasattr(os, "geteuid") and os.geteuid() != 0:
         print("警告: 未以 root 运行；若代码/数据目录受限，升级可能失败", file=sys.stderr)
 
+    try:
+        cfg = load_config(args.config)
+    except Exception as e:  # noqa: BLE001
+        print(f"错误: 配置无法加载: {e}", file=sys.stderr)
+        return 1
+
+    # CLI flags win; otherwise config `update:` section supplies the defaults
+    if not args.ref:
+        args.ref = cfg.update.ref
+    if args.health_tries is None:
+        args.health_tries = cfg.update.health_tries
+    if args.health_delay is None:
+        args.health_delay = cfg.update.health_delay
+
     has_git = (app_dir / ".git").exists()
     if not (args.from_bundle or args.from_url or has_git):
         print("错误: 当前是 zip/快照安装（无 .git），无法增量升级。\n"
@@ -627,7 +641,9 @@ def cmd_update(args: argparse.Namespace) -> int:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     if args.check:
-        print(f"    更新源: {'git ' + (args.ref or 'origin/main') if has_git else (args.from_url or args.from_bundle)}")
+        source = (args.from_url or args.from_bundle) if (args.from_bundle or args.from_url) \
+            else f"git {args.ref}"
+        print(f"    更新源: {source}")
         print("    --check 模式：不执行任何变更。")
         return 0
 
@@ -683,8 +699,10 @@ def main() -> int:
     up.add_argument("--no-backup", action="store_true", help="skip the config backup step")
     up.add_argument("--no-restart", action="store_true", help="install only, do not restart the service")
     up.add_argument("--check", action="store_true", help="report the update source and exit")
-    up.add_argument("--health-tries", type=int, default=HEALTH_TRIES)
-    up.add_argument("--health-delay", type=float, default=HEALTH_DELAY)
+    up.add_argument("--health-tries", type=int, default=None,
+                    help="/healthz poll attempts (default: config update.health_tries = 30)")
+    up.add_argument("--health-delay", type=float, default=None,
+                    help="seconds between /healthz polls (default: config update.health_delay = 1.0)")
     up.set_defaults(func=cmd_update)
 
     args = p.parse_args()
