@@ -141,12 +141,18 @@ def create_app(svc: WebServices) -> FastAPI:
 
     @base.get("/api/status", dependencies=auth_deps)
     def status() -> dict:
+        app_cfg = getattr(svc, "app_config", None)
+        default_model = app_cfg.effective_model(None, "") if app_cfg is not None else ""
         return {
             "running": True,
             "rate_limit": svc.rate_limit_status(),
             "windows": len(svc.windows.list()),
             "jobs": len(svc.jobs.list()),
             "llm_configured": bool(svc.config and svc.config.llm_configured()),
+            # what a window/job without an override will actually use — the admin
+            # agent uses this same default, so workers inherit the admin's model
+            "llm_model": default_model,
+            "llm_profile": (app_cfg.active_llm_profile if app_cfg is not None else ""),
         }
 
     @base.get("/api/overview", dependencies=auth_deps)

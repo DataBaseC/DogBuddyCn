@@ -134,6 +134,14 @@ class AppConfig(BaseModel):
             return self.llm_profiles[name]
         return self.llm
 
+    def effective_model(self, profile: str | None = None, model: str = "") -> str:
+        """The model a window/run actually uses: explicit override → profile → default.
+
+        Single source of truth for the resolution rule; the provider registry and
+        the console DTOs both call it so the UI can never disagree with reality.
+        """
+        return model or self.llm_for(profile).model
+
     def profile_names(self) -> list[str]:
         return [""] + sorted(self.llm_profiles)
 

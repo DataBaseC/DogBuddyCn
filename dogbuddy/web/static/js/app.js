@@ -150,8 +150,10 @@
     },
 
     /* ---------------- 系统状态 ---------------- */
+    llmModel: '',
     refreshStatus: function () {
       return A.status().then(function (st) {
+        App.llmModel = st.llm_model || '';
         var dot = document.getElementById('sys-dot');
         var title = document.getElementById('sys-running');
         var rate = document.getElementById('sys-rate');

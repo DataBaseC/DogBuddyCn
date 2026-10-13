@@ -84,11 +84,14 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         return ToolResult.success(f"window created: {w.id} ({w.name})", window_id=w.id)
 
     tools.append(FnTool("window_create",
-        "Create an employee window (workstation).",
+        "Create an employee window (workstation). Omit `model`/`llm_profile` unless the user "
+        "asked for a specific model: empty means the new window inherits the same model the "
+        "admin itself runs on, which is the desired default.",
         _props(name=_p("string", "window name", True), role=_p("string", "role, default worker_programmer"),
-               workspace=_p("string", "workspace path", True), model=_p("string", "model override"),
+               workspace=_p("string", "workspace path", True),
+               model=_p("string", "model override; leave empty to inherit the admin's model"),
                mode=_p("string", "BUILD|PLAN|AUTO, default BUILD"),
-               llm_profile=_p("string", "named LLM config set to use (empty = default)")),
+               llm_profile=_p("string", "named LLM config set to use (empty = inherit)")),
         window_create, "write"))
 
     async def window_list(args: dict, ctx: ToolContext) -> ToolResult:

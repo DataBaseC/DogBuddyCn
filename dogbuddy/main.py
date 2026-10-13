@@ -67,7 +67,8 @@ class DogBuddyApp:
             db=self.db, llm_factory=self.llm_factory, bus=self.bus, panel=self.panel,
             memory=self.memory, checkpoints_dir=config.checkpoints_dir,
             threshold=config.llm.compact_threshold,
-            max_context_tokens=config.llm.max_context_tokens)
+            max_context_tokens=config.llm.max_context_tokens,
+            model_resolver=config.effective_model)
         self.sessions = SessionManager(self.windows, self.db)
         self.workspaces = WorkspaceManager(config.paths.workspaces, self.db)
         self.job_store = JobStore(self.db)

@@ -235,7 +235,8 @@
           statusDot(w.status) +
           '<div class="win-item-info">' +
           '<div class="win-item-name">' + U.esc(w.name) + '</div>' +
-          '<div class="win-item-sub">' + U.esc(w.role || '') + ' · ' + U.esc(w.model || '未设模型') + '</div>' +
+          '<div class="win-item-sub">' + U.esc(w.role || '') + ' · ' + U.esc(w.model || w.resolved_model || '未设模型') +
+          (w.model ? '' : '（继承）') + '</div>' +
           '</div>' +
           (key === 'running' || key === 'busy' ? '<span class="badge badge-blue">运行</span>' : '') +
           '</div>';
@@ -397,7 +398,11 @@
         '<div class="win-detail-meta">' +
         '<span class="meta-pill">' + U.icon('user', 'sm') + U.esc(w.role || 'worker') + '</span>' +
         '<span class="meta-pill">' + U.icon('layers', 'sm') + U.esc(w.mode || 'BUILD') + '</span>' +
-        '<span class="meta-pill">' + U.icon('cpu', 'sm') + '<span class="mono">' + U.esc(w.model || '未设置') + '</span></span>' +
+        '<span class="meta-pill">' + U.icon('cpu', 'sm') +
+        (w.model
+          ? '<span class="mono">' + U.esc(w.model) + '</span><span class="hint-inline">指定</span>'
+          : '<span class="mono">' + U.esc(w.resolved_model || '未设置') + '</span><span class="hint-inline">继承</span>') +
+        '</span></span>' +
         (w.llm_profile ? '<span class="meta-pill">' + U.icon('layers', 'sm') + '配置套 <span class="mono">' + U.esc(w.llm_profile) + '</span></span>' : '') +
         (w.tokens ? '<span class="meta-pill">' + U.icon('activity', 'sm') + '<span class="num">' + U.esc(w.tokens) + '</span> tokens</span>' : '') +
         (w.current_task ? '<span class="meta-pill">' + U.icon('play', 'sm') + U.esc(w.current_task) + '</span>' : '') +
@@ -561,8 +566,10 @@
         body:
           '<div class="field"><span class="field-label">模型（可输入，可从已保存配置拉取）</span>' +
           '<div style="display:flex;gap:8px">' +
-          '<input class="input" id="model-input" list="model-options" value="' + U.esc(w.model || '') + '" placeholder="如 gpt-4o-mini">' +
+          '<input class="input" id="model-input" list="model-options" value="' + U.esc(w.model || '') + '" placeholder="留空 = 继承管理员模型' +
+          (w.resolved_model && !w.model ? '（当前 ' + U.esc(w.resolved_model) + '）' : '') + '">' +
           '<button class="btn btn-soft btn-sm" id="model-fetch" type="button">拉取模型</button></div>' +
+          '<div class="hint">留空即跟随管理员使用的模型；填了则此工位单独使用该模型。</div>' +
           '<datalist id="model-options"></datalist></div>' +
           '<div class="field"><span class="field-label">模式</span>' +
           '<select class="select" id="mode-input">' +
@@ -641,10 +648,12 @@
           '<input class="input" id="nw-ws" placeholder="留空则使用默认工作区"></div>' +
           '<div class="set-two">' +
           '<div class="field"><span class="field-label">模型（可选）</span>' +
-          '<input class="input" id="nw-model" placeholder="留空则使用全局默认模型"></div>' +
+          '<input class="input" id="nw-model" placeholder="留空 = 继承管理员模型' +
+          (global.App && global.App.llmModel ? '（当前 ' + U.esc(global.App.llmModel) + '）' : '') + '">' +
+          '<div class="hint">员工默认与管理员的模型保持一致；只有需要单独指定时才填。</div></div>' +
           '<div class="field"><span class="field-label">LLM 配置套</span>' +
           '<select class="select" id="nw-profile"><option value="">默认</option></select>' +
-          '<div class="hint">空 = 使用默认配置套</div></div>' +
+          '<div class="hint">空 = 跟随全局默认配置套</div></div>' +
           '</div>',
         buttons: [
           { label: '取消', cls: 'btn-ghost' },

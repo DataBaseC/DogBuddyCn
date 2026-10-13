@@ -98,3 +98,57 @@ def test_parse_handles_empty_and_string_tool_arguments():
     assert parse_tool_arguments({"already": "dict"}) == {"already": "dict"}
     resp = OpenAICompatProvider._parse({"choices": [{"message": {"content": "hi"}}]})
     assert resp.content == "hi" and resp.usage == {} and resp.tool_calls == []
+
+
+# --------------------------------------------------------------------------- model inheritance
+def _cfg():
+    from dogbuddy.config import AppConfig, LLMConfig
+    cfg = AppConfig(llm=LLMConfig(base_url="http://x/v1", api_key="k", model="admin-model"))
+    cfg.llm_profiles["cheap"] = LLMConfig(base_url="http://x/v1", api_key="k", model="cheap-model")
+    return cfg
+
+
+def test_effective_model_prefers_override_then_profile_then_default():
+    from dogbuddy.config import AppConfig, LLMConfig
+    cfg = _cfg()
+    assert cfg.effective_model(None, "") == "admin-model"          # 员工留空 → 继承
+    assert cfg.effective_model(None, "my-model") == "my-model"     # 手动指定覆盖
+    assert cfg.effective_model("cheap", "") == "cheap-model"       # 配置套
+    assert cfg.effective_model("cheap", "my-model") == "my-model"  # 指定优先于配置套
+    cfg.active_llm_profile = "cheap"
+    assert cfg.effective_model(None, "") == "cheap-model"          # 活动配置套 = 管理员所用
+
+
+def test_registry_honours_model_override_without_bleeding_between_windows():
+    from dogbuddy.llm.profile_registry import LLMProfileRegistry
+    reg = LLMProfileRegistry(_cfg())
+
+    inherited = reg.provider_for(None, None)
+    assert inherited.model_name == "admin-model"
+
+    overridden = reg.provider_for(None, "worker-model")
+    assert overridden.model_name == "worker-model"
+
+    # the override must not mutate the shared/default provider
+    assert reg.provider_for(None, None).model_name == "admin-model"
+    assert reg.provider_for(None, None) is inherited
+    assert reg.provider_for(None, "worker-model") is overridden
+
+    # profile + override combinations are cached independently
+    assert reg.provider_for("cheap", None).model_name == "cheap-model"
+    assert reg.provider_for("cheap", "worker-model").model_name == "worker-model"
+
+
+def test_registry_invalidate_clears_model_variants():
+    from dogbuddy.llm.profile_registry import LLMProfileRegistry
+    reg = LLMProfileRegistry(_cfg())
+    a = reg.provider_for(None, "m1")
+    reg.invalidate(None)
+    assert reg.provider_for(None, "m1") is not a
+    # profile-scoped invalidation only drops that profile's entries
+    b = reg.provider_for("cheap", None)
+    reg.invalidate("cheap")
+    assert reg.provider_for("cheap", None) is not b
+    c = reg.provider_for(None, "kept")
+    reg.invalidate("cheap")
+    assert reg.provider_for(None, "kept") is c

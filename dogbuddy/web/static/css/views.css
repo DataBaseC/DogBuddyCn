@@ -667,8 +667,14 @@ tr.history-row td { background: rgba(255, 255, 255, 0.02); padding: 0 12px 14px;
 /* ---------------- 白名单角色下拉 ---------------- */
 .wl-role { width: 100%; min-width: 132px; height: 30px; font-size: 12px; }
 
-/* ---------------- 对话视图（控制台 ↔ 管理员 Agent） ---------------- */
-.chat-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* ---------------- 对话视图（控制台 ↔ 管理员 Agent） ---------------- */.chat-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* 工位上的“继承 / 指定”标记 */
+.hint-inline {
+  margin-left: 6px; padding: 0 5px; border-radius: 4px;
+  font-size: 10px; line-height: 15px; color: var(--tx-3);
+  background: var(--bg-4); border: 1px solid var(--line);
+}
 .chat-card {
   display: flex; flex-direction: column; min-height: 420px;
   height: calc(100vh - 240px);

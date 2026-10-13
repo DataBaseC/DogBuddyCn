@@ -27,7 +27,9 @@ class LLMProfileRegistry:
         """on_wait_hook(profile_name, attempt, delay) — surfaced for UI rate-limit status."""
         self.cfg = app_config
         self.on_wait_hook = on_wait_hook
-        self._cache: dict[str, Any] = {}
+        # keyed by (profile, model): a per-window model override must not mutate a
+        # shared provider, or one window's model would leak into every other one
+        self._cache: dict[tuple[str, str], Any] = {}
 
     # ------------------------------------------------------------- lookup
     def names(self) -> list[str]:
@@ -37,42 +39,44 @@ class LLMProfileRegistry:
         """→ the LLMConfig section for this profile name."""
         return self.cfg.llm_for(profile)
 
-    def get(self, profile: str | None = None) -> Any:
-        """→ a (cached) provider instance for the profile."""
-        name = profile or ""
-        provider = self._cache.get(name)
+    def get(self, profile: str | None = None, model: str | None = None) -> Any:
+        """→ a (cached) provider instance for this profile + optional model override."""
+        key = ((profile or ""), (model or ""))
+        provider = self._cache.get(key)
         if provider is None:
-            provider = self._build(profile)
-            self._cache[name] = provider
+            provider = self._build(profile, model)
+            self._cache[key] = provider
         return provider
 
-    def factory(self, profile: str | None = None) -> Callable[[], Any]:
-        """A zero-arg factory pinned to one profile (for windows/tools)."""
-        return lambda: self.get(profile)
+    def factory(self, profile: str | None = None, model: str | None = None) -> Callable[[], Any]:
+        """A zero-arg factory pinned to one profile/model (for windows/tools)."""
+        return lambda: self.get(profile, model)
 
-    def provider_for(self, profile: str | None = None) -> Any:
-        """Callable-compatible resolver: `provider_for()` **and** `provider_for("name")`
-        both return a provider instance.
+    def provider_for(self, profile: str | None = None, model: str | None = None) -> Any:
+        """Callable-compatible resolver: returns a provider instance.
 
-        This is the shape every consumer expects (`AdminService`, `ReportService`,
-        `explore_subagent` call it with no args; `TaskRunner` and `WindowManager`
-        pass a profile name). Wiring the *unsatisfied* `factory` method here was
-        the v1.3 bug that made every real LLM call fail with
-        `'function' object has no attribute 'chat'`.
+        Every consumer calls it either with no args (`AdminService`,
+        `ReportService`, `explore_subagent`), with a profile (`TaskRunner`), or
+        with profile + model override (`WindowManager`). Wiring the *unsatisfied*
+        `factory` method here was the v1.3 bug that made every real LLM call fail
+        with "'function' object has no attribute 'chat'".
         """
-        return self.get(profile)
+        return self.get(profile, model)
 
     def invalidate(self, profile: str | None = None) -> None:
         """Drop cached provider(s) after a config edit."""
         if profile is None:
             self._cache.clear()
         else:
-            self._cache.pop(profile or "", None)
+            name = profile or ""
+            for key in [k for k in self._cache if k[0] == name]:
+                self._cache.pop(key, None)
 
     # ------------------------------------------------------------- build
-    def _build(self, profile: str | None) -> Any:
+    def _build(self, profile: str | None, model: str | None = None) -> Any:
         section = self.cfg.llm_for(profile)
         name = profile or ""
+        effective_model = self.cfg.effective_model(profile, model or "")
 
         def on_wait(attempt: int, delay: float) -> None:
             if self.on_wait_hook:
@@ -85,8 +89,8 @@ class LLMProfileRegistry:
         if (section.provider or "").lower() == "ollama":
             return OllamaProvider(
                 base_url=section.ollama_base_url or section.base_url,
-                model=section.model, retry=retry)
+                model=effective_model, retry=retry)
         return OpenAICompatProvider(
-            base_url=section.base_url, api_key=section.api_key, model=section.model,
+            base_url=section.base_url, api_key=section.api_key, model=effective_model,
             keys=section.keys, temperature=section.temperature,
             timeout=section.request_timeout, retry=retry)

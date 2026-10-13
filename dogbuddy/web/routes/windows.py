@@ -33,10 +33,11 @@ class InjectIn(BaseModel):
     text: str
 
 
-def _win_dto(w: Any, todos: list | None = None) -> dict:
+def _win_dto(w: Any, todos: list | None = None, windows: Any = None) -> dict:
     d = {"id": w.id, "name": w.name, "role": w.role, "workspace_path": w.workspace_path,
          "model": w.model, "mode": w.mode, "status": w.status,
          "llm_profile": w.llm_profile,
+         "resolved_model": (windows.resolved_model(w) if windows is not None else (w.model or "")),
          "created_at": w.created_at, "updated_at": w.updated_at}
     if todos is not None:
         d["todos"] = [{"id": t.id, "content": t.content, "done": t.done} for t in todos]
@@ -51,7 +52,7 @@ def router(svc, auth_deps) -> APIRouter:
         out = []
         for w in svc.windows.list():
             st = svc.windows.status(w.id)
-            d = _win_dto(w)
+            d = _win_dto(w, windows=svc.windows)
             d.update(current_task=st.get("current_task", ""), tokens=st.get("tokens", 0))
             out.append(d)
         return out
@@ -65,7 +66,7 @@ def router(svc, auth_deps) -> APIRouter:
                                    llm_profile=body.llm_profile)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        return _win_dto(w)
+        return _win_dto(w, windows=svc.windows)
 
     @r.get("/windows/{window_id}", dependencies=auth_deps)
     def get_window(window_id: str) -> dict:
@@ -73,7 +74,7 @@ def router(svc, auth_deps) -> APIRouter:
         if w is None:
             raise HTTPException(status_code=404, detail="window not found")
         rt_todos = svc.sessions._rt(w.id).session.todo_list()
-        return _win_dto(w, todos=rt_todos)
+        return _win_dto(w, todos=rt_todos, windows=svc.windows)
 
     @r.patch("/windows/{window_id}", dependencies=auth_deps)
     def patch_window(window_id: str, body: WindowPatch) -> dict:
@@ -82,7 +83,7 @@ def router(svc, auth_deps) -> APIRouter:
             w = svc.windows.update(window_id, **fields)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        return _win_dto(w)
+        return _win_dto(w, windows=svc.windows)
 
     @r.delete("/windows/{window_id}", dependencies=auth_deps)
     def delete_window(window_id: str) -> dict:

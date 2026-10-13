@@ -57,8 +57,8 @@ def test_profile_registry_builds_and_caches(tmp_path):
     built = []
 
     class FakeReg(LLMProfileRegistry):
-        def _build(self, profile):
-            built.append(profile or "")
+        def _build(self, profile, model=None):
+            built.append((profile or "") + ("/" + model if model else ""))
             return FakeLLM()
 
     reg = FakeReg(_cfg(tmp_path))
@@ -70,6 +70,9 @@ def test_profile_registry_builds_and_caches(tmp_path):
     assert built.count("cheap") == 2  # cache dropped on config edit
     factory = reg.factory("local")
     assert factory() is reg.get("local")
+    # a model override is a distinct cache entry, not a mutation of the shared one
+    reg.get("cheap", "wan")
+    assert "cheap/wan" in built
 
 
 def test_window_binds_profile(tmp_path):

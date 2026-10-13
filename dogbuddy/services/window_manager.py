@@ -59,6 +59,7 @@ class WindowManager:
         threshold: float = 0.8,
         max_context_tokens: int = 128000,
         runners: RunnerRegistry | None = None,
+        model_resolver: Callable[[str | None, str], str] | None = None,
     ):
         self.db = db
         self.llm_factory = llm_factory
@@ -71,6 +72,9 @@ class WindowManager:
         self.builder = ContextBuilder(memory_service=memory)
         self.threshold = threshold
         self.max_context_tokens = max_context_tokens
+        # injected rule for "which model will this window actually use"
+        # (AppConfig.effective_model) — keeps the console from inventing its own
+        self.model_resolver = model_resolver
         self._runtime: dict[str, WindowRuntime] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self.gate = PermissionGate(confirm_available=True)
@@ -117,18 +121,33 @@ class WindowManager:
         if self.bus:
             self.bus.emit(Event(type=WINDOW_STATUS, payload={"window_id": window_id, "status": status}))
 
-    def _llm(self, profile: str | None = None) -> Any:
-        """Resolve a provider. Accepts both `factory(profile)` (profile registry)
-        and legacy zero-arg factories (tests / simple wiring)."""
-        if profile:
+    def _llm(self, profile: str | None = None, model: str | None = None) -> Any:
+        """Resolve a provider for a profile and/or a model override.
+
+        Accepts `factory(profile, model)` (profile registry), `factory(profile)`
+        and legacy zero-arg factories (tests / simple wiring).
+        """
+        if profile or model:
             try:
-                return self.llm_factory(profile)
+                return self.llm_factory(profile, model)
             except TypeError:
-                pass
+                try:
+                    return self.llm_factory(profile)
+                except TypeError:
+                    pass
         return self.llm_factory()
 
+    def resolved_model(self, w: Window) -> str:
+        """The model this window will actually talk to (override → profile → global)."""
+        if self.model_resolver is not None:
+            try:
+                return self.model_resolver(w.llm_profile or None, w.model or "")
+            except Exception:  # noqa: BLE001
+                pass
+        return w.model or ""
+
     def _compactor_for(self, w: Window) -> Compactor:
-        return Compactor(self._llm(w.llm_profile or None), self.db, self.memory,
+        return Compactor(self._llm(w.llm_profile or None, w.model or None), self.db, self.memory,
                          threshold=self.threshold, max_context_tokens=self.max_context_tokens)
 
     # ---------------------------------------------------------- crud facade
@@ -260,10 +279,13 @@ class WindowManager:
         w = rt.window
         role = get_role(w.role)
         profile = task.llm_profile or w.llm_profile or None
+        # per-window model override: was decorative in v1.3 (never read), so users
+        # had to set the model in several places to get any effect
+        model = w.model or None
         ctx = ToolContext(
             window_id=w.id, workspace=w.workspace_path, mode=w.mode, actor="worker",
             todo_repo=self.db, db=self.db, panel=self.panel,
-            llm_factory=(lambda p=None: self._llm(p or profile)),
+            llm_factory=(lambda p=None: self._llm(p or profile, model)),
             ask_user_fn=self._make_ask_user(w.id),
             checkpoint_root=self.checkpoints_dir,
             extra={"scheduled": bool(task.job_id), "manual": not task.job_id,
@@ -271,7 +293,7 @@ class WindowManager:
         )
         env = TaskEnv(
             window=w, session=rt.session, registry=rt.registry,
-            llm_factory=lambda p=None: self._llm(p or profile),
+            llm_factory=lambda p=None: self._llm(p or profile, model),
             builder=self.builder, compactor=self._compactor_for(w),
             ctx=ctx, tool_names=role.tool_names if role else None,
             max_iterations=self.max_iterations)
