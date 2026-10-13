@@ -8,7 +8,7 @@
   var V = global.DogBuddyViews;
 
   var TITLES = {
-    overview: '总览', windows: '工位', jobs: '任务',
+    overview: '总览', chat: '对话', windows: '工位', jobs: '任务',
     files: '文件管理器', logs: '日志审计', settings: '设置'
   };
 
@@ -120,6 +120,9 @@
       switch (App.view) {
         case 'overview':
           V.Overview.load();
+          break;
+        case 'chat':
+          if (V.Chat) V.Chat.load();
           break;
         case 'windows':
           if (params && params.win) V.Windows.selectedId = params.win;

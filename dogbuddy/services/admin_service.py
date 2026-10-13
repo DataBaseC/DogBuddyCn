@@ -7,6 +7,7 @@ management tool pack. Users never talk to employees directly (M-B rules).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable
 
@@ -50,6 +51,10 @@ class AdminService:
 
         self.builder = ContextBuilder(memory_service=memory)
         self._sessions: dict[str, WindowSession] = {}
+        # one turn per admin conversation at a time: the console (HTTP), the QQ
+        # gateway and internal notifications can all target the same session, and
+        # two AgentLoops sharing one WindowSession would interleave badly.
+        self._locks: dict[str, asyncio.Lock] = {}
         self.session = self.session_for("default")  # legacy alias for the default admin
 
         svc = AdminServices(windows=windows, jobs=jobs, sessions=sessions,
@@ -76,8 +81,34 @@ class AdminService:
     def active_admins(self) -> list[str]:
         return sorted(self._sessions)
 
+    def _lock_for(self, key: str) -> asyncio.Lock:
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        return lock
+
+    def history(self, sender: str = "default", limit: int = 100) -> list[dict[str, Any]]:
+        """Persisted conversation of one admin session (console chat view)."""
+        session = self.session_for(sender)
+        return [{"id": m.id, "role": m.role, "content": m.content,
+                 "tokens": m.tokens, "created_at": m.created_at}
+                for m in session.recent(limit)]
+
+    def reset(self, sender: str = "default") -> int:
+        """Drop the conversation history of one admin session (keeps memory/todos)."""
+        session = self.session_for(sender)
+        msgs = session.recent(100000)
+        if not msgs:
+            return 0
+        return session.drop_messages(msgs[-1].id)
+
     # ----------------------------------------------------------- conversation
     async def handle_user_message(self, text: str, sender: str = "user") -> str:
+        async with self._lock_for(sender):
+            return await self._run_turn(text, sender)
+
+    async def _run_turn(self, text: str, sender: str) -> str:
         role_spec = get_role("admin")
         session = self.session_for(sender)
         ctx = ToolContext(window_id=session.window.id, workspace=".", mode="AUTO",

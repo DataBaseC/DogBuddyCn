@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from .routes import auth as auth_routes
+from .routes import chat as chat_routes
 from .routes import files as files_routes
 from .routes import jobs as jobs_routes
 from .routes import logs as logs_routes
@@ -127,6 +128,7 @@ def create_app(svc: WebServices) -> FastAPI:
     auth_deps = [Depends(require_auth)]
 
     app.include_router(auth_routes.router(svc), prefix="/api")
+    app.include_router(chat_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(windows_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(jobs_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(files_routes.router(svc, auth_deps), prefix="/api")

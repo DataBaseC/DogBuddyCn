@@ -98,6 +98,18 @@
     status: function () { return request('GET', '/api/status'); },            /* GET /api/status */
     overview: function () { return request('GET', '/api/overview'); },        /* GET /api/overview */
 
+    /* ---------------- 控制台 ↔ 管理员对话 ---------------- */
+    adminChatAdmins: function () { return request('GET', '/api/admin/chat/admins'); },
+    adminChatMessages: function (sender, limit) {
+      return request('GET', '/api/admin/chat/messages' + qs({ sender: sender, limit: limit || 100 }));
+    },
+    adminChat: function (text, sender) {
+      return request('POST', '/api/admin/chat', { text: text, sender: sender || 'console' });
+    },
+    adminChatReset: function (sender) {
+      return request('POST', '/api/admin/chat/reset', { sender: sender || 'console' });
+    },
+
     /* ---------------- 工位 ---------------- */
     windows: {
       list: function () { return request('GET', '/api/windows'); },
