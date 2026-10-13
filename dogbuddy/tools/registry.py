@@ -1,0 +1,186 @@
+# DogBuddyCn — Tool registry & permission choke point (L4 Capability)
+# Copyright (C) 2026 DogBuddyCn contributors — AGPL-3.0
+"""ToolRegistry: uniform schema + permission adjudication for every tool.
+
+Rules (ARCHITECTURE.md):
+  - tools never import agents/; tools are capabilities, not business logic
+  - permission DECISION LOGIC (mode matrix, dangerous-command blacklist) lives in
+    L3 (agents/core/permissions.py) behind the PermissionGate port defined here;
+    the registry only calls the injected gate — so Domain rules stay testable
+    without IO and the registry stays business-free.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Callable, Protocol, runtime_checkable
+
+logger = logging.getLogger("dogbuddy.tools")
+
+
+@dataclass
+class ToolResult:
+    ok: bool
+    output: str
+    data: dict[str, Any] = field(default_factory=dict)
+    needs_confirm: bool = False  # dangerous action awaiting user IM confirmation
+
+    @classmethod
+    def success(cls, output: str = "", **data: Any) -> "ToolResult":
+        return cls(ok=True, output=output, data=data)
+
+    @classmethod
+    def failure(cls, output: str, **data: Any) -> "ToolResult":
+        return cls(ok=False, output=output, data=data)
+
+    @classmethod
+    def confirm(cls, output: str, **data: Any) -> "ToolResult":
+        return cls(ok=False, output=output, data=data, needs_confirm=True)
+
+    def as_tool_text(self) -> str:
+        if self.ok:
+            return self.output or "OK"
+        return f"[DENIED/ERROR] {self.output}" if not self.needs_confirm else f"[NEEDS_CONFIRM] {self.output}"
+
+
+@dataclass
+class ToolContext:
+    """Everything a tool may touch, injected — tools hold no globals."""
+
+    window_id: str
+    workspace: str  # workspace root path (absolute)
+    mode: str = "BUILD"  # BUILD | PLAN | AUTO
+    actor: str = "worker"  # worker | admin | system
+    # injected collaborators (ports; None when a capability is unavailable)
+    todo_repo: Any = None
+    db: Any = None
+    panel: Any = None
+    llm_factory: Callable[[], Any] | None = None  # for explore_subagent
+    ask_user_fn: Callable[[str], Any] | None = None
+    checkpoint_root: str = ""
+    memory_service: Any = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@runtime_checkable
+class Tool(Protocol):
+    """A capability unit: one tool does one thing."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]  # JSON schema for function calling
+    permission: str  # read | write | shell | network
+
+    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult: ...
+
+
+@dataclass
+class GateDecision:
+    allowed: bool
+    reason: str = ""
+    needs_confirm: bool = False
+
+
+@runtime_checkable
+class PermissionGate(Protocol):
+    """Implemented in L3 (agents/core/permissions.py), injected into the registry."""
+
+    def check(self, tool_name: str, permission: str, args: dict[str, Any], ctx: ToolContext) -> GateDecision: ...
+
+
+class AllowAllGate:
+    """Default gate for tests / admin windows."""
+
+    def check(self, tool_name: str, permission: str, args: dict[str, Any], ctx: ToolContext) -> GateDecision:
+        return GateDecision(True)
+
+
+class ToolRegistry:
+    def __init__(self, gate: PermissionGate | None = None, audit: Any = None):
+        self._tools: dict[str, Tool] = {}
+        self.gate = gate or AllowAllGate()
+        self.audit = audit  # AuditSink-compatible (actor, action, detail)
+
+    def register(self, tool: Tool) -> None:
+        if tool.name in self._tools:
+            raise ValueError(f"tool already registered: {tool.name}")
+        self._tools[tool.name] = tool
+
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
+
+    def names(self) -> list[str]:
+        return sorted(self._tools)
+
+    def schemas(self, only: list[str] | None = None) -> list[dict[str, Any]]:
+        out = []
+        for name, tool in sorted(self._tools.items()):
+            if only and name not in only:
+                continue
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                },
+            })
+        return out
+
+    async def execute(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        tool = self._tools.get(name)
+        if tool is None:
+            return ToolResult.failure(f"tool not found: {name}")
+        decision = self.gate.check(name, tool.permission, args, ctx)
+        if not decision.allowed:
+            if decision.needs_confirm:
+                self._audit(ctx, name, f"needs_confirm: {decision.reason}", args)
+                return ToolResult.confirm(decision.reason or "dangerous command, confirmation required")
+            self._audit(ctx, name, f"denied: {decision.reason}", args)
+            return ToolResult.failure(decision.reason or f"permission denied for {name}")
+        try:
+            result = await tool.execute(args, ctx)
+        except Exception as e:  # noqa: BLE001 — tool errors become tool results
+            logger.exception("tool %s crashed", name)
+            return ToolResult.failure(f"tool crashed: {e}")
+        if self.audit and tool.permission in ("write", "shell"):
+            self._audit(ctx, name, "executed" if result.ok else f"failed: {result.output[:200]}", args)
+        return result
+
+    def _audit(self, ctx: ToolContext, name: str, detail: str, args: dict[str, Any]) -> None:
+        if not self.audit:
+            return
+        try:
+            safe_args = {k: str(v)[:120] for k, v in args.items()}
+            self.audit.audit(ctx.actor, f"tool:{name}", f"{detail} args={safe_args}")
+        except Exception:  # audit must never break tooling
+            logger.warning("audit sink failed", exc_info=True)
+
+
+# ---- registry assembly helpers -------------------------------------------
+
+
+def build_registry(gate: PermissionGate | None = None, audit: Any = None,
+                   include: list[str] | None = None) -> ToolRegistry:
+    """Register the standard programmer toolbox. Import kept local so individual
+    tool modules can be tested without pulling the whole package in."""
+    from . import ask_user as _ask
+    from . import checkpoint as _ckpt
+    from . import file_ops as _file
+    from . import search_ops as _search
+    from . import server_exec as _srv
+    from . import shell_ops as _shell
+    from . import subagent as _sub
+    from . import todo_ops as _todo
+
+    registry = ToolRegistry(gate=gate, audit=audit)
+    tools: list[Tool] = [
+        *_file.all_tools(), *_shell.all_tools(), *_search.all_tools(),
+        *_todo.all_tools(), *_ckpt.all_tools(), *_sub.all_tools(),
+        _ask.AskUserTool(), _srv.ServerExecTool(),
+    ]
+    for t in tools:
+        if include and t.name not in include:
+            continue
+        registry.register(t)
+    return registry

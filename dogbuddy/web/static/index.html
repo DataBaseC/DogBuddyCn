@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DogBuddyCn · 控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z' fill='%234f8cff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/css/base.css">
+<link rel="stylesheet" href="/assets/css/views.css">
+</head>
+<body>
+
+<!-- ============================ SVG 图标精灵（1.5px 描边） ============================ -->
+<svg class="svg-sprite" aria-hidden="true" focusable="false">
+  <symbol id="ic-grid" viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/></symbol>
+  <symbol id="ic-monitor" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M9 21h6M12 17v4"/></symbol>
+  <symbol id="ic-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="ic-folder" viewBox="0 0 24 24"><path d="M3 7.5A2 2 0 0 1 5 5.5h3.7l1.6 2H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="ic-doc" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M10 12h6M10 16h6"/></symbol>
+  <symbol id="ic-slider" viewBox="0 0 24 24"><path d="M4 8h8M17 8h3M4 16h3M12 16h8"/><circle cx="14.5" cy="8" r="2.2"/><circle cx="9.5" cy="16" r="2.2"/></symbol>
+  <symbol id="ic-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></symbol>
+  <symbol id="ic-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></symbol>
+  <symbol id="ic-logout" viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M9 12h11M16 8l4 4-4 4"/></symbol>
+  <symbol id="ic-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="ic-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6.5 7l1 13h9l1-13M10 11v5M14 11v5"/></symbol>
+  <symbol id="ic-edit" viewBox="0 0 24 24"><path d="M4 20h4L20 8l-4-4L4 16z"/><path d="M14.5 5.5l4 4"/></symbol>
+  <symbol id="ic-play" viewBox="0 0 24 24"><path d="M8 5.5l11 6.5-11 6.5z"/></symbol>
+  <symbol id="ic-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
+  <symbol id="ic-send" viewBox="0 0 24 24"><path d="M21 3L10.5 13.5"/><path d="M21 3l-6.8 18-3.7-7.5L3 9.8z"/></symbol>
+  <symbol id="ic-check" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></symbol>
+  <symbol id="ic-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="ic-chevron-d" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="ic-chevron-r" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+  <symbol id="ic-chevron-l" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></symbol>
+  <symbol id="ic-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></symbol>
+  <symbol id="ic-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5M5 20h14"/></symbol>
+  <symbol id="ic-file-plus" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M12 11v6M9 14h6"/></symbol>
+  <symbol id="ic-folder-plus" viewBox="0 0 24 24"><path d="M3 7.5A2 2 0 0 1 5 5.5h3.7l1.6 2H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></symbol>
+  <symbol id="ic-save" viewBox="0 0 24 24"><path d="M5 5h11l3 3v11H5z"/><path d="M8 5v5h7V5M8 19v-5h8v5"/></symbol>
+  <symbol id="ic-alert" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17.2h.01"/></symbol>
+  <symbol id="ic-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 11v5M12 8h.01"/></symbol>
+  <symbol id="ic-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="3.5"/><path d="M10.5 12.5L19 4M16 7l2.5 2.5M14 9l2 2"/></symbol>
+  <symbol id="ic-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="ic-user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20c1.3-3.8 4.2-5.8 7.5-5.8s6.2 2 7.5 5.8"/></symbol>
+  <symbol id="ic-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3.5 3L7 15.5M12.5 15.5H17"/></symbol>
+  <symbol id="ic-activity" viewBox="0 0 24 24"><path d="M3 12h4l3 7 4-14 3 7h4"/></symbol>
+  <symbol id="ic-image" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="M4.5 18l5-5 4 4 2.5-2.5 3.5 3.5"/></symbol>
+  <symbol id="ic-code" viewBox="0 0 24 24"><path d="M9 8l-5 4 5 4M15 8l5 4-5 4"/></symbol>
+  <symbol id="ic-wand" viewBox="0 0 24 24"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></symbol>
+  <symbol id="ic-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+  <symbol id="ic-zap" viewBox="0 0 24 24"><path d="M13 3L5 14h6l-1 7 8-11h-6z"/></symbol>
+  <symbol id="ic-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 6 12 6s9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+  <symbol id="ic-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="ic-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="ic-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
+  <symbol id="ic-cpu" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/></symbol>
+  <symbol id="ic-arrow-up" viewBox="0 0 24 24"><path d="M12 20V5M6 11l6-6 6 6"/></symbol>
+</svg>
+
+<!-- ============================ 登录层 ============================ -->
+<div id="login-mask" class="login-mask">
+  <form id="login-form" class="login-card" autocomplete="off">
+    <div class="login-brand">
+      <span class="brand-mark lg"><svg class="ic"><use href="#ic-shield"/></svg></span>
+      <div>
+        <div class="brand-name">DOG<span>BUDDY</span></div>
+        <div class="brand-tag">Agent 任务编排控制台</div>
+      </div>
+    </div>
+    <div class="seg" id="login-tabs">
+      <button type="button" class="seg-btn active" data-mode="token">访问令牌</button>
+      <button type="button" class="seg-btn" data-mode="password">密码</button>
+    </div>
+    <label class="field">
+      <span class="field-label" id="login-label">访问令牌 (X-Auth-Token)</span>
+      <input class="input" id="login-input" type="password" placeholder="粘贴 token" autocomplete="off">
+    </label>
+    <div class="form-error hidden" id="login-error"></div>
+    <button class="btn btn-primary btn-block" type="submit" id="btn-login">进入控制台</button>
+    <p class="login-foot">凭据仅保存在本机浏览器 · localStorage</p>
+  </form>
+</div>
+
+<!-- ============================ 应用外壳 ============================ -->
+<div id="app-shell" class="shell hidden">
+  <!-- 侧边栏 -->
+  <aside class="sidebar" id="sidebar">
+    <div class="side-brand">
+      <span class="brand-mark"><svg class="ic"><use href="#ic-shield"/></svg></span>
+      <div class="brand-name">DOG<span>BUDDY</span></div>
+    </div>
+    <nav class="nav" id="nav-main">
+      <div class="nav-group-label">工作台</div>
+      <button class="nav-item active" data-view="overview"><svg class="ic"><use href="#ic-grid"/></svg><span>总览</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="windows"><svg class="ic"><use href="#ic-monitor"/></svg><span>工位</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="jobs"><svg class="ic"><use href="#ic-clock"/></svg><span>任务</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="files"><svg class="ic"><use href="#ic-folder"/></svg><span>文件管理器</span><i class="nav-ind"></i></button>
+      <div class="nav-group-label">运维</div>
+      <button class="nav-item" data-view="logs"><svg class="ic"><use href="#ic-doc"/></svg><span>日志审计</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="settings"><svg class="ic"><use href="#ic-slider"/></svg><span>设置</span><i class="nav-ind"></i></button>
+    </nav>
+    <div class="side-status card">
+      <div class="side-status-row">
+        <span class="dot dot-run pulse" id="sys-dot"></span>
+        <span class="side-status-title" id="sys-running">运行中</span>
+        <span class="badge badge-amber hidden" id="sys-rate">限速等待</span>
+      </div>
+      <div class="side-status-grid">
+        <div class="mini-stat"><b id="sys-wins">0</b><span>工位</span></div>
+        <div class="mini-stat"><b id="sys-jobs">0</b><span>任务</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 主区域 -->
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn only-narrow" id="btn-sidebar-toggle" title="导航"><svg class="ic"><use href="#ic-menu"/></svg></button>
+      <div class="crumbs"><span class="crumb-root">控制台</span><svg class="ic crumb-sep"><use href="#ic-chevron-r"/></svg><strong id="page-title">总览</strong></div>
+      <div class="top-actions">
+        <div class="searchbox">
+          <svg class="ic"><use href="#ic-search"/></svg>
+          <input id="global-search" placeholder="搜索工位 / 任务…" autocomplete="off">
+          <kbd>⌘K</kbd>
+        </div>
+        <button class="icon-btn" id="btn-refresh" title="刷新当前页 (R)"><svg class="ic"><use href="#ic-refresh"/></svg></button>
+        <div class="user-chip" title="当前会话">
+          <span class="avatar"><svg class="ic"><use href="#ic-user"/></svg></span>
+          <span class="user-name">admin</span>
+        </div>
+        <button class="icon-btn" id="btn-logout" title="退出登录"><svg class="ic"><use href="#ic-logout"/></svg></button>
+      </div>
+    </header>
+
+    <main class="content" id="content">
+      <!-- 总览 -->
+      <section class="view active" id="view-overview">
+        <div id="ov-banner"></div>
+        <div class="grid stat-grid" id="ov-stats"></div>
+        <div class="grid cols-2">
+          <div class="card span-2">
+            <div class="card-head">
+              <div><h2 class="card-title">工位状态</h2><p class="card-sub">执行窗口 · 模型 / 模式 / 当前任务</p></div>
+              <button class="btn btn-ghost btn-sm" data-goto="windows">管理工位</button>
+            </div>
+            <div class="card-body"><div class="win-grid" id="ov-win-grid"></div></div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <div><h2 class="card-title">任务概览</h2><p class="card-sub">调度计划与下次运行</p></div>
+              <button class="btn btn-ghost btn-sm" data-goto="jobs">全部任务</button>
+            </div>
+            <div class="card-body table-wrap"><table class="table">
+              <thead><tr><th>任务</th><th>工位</th><th>状态</th><th>下次运行</th></tr></thead>
+              <tbody id="ov-jobs-body"></tbody>
+            </table></div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <div><h2 class="card-title">最近运行</h2><p class="card-sub">最近 10 次任务执行</p></div>
+              <button class="btn btn-ghost btn-sm" data-goto="logs">查看全部</button>
+            </div>
+            <div class="card-body"><div class="timeline" id="ov-runs"></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 工位 -->
+      <section class="view" id="view-windows">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">工位管理</h2>
+            <p class="card-sub">执行窗口：会话流 · 手动派活 · 上下文操作</p>
+          </div>
+          <button class="btn btn-primary" id="btn-new-window"><svg class="ic"><use href="#ic-plus"/></svg>新建工位</button>
+        </div>
+        <div class="win-layout">
+          <div class="card win-list-card">
+            <div class="win-list-head">
+              <div class="searchbox solid">
+                <svg class="ic"><use href="#ic-search"/></svg>
+                <input id="win-search" placeholder="搜索工位…" autocomplete="off">
+              </div>
+            </div>
+            <div class="win-list" id="win-list"></div>
+          </div>
+          <div class="win-detail card" id="win-detail"></div>
+        </div>
+      </section>
+
+      <!-- 任务 -->
+      <section class="view" id="view-jobs">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">任务调度</h2>
+            <p class="card-sub">定时 / 周期 / Cron · 回报策略 · 运行历史</p>
+          </div>
+          <div class="toolbar-actions">
+            <select class="select" id="job-filter-window"><option value="">全部工位</option></select>
+            <button class="btn btn-primary" id="btn-new-job"><svg class="ic"><use href="#ic-plus"/></svg>新建任务</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-body table-wrap">
+            <table class="table jobs-table">
+              <thead><tr>
+                <th>任务名称</th><th>工位</th><th>调度表达式</th><th>回报策略</th>
+                <th>启用</th><th>下次运行</th><th>失败</th><th class="th-actions">操作</th>
+              </tr></thead>
+              <tbody id="job-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 文件管理器 -->
+      <section class="view" id="view-files">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">文件管理器</h2>
+            <p class="card-sub">工作区资源管理 · 预览 / 编辑 / 上传</p>
+          </div>
+        </div>
+        <div class="fm card">
+          <div class="fm-toolbar">
+            <button class="icon-btn" id="fm-up" title="返回上级"><svg class="ic"><use href="#ic-arrow-up"/></svg></button>
+            <button class="icon-btn" id="fm-refresh" title="刷新"><svg class="ic"><use href="#ic-refresh"/></svg></button>
+            <button class="btn btn-soft btn-sm" id="fm-new-folder"><svg class="ic"><use href="#ic-folder-plus"/></svg>新建文件夹</button>
+            <button class="btn btn-soft btn-sm" id="fm-new-file"><svg class="ic"><use href="#ic-file-plus"/></svg>新建文件</button>
+            <button class="btn btn-primary btn-sm" id="fm-upload"><svg class="ic"><use href="#ic-upload"/></svg>上传</button>
+            <input type="file" id="fm-upload-input" class="hidden" multiple>
+            <div class="spacer"></div>
+            <select class="select select-sm" id="fm-sort" title="排序">
+              <option value="name">按名称</option>
+              <option value="size">按大小</option>
+              <option value="mtime">按修改时间</option>
+            </select>
+            <div class="searchbox solid">
+              <svg class="ic"><use href="#ic-search"/></svg>
+              <input id="fm-search" placeholder="过滤当前目录…" autocomplete="off">
+            </div>
+          </div>
+          <nav class="fm-crumb" id="fm-crumb"></nav>
+          <div class="fm-panes">
+            <aside class="fm-tree" id="fm-tree"></aside>
+            <div class="fm-list" id="fm-list"></div>
+            <aside class="fm-preview" id="fm-preview"></aside>
+          </div>
+        </div>
+      </section>
+
+      <!-- 日志审计 -->
+      <section class="view" id="view-logs">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">日志审计</h2>
+            <p class="card-sub">操作审计 · 任务运行记录</p>
+          </div>
+          <button class="btn btn-soft btn-sm" id="log-refresh"><svg class="ic"><use href="#ic-refresh"/></svg>刷新</button>
+        </div>
+        <div class="tabs" id="log-tabs">
+          <button class="tab active" data-tab="audit">审计日志</button>
+          <button class="tab" data-tab="runs">任务运行记录</button>
+        </div>
+        <div class="card">
+          <div class="card-body">
+            <div class="filter-row">
+              <div class="searchbox solid">
+                <svg class="ic"><use href="#ic-search"/></svg>
+                <input id="log-filter" placeholder="按 actor / action 过滤…" autocomplete="off">
+              </div>
+              <select class="select select-sm" id="log-window-filter"><option value="">全部工位</option></select>
+              <select class="select select-sm" id="log-status-filter">
+                <option value="">全部状态</option><option value="ok">成功</option>
+                <option value="error">失败</option><option value="running">运行中</option>
+              </select>
+            </div>
+            <div class="table-wrap">
+              <table class="table" id="log-audit-table">
+                <thead><tr><th>时间</th><th>Actor</th><th>Action</th><th>Detail</th></tr></thead>
+                <tbody id="log-audit-body"></tbody>
+              </table>
+              <table class="table hidden" id="log-runs-table">
+                <thead><tr><th>时间</th><th>任务</th><th>工位</th><th>状态</th><th>摘要</th><th>日志</th></tr></thead>
+                <tbody id="log-runs-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="view" id="view-settings">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">设置</h2>
+            <p class="card-sub">LLM 接入 · 限速重试 · 网关与回报 · 白名单</p>
+          </div>
+        </div>
+        <div class="set-grid" id="settings-cards"></div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- ============================ 覆盖层 ============================ -->
+<div id="modal-root"></div>
+<div id="wizard-root"></div>
+<div id="toast-root" class="toast-root"></div>
+
+<script src="/assets/js/ui.js"></script>
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/views-main.js"></script>
+<script src="/assets/js/views-ops.js"></script>
+<script src="/assets/js/views-settings.js"></script>
+<script src="/assets/js/views-profiles.js"></script>
+<script src="/assets/js/filemanager.js"></script>
+<script src="/assets/js/app.js"></script>
+</body>
+</html>

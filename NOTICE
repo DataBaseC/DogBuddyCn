@@ -1,0 +1,42 @@
+DogBuddyCn — Copyright (C) 2026  DogBuddyCn contributors
+Licensed under the GNU Affero General Public License v3.0 (see LICENSE).
+
+This product contains code derived from the following open-source projects.
+The original copyright notices are preserved in the header of each derived file.
+
+================================================================================
+1. AstrBot  (https://github.com/AstrBotDevs/AstrBot)
+   License: GNU Affero General Public License v3.0
+   Copyright (c) AstrBotDevs and contributors
+   Derived portions:
+     - dogbuddy/gateway/adapters/base.py   <- platform adapter abstraction
+     - dogbuddy/events/bus.py              <- event bus / message pipeline skeleton
+     - dogbuddy/llm/provider.py            <- LLM provider abstraction
+     - dogbuddy/windows/compactor.py       <- conversation context auto-compression
+   Modifications: dependencies trimmed (metrics/config plumbing removed), adapted
+   to DogBuddyCn's layering (L1/L3/L4) and data model. See file headers for details.
+
+================================================================================
+2. Hermes Agent  (https://github.com/NousResearch/hermes-agent)
+   License: MIT
+   Copyright (c) NousResearch and contributors
+   Derived portions:
+     - dogbuddy/cron/jobs.py               <- job storage model & schedule parsing
+     - dogbuddy/cron/scheduler.py          <- 60s tick scheduling loop
+   Modifications: storage backend switched from JSON files to the DogBuddyCn SQLite
+   DAO; run semantics changed to "inject into persistent window session" instead of
+   creating a new session per run. See file headers for details.
+
+================================================================================
+3. AiCode (https://github.com/jieapi/AiCode)
+   License: GNU General Public License v3.0
+   Design borrowed (no code copied — AiCode is Kotlin/Android):
+     - BUILD / PLAN / AUTO permission modes
+     - programmer toolbox inventory (file ops, shell, todo, checkpoint, explore)
+     - checkpoint & rollback concept, read-only explore subagent
+
+================================================================================
+4. OpenCode (https://github.com/opencode-ai/opencode)
+   License: MIT
+   Design borrowed (no code copied):
+     - persistent session engine concepts, file-based memory

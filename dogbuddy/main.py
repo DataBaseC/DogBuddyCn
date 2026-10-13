@@ -1,0 +1,199 @@
+# DogBuddyCn — assembly root (all layers wired here)
+# Copyright (C) 2026 DogBuddyCn contributors — AGPL-3.0
+"""main.py: DI assembly + lifecycle (gateway / cron / web / bus tasks)."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import logging.handlers
+from pathlib import Path
+from typing import Any
+
+import uvicorn
+
+from . import __version__
+from .config import AppConfig, load_config, save_config
+from .cron.jobs import JobStore
+from .cron.scheduler import CronScheduler
+from .db import Database
+from .events.bus import Event, EventBus
+from .gateway.adapters.onebot_v11 import OneBotV11Adapter
+from .gateway.router import Router
+from .llm.profile_registry import LLMProfileRegistry
+from .memory.service import MemoryService
+from .notify.base import build_notifiers
+from .services.admin_service import AdminService
+from .services.config_service import ConfigService
+from .services.file_service import FileService
+from .services.job_manager import JobManager
+from .services.report_service import ReportService
+from .services.session_manager import SessionManager
+from .services.window_manager import WindowManager
+from .services.workspace_manager import WorkspaceManager
+from .web.app import WebServices, create_app
+
+logger = logging.getLogger("dogbuddy.main")
+
+
+class DogBuddyApp:
+    """Holds all wired components; started by manage.py / uvicorn factory."""
+
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self._rate_limit = {"waiting": False, "attempt": 0, "window_id": ""}
+        self._setup_logging()
+        self.db = Database(config.db_path)
+        self.memory = MemoryService(config.memory_dir)
+        self.bus = EventBus()
+        self.panel = self._build_panel()
+        # named LLM config sets → providers (windows/jobs may bind a profile)
+        self.profiles = LLMProfileRegistry(config, on_wait_hook=self._on_llm_wait)
+        self.llm_factory = self.profiles.factory
+
+        # IM adapters first (gateway notifier channels need the adapter)
+        self.adapter: Any = None
+        self.router: Any = None
+        if config.gateway.enabled:
+            self.adapter = OneBotV11Adapter(
+                host=config.gateway.host, port=config.gateway.port,
+                access_token=config.gateway.access_token,
+                whitelist=config.gateway.whitelist or self._whitelist_ids())
+
+        self.windows = WindowManager(
+            db=self.db, llm_factory=self.llm_factory, bus=self.bus, panel=self.panel,
+            memory=self.memory, checkpoints_dir=config.checkpoints_dir,
+            threshold=config.llm.compact_threshold,
+            max_context_tokens=config.llm.max_context_tokens)
+        self.sessions = SessionManager(self.windows, self.db)
+        self.workspaces = WorkspaceManager(config.paths.workspaces, self.db)
+        self.job_store = JobStore(self.db)
+        self.jobs = JobManager(self.job_store, self.windows)
+        self.config_svc = ConfigService(self.db, config)
+        self.files = FileService(self._file_roots())
+        self.admin = AdminService(
+            db=self.db, llm_factory=self.llm_factory, windows=self.windows, jobs=self.jobs,
+            sessions=self.sessions, workspaces=self.workspaces, memory=self.memory,
+            config=self.config_svc, bus=self.bus)
+        self.notifiers = build_notifiers(config.notify, self.adapter, config.gateway.push_target)
+        self.report = ReportService(
+            bus=self.bus, notifiers=self.notifiers, llm_factory=self.llm_factory,
+            default_strategy=self.config_svc.get("report.default_strategy", "brief"))
+        self.scheduler = CronScheduler(
+            store=self.job_store, run_job=self._run_job, bus=self.bus, tick_seconds=60)
+        if self.adapter is not None:
+            self.router = Router(self.adapter, self.admin)
+        self.web_services = WebServices(
+            db=self.db, windows=self.windows, jobs=self.jobs, sessions=self.sessions,
+            workspaces=self.workspaces, config=self.config_svc, memory=self.memory,
+            files=self.files, admin=self.admin, app_config=config,
+            rate_limit_status=lambda: dict(self._rate_limit),
+            on_startup=self.start, on_shutdown=self.stop,
+            persist_config=self.persist_config)
+        self.web_app = create_app(self.web_services)
+        self._tasks: list[asyncio.Task] = []
+        self._started = False
+
+    # ------------------------------------------------------------- builders
+    def _setup_logging(self) -> None:
+        self.config.logs_dir.mkdir(parents=True, exist_ok=True)
+        root = logging.getLogger()
+        root.setLevel(logging.INFO)
+        if not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers):
+            fh = logging.handlers.RotatingFileHandler(
+                self.config.logs_dir / "dogbuddy.log", maxBytes=5 * 1024 * 1024,
+                backupCount=5, encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+            root.addHandler(fh)
+            sh = logging.StreamHandler()
+            sh.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+            root.addHandler(sh)
+
+    def _build_panel(self):
+        from .external.panel_client import build_panel_client
+        return build_panel_client(self.config.panel.base_url,
+                                  self.config.panel.agent_token,
+                                  enabled=self.config.panel.enabled)
+
+    def persist_config(self) -> str:
+        """Single write path for configuration: save YAML, then drop cached LLM providers.
+
+        Every settings mutation (console routes, admin tools) funnels here, so a
+        change survives a restart and takes effect without one.
+        """
+        path = save_config(self.config)
+        try:
+            self.profiles.invalidate()
+        except Exception:  # noqa: BLE001 - cache invalidation must never break a save
+            logger.warning("LLM provider cache invalidation failed", exc_info=True)
+        logger.info("configuration saved to %s", path)
+        return str(path)
+
+    def _on_llm_wait(self, profile: str, attempt: int, delay: float) -> None:
+        """Rate-limit backoff surfaced for the console badge (per profile)."""
+        self._rate_limit = {"waiting": True, "attempt": attempt, "window_id": profile or ""}
+        self.bus.emit(Event(type="rate_limit.status",
+                            payload={"attempt": attempt, "delay": delay, "profile": profile}))
+
+    def _file_roots(self) -> list[str]:
+        roots = [self.config.paths.workspaces]
+        for w in self.db.list_windows():
+            if w.workspace_path and w.workspace_path not in roots:
+                roots.append(w.workspace_path)
+        return roots
+
+    def _whitelist_ids(self) -> list[str]:
+        return [row["qq_id"] for row in self.db.whitelist_list()]
+
+    # ------------------------------------------------------------- pipelines
+    async def _run_job(self, job: Any):
+        outcome = await self.windows.dispatch_and_wait(
+            job.window_id, job.prompt, job_id=job.id,
+            kind=getattr(job, "kind", "prompt") or "prompt",
+            llm_profile=getattr(job, "llm_profile", "") or "")
+        # reset rate-limit badge when a run actually completes
+        if outcome.status == "ok":
+            self._rate_limit = {"waiting": False, "attempt": 0, "window_id": ""}
+        return outcome
+
+    # report delivery now flows through dogbuddy.notify channels (see build_notifiers)
+
+    # ------------------------------------------------------------- lifecycle
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self.bus.emit(Event(type="system.ready", payload={}))
+        await self.windows.start()
+        self._tasks.append(asyncio.get_event_loop().create_task(self.bus.start()))
+        self._tasks.append(asyncio.get_event_loop().create_task(self.scheduler.run_loop()))
+        if self.adapter is not None and self.router is not None:
+            self._tasks.append(asyncio.get_event_loop().create_task(self.adapter.run()))
+            self._tasks.append(asyncio.get_event_loop().create_task(self.router.run()))
+        logger.info("DogBuddyCn %s started (web on %s:%s)", __version__,
+                    self.config.web.host, self.config.web.port)
+
+    async def stop(self) -> None:
+        if not self._started:
+            return
+        self._started = False
+        self.scheduler.stop()
+        await self.windows.stop()
+        for t in self._tasks:
+            t.cancel()
+        self.db.close()
+
+
+def run(config_path: str | None = None) -> None:
+    config = load_config(config_path)
+    app = DogBuddyApp(config)
+    # startup/shutdown run through FastAPI's lifespan (create_app hooks)
+    server = uvicorn.Server(uvicorn.Config(
+        app=app.web_app, host=config.web.host, port=config.web.port, log_level="info"))
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    run()

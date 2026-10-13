@@ -1,0 +1,23 @@
+# DogBuddyCn systemd unit (install.sh fills in @REPO_DIR@ @VENV_DIR@ @DATA_DIR@ @USER@)
+# Copyright (C) 2026 DogBuddyCn contributors — AGPL-3.0
+[Unit]
+Description=DogBuddyCn — multi-agent digital team (QQ gateway + worker windows + web console)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+Environment=DOGBUDDY_CONFIG=@DATA_DIR@/config.yaml
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@VENV_DIR@/bin/python -m dogbuddy.main
+Restart=always
+RestartSec=5
+# hardening (relax if your workspaces live outside these paths)
+ReadWritePaths=@DATA_DIR@ @REPO_DIR@
+NoNewPrivileges=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

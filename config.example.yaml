@@ -1,0 +1,43 @@
+# DogBuddyCn configuration example — copy to /etc/dogbuddy/config.yaml
+# Secrets can be supplied via env instead: DOGBUDDY_LLM_API_KEY, DOGBUDDY_PANEL_TOKEN,
+# DOGBUDDY_WEB_TOKEN, DOGBUDDY_GATEWAY_TOKEN (env wins over this file).
+
+llm:
+  provider: openai_compat          # openai_compat | ollama
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+  api_key: ""                      # or DOGBUDDY_LLM_API_KEY
+  keys: []                         # extra keys, config only (rate limit never switches keys)
+  temperature: 0.7
+  max_context_tokens: 128000
+  compact_threshold: 0.8           # compact at 80% of the model window
+  request_timeout: 120
+  ollama_base_url: http://127.0.0.1:11434
+  retry:                           # M-H rate-limit retry (free relays rate-limit a lot)
+    base_interval: 10              # seconds before the 1st retry
+    max_interval: 300              # backoff cap
+    max_retries: 5
+    backoff: exp                   # exp | fixed
+
+gateway:
+  enabled: true
+  host: 0.0.0.0
+  port: 8095
+  access_token: ""                 # OneBot access token (NapCat config must match)
+  whitelist: []                    # QQ ids allowed to talk to the bot
+  push_target: {}                  # e.g. {type: private, id: 123456789} or {type: group, id: 987654321}
+
+web:
+  host: 127.0.0.1
+  port: 8100
+  auth_token: ""                   # console token; or DOGBUDDY_WEB_TOKEN
+  password: ""                     # optional login password
+
+panel:                             # AegisServerPanel integration (never modified)
+  enabled: true
+  base_url: http://127.0.0.1:8080
+  agent_token: ""                  # or DOGBUDDY_PANEL_TOKEN
+
+paths:
+  data_dir: /etc/dogbuddy
+  workspaces_dir: /etc/dogbuddy/workspaces
