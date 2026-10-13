@@ -1,5 +1,8 @@
 # DogBuddyCn
 
+> 📋 **待办与外包交接文档见 [docs/ROADMAP.md](docs/ROADMAP.md)** —— 现状、已确认缺陷（带代码位置）、
+> 优先级、验收标准、以及和同类软件的能力差距对照。
+
 常驻 Ubuntu 服务器的**多 Agent 数字团队**：管理员 Agent 经 QQ 统一对接用户，程序员员工 Agent 在
 持久"工位（window）"里被定时任务持续驱动完成编程开发工作，Web 控制面板管理一切。
 
