@@ -123,8 +123,13 @@ chmod 600 /root/.ssh/config
 cd /opt/dogbuddy && bash scripts/bootstrap_git.sh
 ```
 
-之后：**拉取走匿名 HTTPS，完全不需要凭据**（公开仓库），推送才需要那把密钥。
-`git remote -v` 会显示 fetch 是 `https://…`、push 是 `git@…`，这是刻意的。
+之后：**拉取与推送都走 SSH**（同一把 deploy key）。国内链路上到 GitHub 的**匿名 HTTPS 经常被
+TLS 中断**（`GnuTLS recv error (-110)`），实测 SSH 稳定；`manage.py update` 遇到 fetch 失败会自动重试一次。
+如果你在能稳定访问 GitHub 的网络里，也可以用 HTTPS 拉取（公开仓库无需凭据）：
+
+```bash
+git remote set-url origin https://github.com/DataBaseC/DogBuddyCn.git   # 仅当 HTTPS 稳定
+```
 
 
 数据目录（默认 `/etc/dogbuddy/`）：`config.yaml` · `dogbuddy.db` · `memory/` · `logs/` · `checkpoints/` · `workspaces/`。

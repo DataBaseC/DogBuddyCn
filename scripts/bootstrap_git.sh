@@ -15,7 +15,11 @@ set -euo pipefail
 
 APP_DIR="${1:-/opt/dogbuddy}"
 REPO_HTTPS="${DOGBUDDY_GIT_HTTPS:-https://github.com/DataBaseC/DogBuddyCn.git}"
-REPO_PUSH="${DOGBUDDY_GIT_SSH:-git@github.com:DataBaseC/DogBuddyCn.git}"
+REPO_SSH="${DOGBUDDY_GIT_SSH:-git@github.com:DataBaseC/DogBuddyCn.git}"
+# 默认拉取也走 SSH：国内链路上到 github 的匿名 HTTPS 经常被 TLS 中断
+# （GnuTLS recv error -110），SSH 更稳定。仓库公开时也可显式用 HTTPS：
+#   DOGBUDDY_GIT_FETCH=https://github.com/owner/repo.git bash scripts/bootstrap_git.sh
+REPO_FETCH="${DOGBUDDY_GIT_FETCH:-$REPO_SSH}"
 BRANCH="${DOGBUDDY_GIT_BRANCH:-main}"
 
 cd "$APP_DIR"
@@ -24,8 +28,8 @@ VER="$(./.venv/bin/python -c 'import dogbuddy; print(dogbuddy.__version__)' 2>/d
 echo "== DogBuddyCn git bootstrap =="
 echo "   app_dir : $APP_DIR"
 echo "   version : $VER"
-echo "   fetch   : $REPO_HTTPS"
-echo "   push    : $REPO_PUSH"
+echo "   fetch   : $REPO_FETCH"
+echo "   push    : $REPO_SSH"
 
 if [ -d .git ]; then
   echo "-- 已经是 git 检出，跳过 init"
@@ -48,13 +52,13 @@ else
   echo "-- 已提交: $(git log -1 --format='%h %s')"
 fi
 
-echo "-- 配置 remote：拉取走匿名 HTTPS，推送走 SSH"
+echo "-- 配置 remote：默认拉取与推送都走 SSH（HTTPS 在本机链路上不稳定）"
 if git remote get-url origin >/dev/null 2>&1; then
-  git remote set-url origin "$REPO_HTTPS"
+  git remote set-url origin "$REPO_FETCH"
 else
-  git remote add origin "$REPO_HTTPS"
+  git remote add origin "$REPO_FETCH"
 fi
-git remote set-url --push origin "$REPO_PUSH"
+git remote set-url --push origin "$REPO_SSH"
 
 echo "-- 验证匿名拉取（不需要凭据）"
 if timeout 45 git ls-remote origin >/dev/null 2>&1; then

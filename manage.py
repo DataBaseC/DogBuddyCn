@@ -618,7 +618,15 @@ def _update_git(args: argparse.Namespace, app_dir: Path, stamp: str) -> int:
 
     fetch = _git(app_dir, "fetch", "origin", "--prune")
     if fetch.returncode != 0:
+        # 国内链路上到 github 的 HTTPS 经常被 TLS 中断（GnuTLS recv error -110），
+        # SSH 走 22/443 反而稳定；这里重试一次，避免一次抖动就把升级判死。
+        print(f"    首次 fetch 失败，5s 后重试：{fetch.stderr.strip()[:160]}")
+        time.sleep(5)
+        fetch = _git(app_dir, "fetch", "origin", "--prune")
+    if fetch.returncode != 0:
         print(f"错误: git fetch 失败（正在运行的服务不受影响）: {fetch.stderr.strip()}", file=sys.stderr)
+        print("    若报 TLS/GnuTLS 错误，把 origin 换成 SSH："
+              "git remote set-url origin git@github.com:<owner>/<repo>.git", file=sys.stderr)
         return 1
 
     target = _git(app_dir, "rev-parse", "--verify", ref)

@@ -295,6 +295,12 @@ python scripts/audit_ui.py --strict   # 有发现则非零退出，可挂 CI
    检查是不是 `DOGBUDDY_*` 环境变量在起作用。
 7. **`Window.model` 与 `Window.llm_profile` 是两套覆盖机制**，解析顺序见
    `AppConfig.effective_model()`，不要在前端另写一套判断。
+8. **GitHub 的匿名 HTTPS 在本机链路上不可靠**：实测 `git fetch https://github.com/...` 会被
+   `GnuTLS recv error (-110)` 中断（GitHub API / 网页有时又通），而 **SSH（deploy key，22 端口）稳定**。
+   所以线上 `origin` 配的是 SSH，`manage.py update` 里也对 fetch 做了一次重试。
+   如果外包环境能稳定访问 GitHub，可改回 HTTPS。
+9. **升级后的前端缓存**：静态资源 URL 没有版本指纹，浏览器可能继续用旧 JS/CSS，
+   表现为"代码升了但界面没变"。排查 UI 问题前先 Ctrl+Shift+R（详见 2.1）。
 
 ---
 
