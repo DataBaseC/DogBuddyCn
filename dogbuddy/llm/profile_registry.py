@@ -50,6 +50,18 @@ class LLMProfileRegistry:
         """A zero-arg factory pinned to one profile (for windows/tools)."""
         return lambda: self.get(profile)
 
+    def provider_for(self, profile: str | None = None) -> Any:
+        """Callable-compatible resolver: `provider_for()` **and** `provider_for("name")`
+        both return a provider instance.
+
+        This is the shape every consumer expects (`AdminService`, `ReportService`,
+        `explore_subagent` call it with no args; `TaskRunner` and `WindowManager`
+        pass a profile name). Wiring the *unsatisfied* `factory` method here was
+        the v1.3 bug that made every real LLM call fail with
+        `'function' object has no attribute 'chat'`.
+        """
+        return self.get(profile)
+
     def invalidate(self, profile: str | None = None) -> None:
         """Drop cached provider(s) after a config edit."""
         if profile is None:

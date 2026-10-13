@@ -71,6 +71,21 @@ class AbstractProvider(abc.ABC):
         """One chat turn. `messages` is OpenAI-style; `tools` is a JSON-schema tool list."""
         raise NotImplementedError
 
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Port-compatible alias for :meth:`text_chat` (`ports.LLMProvider.chat`).
+
+        AgentLoop, Compactor, ReportService and `explore_subagent` all call
+        `chat(...)`, while the concrete providers implement `text_chat` only —
+        so any *real* provider raised `AttributeError` on the first turn. The
+        test doubles defined `chat`, which is why this never surfaced in CI.
+        """
+        return await self.text_chat(messages, tools=tools, **kwargs)
+
 
 class Provider(AbstractProvider):
     """Multi-key capable base. Keys are kept for config parity only — rate limiting

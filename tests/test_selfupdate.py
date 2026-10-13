@@ -232,3 +232,19 @@ def test_installed_version_reads_disk(tmp_path):
     repo = Path(__file__).resolve().parents[1]
     assert m._installed_version(repo) == __version__
     assert (repo / "dogbuddy" / "__init__.py").exists()
+
+
+# --------------------------------------------------------------------------- llm wiring
+def test_app_llm_factory_returns_a_provider_not_a_function(tmp_path, monkeypatch):
+    """Regression: v1.3 wired `profiles.factory` (an unsatisfied method) as the
+    factory, so `llm_factory()` yielded a lambda and every real LLM call died
+    with "'function' object has no attribute 'chat'". Tests hid it because they
+    always inject a fake factory."""
+    app = _app(tmp_path, monkeypatch)
+    provider = app.llm_factory()
+    assert not callable(provider), f"llm_factory() returned {provider!r}, not a provider"
+    assert hasattr(provider, "chat"), "provider must expose .chat(messages, tools)"
+
+    # a profile-aware call must work too (TaskRunner / WindowManager pass names)
+    assert hasattr(app.llm_factory(""), "chat")
+    assert app.llm_factory() is app.llm_factory("")  # cached

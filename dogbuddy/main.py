@@ -48,7 +48,11 @@ class DogBuddyApp:
         self.panel = self._build_panel()
         # named LLM config sets → providers (windows/jobs may bind a profile)
         self.profiles = LLMProfileRegistry(config, on_wait_hook=self._on_llm_wait)
-        self.llm_factory = self.profiles.factory
+        # callable accepting an optional profile and returning a *provider*.
+        # Binding `profiles.factory` here (v1.3) returned a lambda instead of a
+        # provider → every real LLM call failed with
+        # "'function' object has no attribute 'chat'".
+        self.llm_factory = self.profiles.provider_for
 
         # IM adapters first (gateway notifier channels need the adapter)
         self.adapter: Any = None
