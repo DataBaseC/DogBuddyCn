@@ -279,8 +279,8 @@ class JobStore:
             job.schedule_type = parsed["kind"]
             job.schedule_raw = str(fields["schedule"])
             job.next_run_at = compute_next_run(parsed, job.last_run_at)
-        for key in ("name", "prompt", "report_strategy", "kind"):
-            if fields.get(key):
+        for key in ("name", "prompt", "report_strategy", "kind", "report_channel", "llm_profile"):
+            if key in fields and fields[key] is not None:
                 setattr(job, key, fields[key])
         return self.repo.upsert_job(job)
 
