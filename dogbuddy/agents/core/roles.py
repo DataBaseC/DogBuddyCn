@@ -116,6 +116,10 @@ ADMIN_TOOLS = [
     "profile_list", "profile_save", "profile_remove",
     "memory_write", "memory_recall",
     "progress_report",
+    # T9.6 审批闭环（P1-6）：主管裁决员工升级上来的高危操作
+    "approve_decision", "decision_list",
+    # T9.4 指挥链第一跳：管理员 → 主管（P1-1 补的入口；此前四向信息流只有审批一通）
+    "supervisor_command",
     # self-upgrade of the running deployment (NOT delegable to an employee window)
     "self_version", "self_update",
 ]

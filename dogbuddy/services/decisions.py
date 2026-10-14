@@ -49,11 +49,18 @@ class DecisionService:
 
     # ------------------------------------------------------------- ask
     def ask(self, window_id: str, question: str, options: list | None = None,
-            timeout: float | None = None, source: str = "ask_user") -> PendingDecision:
-        """Record a new question; supersede this window's older open ones."""
-        cancelled = self.db.cancel_pending_decisions(window_id)
-        if cancelled:
-            logger.info("window %s: superseded %d open decision(s)", window_id, cancelled)
+            timeout: float | None = None, source: str = "ask_user",
+            supersede: bool = True) -> PendingDecision:
+        """Record a new question; optionally supersede this window's older open ones.
+
+        `supersede=False`（审批升级用）：升级给**主管**的待决事项不能把主管自己
+        正在问的问题顶掉——那是两件不同的事，只是恰好挂在同一个工位上
+        （审查报告 P1-6）。
+        """
+        if supersede:
+            cancelled = self.db.cancel_pending_decisions(window_id)
+            if cancelled:
+                logger.info("window %s: superseded %d open decision(s)", window_id, cancelled)
         ttl = timeout if timeout is not None else self.default_timeout
         expires_at = (_now() + timedelta(seconds=ttl)).isoformat() if ttl > 0 else None
         d = self.db.add_pending_decision(window_id, question, options=options,
@@ -62,6 +69,7 @@ class DecisionService:
             "id": d.id, "window_id": window_id, "question": question,
             "options": options or [], "expires_at": expires_at})
         return d
+
 
     async def wait(self, decision_id: int) -> str:
         """Block (async) until the decision is answered, times out or is cancelled.

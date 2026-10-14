@@ -80,6 +80,16 @@ class AdminService:
         from ..agents.management.tools import build_supervisor_tools
         return build_supervisor_tools(self._svc)
 
+    def set_supervision(self, supervision: Any) -> None:
+        """T9.4（审查报告 P1-1）：把指挥链交给管理侧工具。
+
+        `supervisor_command`（管理员→主管）需要它；不注入时该工具会明确报"指挥链
+        服务不可用"，而不是静默什么都不做。
+        """
+        self.supervision = supervision
+        if getattr(self, "_svc", None) is not None:
+            self._svc.supervision = supervision
+
     # ------------------------------------------------------------- sessions
     #: 默认对话的 id —— 老部署（迁移前只有一条会话）沿用同一个键，升级后历史不丢
     DEFAULT_CONVERSATION = "default"

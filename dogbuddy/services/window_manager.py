@@ -465,6 +465,8 @@ class WindowManager:
                    # T9.6：审批逐级路由（员工→主管→管理员）+ 向主管投递的通道
                    "approval_router": self.approval_router,
                    "supervision_dispatch": self.supervision_dispatch,
+                   # P1-6：升级给主管的待决事项要落 queue、主管要用工具裁决它们
+                   "decisions": self.decisions,
                    # T4.3: 托管代审 reviewer (None = ask the owner directly)
                    "approval_reviewer": self._approval_reviewer(w)},
         )

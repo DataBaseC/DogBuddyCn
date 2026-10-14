@@ -140,10 +140,20 @@ def test_T9_2_未归类的新管理工具默认不下放主管():
 
 
 def test_T9_2_管理员行为零回归():
-    """管理员 = 全部管理工具 + system 作用域，工具集合与 v1 完全一致。"""
-    assert len(ADMIN_TOOLS) == 32, "管理员工具数不该变（零回归）"
+    """管理员 = 全部管理工具 + system 作用域。
+
+    T9.2 重构当时断言 32（"工具数不该变"）。T9.4 之后 deliberately +1：
+    新增 `supervisor_command`（管理员→主管 的指令下发），因为审查报告 P1-1 指出
+    指挥链四向里**只有审批一向通**——`SupervisionService.command()` 零调用者，
+    管理员没有任何工具/接口能下发 `supervisor.command`。这是**新能力**，不是回归。
+    """
     from dogbuddy.agents.admin.tools import AdminServices, build_admin_tools
-    assert set(ADMIN_TOOLS) == {t.name for t in build_admin_tools(AdminServices())}
+    registered = {t.name for t in build_admin_tools(AdminServices())}
+    assert set(ADMIN_TOOLS) == registered
+    # 原有 32 个一个不少（这才是"零回归"的真正含义）
+    assert len(ADMIN_TOOLS) == len(registered)
+    assert {"config_set", "self_update", "window_create", "progress_report"} <= set(ADMIN_TOOLS)
+    assert "supervisor_command" in ADMIN_TOOLS, "指挥链第一跳必须有入口（P1-1）"
 
 
 # --------------------------------------------------------------------------- T9.3 主管装配

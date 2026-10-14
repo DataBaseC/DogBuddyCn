@@ -220,10 +220,59 @@ class SupervisionService:
         self.bus.emit(Event(type=SUPERVISOR_COMMAND,
                             payload={"project_id": project_id, "text": text}))
 
+    # ------------------------------------------------- 生产者入口（审查报告 P1-1）
+    def route_report(self, window_id: str, text: str, level: str = "info") -> bool:
+        """**把一条上报按指挥链送出去**——这是 `worker.report` / `supervisor.digest`
+        在生产代码里的唯一投递入口。
 
-#: 已有事件里"需要逐级路由"的（其余保持原直连路径，行为不变）
+        初版只有 `report_up()`，而它**零调用者**：处理器写得对、测试也绿
+        （`test_batch9_supervision.py` 直接调 `svc.report_up(...)`），但生产路径
+        根本不会调用它 → 员工的结果与提问仍然直达用户，"逐级收敛"从未发生。
+
+        返回 True = **已交给指挥链**（调用方不要再直连推送）；
+        返回 False = 没有主管可走 → 调用方保持 v1 直连行为（零回归）。
+        """
+        if self.bus is None:
+            return False
+        wid = str(window_id or "")
+        text = str(text or "").strip()
+        if not wid or not text:
+            return False
+        w = self.db.get_window(wid)
+        role = (getattr(w, "role", "") or "") if w is not None else ""
+        pid = self._project_of_window(wid)
+        if role == "supervisor":
+            # 主管自己的产出 = 给管理员的汇总（supervisor.digest）
+            self.report_up(wid, text, pid, level=level)
+            return True
+        if not self.route_reports:
+            return False
+        sup = self.supervisor_for(pid, wid)
+        if sup and sup != wid:
+            self.report_up(wid, text, pid, level=level)
+            return True
+        return False
+
+    def routes_to_supervisor(self, window_id: str) -> bool:
+        """只问"会不会逐级"（不投递），供 ReportService 决定裁量路径。"""
+        if not self.route_reports:
+            return False
+        w = self.db.get_window(window_id) if window_id else None
+        if w is not None and (getattr(w, "role", "") or "") == "supervisor":
+            return True
+        pid = self._project_of_window(window_id)
+        sup = self.supervisor_for(pid, window_id)
+        return bool(sup and sup != window_id)
+
+
+#: 需要**逐级路由**的事件 → 它们交给指挥链时对应的事件类型。
+#: ROLES.md §3：员工 → 主管 传的是「结果 / 提问」，所以任务完成与失败也要先到主管
+#: （主管才知道该不该重派），再由主管合并上报管理员。
 HIERARCHICAL_EVENTS = {
     WORKER_QUESTION: WORKER_REPORT,   # 员工提问 = 上报的一种
+    JOB_COMPLETED: WORKER_REPORT,     # 员工结果（逐级收敛，不再直达用户）
+    JOB_FAILED: WORKER_REPORT,        # 员工失败（主管要能重派/兜底）
 }
-#: 明确**不**改造的（保持 v1 直连：任务完成/失败/静默/限速都直达管理员）
-DIRECT_EVENTS = (JOB_COMPLETED, JOB_FAILED, JOB_QUIET, RATE_LIMIT_STATUS)
+#: 明确**不**逐级的事件：这些是环境状态或需要立刻触达人类的事
+DIRECT_EVENTS = (JOB_QUIET, RATE_LIMIT_STATUS)
+

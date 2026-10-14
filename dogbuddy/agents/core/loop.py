@@ -32,6 +32,27 @@ logger = logging.getLogger("dogbuddy.agents.loop")
 # 同一调用连续失败达到该次数 → 熔断（C2）
 DEFAULT_GUARD_THRESHOLD = 3
 
+#: 认可（会真的重放那次调用）的答复
+_APPROVE_WORDS = ("批准", "同意", "放行", "可以", "approve", "approved", "allow", "yes", "y", "ok")
+#: 拒绝
+_DENY_WORDS = ("拒绝", "不同意", "不行", "deny", "denied", "reject", "rejected", "no", "n")
+
+
+def _approval_verdict(answer: str) -> bool | None:
+    """把一条审批答复判成 批准/拒绝/未决（None）。
+
+    未决（含超时/取消的 `[timeout]`/`[cancelled]`）必须走 fail-closed——
+    绝不因为"没答上来"就当成批准。
+    """
+    t = str(answer or "").strip().lower()
+    if not t or t.startswith("["):
+        return None
+    if t.startswith(_DENY_WORDS) or t in _DENY_WORDS:
+        return False
+    if t.startswith(_APPROVE_WORDS) or t in _APPROVE_WORDS:
+        return True
+    return None
+
 
 @dataclass
 class AgentResult:
@@ -333,7 +354,13 @@ class AgentLoop:
         reviewer = ctx.extra.get("approval_reviewer")
 
         # T9.6：审批**逐级**路由（员工→主管→管理员）。不可逆动作直接升级管理员。
-        # 只有"该找主管"时才把问题投给主管；投出去后本轮仍然暂停（不能算批准）。
+        #
+        # 审查报告 P1-6：初版只给主管工位投一条文本就 `return failure`，**没有任何
+        # 回传通道** —— 不落 `pending_decisions`，主管也没有工具能批准这条待批命令。
+        # 结果是"配了主管反而更差"：无主管时用户能在控制台批准并重放（v1 行为），
+        # 有主管时该操作**永久无法批准**（安全上 fail-closed，功能上是死路）。
+        # 现在：落一条**指定给主管**的待决事项 → 投递带 id 的通知 → 等它被裁决
+        # → 批准则重放、拒绝则拦截。没有 DecisionService 时退回"只提请、不执行"。
         router = ctx.extra.get("approval_router")
         if router is not None:
             try:
@@ -341,18 +368,51 @@ class AgentLoop:
             except Exception:  # noqa: BLE001 — 路由失败按最保守处理（留给管理员）
                 route = {"target": "admin"}
             if route.get("target") == "supervisor" and route.get("window_id"):
+                sup_id = str(route["window_id"])
+                decisions = ctx.extra.get("decisions")
+                pending = None
+                if decisions is not None:
+                    try:
+                        pending = decisions.ask(
+                            sup_id,
+                            f"【待你裁决 · 来自工位 {ctx.window_id}】\n"
+                            f"工具：{tc.name}\n参数：{preview}\n风险：{reason}",
+                            options=["批准", "拒绝"],
+                            source="escalated_to_supervisor",
+                            # 不取消主管自己正在问的问题——两件事只是同一个收件人
+                            supersede=False)
+                    except Exception:  # noqa: BLE001 — 落库失败不阻断"提请"本身
+                        logger.warning("creating supervisor decision failed", exc_info=True)
                 dispatch = ctx.extra.get("supervision_dispatch")
                 if callable(dispatch):
+                    hint = (f"\n（待决事项 #{pending.id}：请用 approve_decision 批准或拒绝）"
+                            if pending is not None else "")
                     try:
-                        dispatch(route["window_id"],
-                                 f"【待你审批 · 来自工位 {ctx.window_id}】\n{question}")
-                        _log(f"escalated_to_supervisor:{route.get('window_id')}")
-                        return ToolResult.failure(
-                            f"[已提请主管审批] {reason}\n"
-                            f"申请已提交给你的主管（工位 {route['window_id']}）；"
-                            f"在主管批准之前，操作不会执行。")
+                        dispatch(sup_id, f"【待你审批 · 来自工位 {ctx.window_id}】\n{question}{hint}")
+                        _log(f"escalated_to_supervisor:{sup_id}")
                     except Exception:  # noqa: BLE001 — 投递失败就退化成找管理员
                         logger.warning("approval escalation to supervisor failed", exc_info=True)
+                if pending is not None and decisions is not None:
+                    try:
+                        answer = await decisions.wait(pending.id)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("waiting for supervisor decision failed", exc_info=True)
+                        answer = "[cancelled]"
+                    verdict = _approval_verdict(answer)
+                    if verdict is True:
+                        _log("approved_by_supervisor")
+                        return await self.registry.execute(tc.name, tc.arguments, ctx,
+                                                           approved=True)
+                    if verdict is False:
+                        _log("denied_by_supervisor")
+                        return ToolResult.failure(
+                            f"[主管拒绝] {reason}；操作已拦截，未执行。回答：{str(answer)[:200]}")
+                    return ToolResult.failure(
+                        f"[已提请主管审批] {reason}\n"
+                        f"主管未在时限内裁决（{str(answer)[:80]}）；操作未执行。")
+                return ToolResult.failure(
+                    f"[已提请主管审批] {reason}\n"
+                    f"申请已提交给你的主管（工位 {sup_id}）；在主管批准之前，操作不会执行。")
 
         if reviewer is not None and not irreversible:
             try:
@@ -377,8 +437,15 @@ class AgentLoop:
         if hasattr(answer, "__await__"):
             answer = await answer
         text = str(answer or "")
-        if text.strip().startswith("批准") or text.strip().lower() in ("yes", "y", "ok"):
+        verdict = _approval_verdict(text)
+        if verdict is True:
             _log("approved")
             return await self.registry.execute(tc.name, tc.arguments, ctx, approved=True)
-        _log("denied")
-        return ToolResult.failure(f"[用户拒绝] {reason}；操作已拦截，未执行。回答：{text[:200]}")
+        if verdict is False:
+            _log("denied")
+            return ToolResult.failure(f"[用户拒绝] {reason}；操作已拦截，未执行。回答：{text[:200]}")
+        # 未答复 / 超时 / 取消 → fail-closed：不放行
+        _log("no_answer")
+        return ToolResult.failure(
+            f"[未获批准] {reason}；操作未执行（答复：{text[:120]}）。"
+            f"请在控制台「待决事项」明确批准后再重试该操作。")

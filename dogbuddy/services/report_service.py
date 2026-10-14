@@ -71,6 +71,9 @@ class ReportService:
         self._recent: list[str] = []  # recent pushed headlines (merge context)
         # T2.2 notification minimum set: merged decision asks + rare alerts
         self.decisions = None  # set below / injected (DecisionService)
+        # T9.4 指挥链（审查报告 P1-1）：注入后，员工的结果/提问/失败会**先给主管**
+        # （逐级收敛），没有主管时才走原来的直连推送（v1 零回归）。
+        self.supervision = None
         self._ask_debounce: dict[str, Any] = {}
         self._fail_streak: dict[str, int] = {}
         self._ask_delay = 20.0       # merge questions arriving within this window
@@ -91,6 +94,9 @@ class ReportService:
     async def _on_job_completed(self, event: Event) -> None:
         wid = str(event.payload.get("window_id") or event.payload.get("job_id") or "")
         self._fail_streak.pop(wid, None)  # success breaks the failure streak
+        # T9.4（审查报告 P1-1）：有主管 → 逐级收敛，先给主管，不再直达用户
+        if self._route_up(event, wid):
+            return
         strategy = event.payload.get("report_strategy") or self.default_strategy
         await self._deliver(event, strategy, critical=False)
 
@@ -99,13 +105,15 @@ class ReportService:
         self._fail_streak[wid] = self._fail_streak.get(wid, 0) + 1
         streak = self._fail_streak[wid]
         critical = bool(event.payload.get("auto_paused")) or streak >= self.alert_fail_streak
-        # T2.2: ordinary single failures stay in the UI — only real trouble pushes
-        if not critical:
-            logger.info("job failed (streak %d, no alert yet): %s", streak, event.payload)
+        # 火警（自动暂停 / 连败到阈值）必须触达人——不因逐级收敛而静默
+        if critical:
+            self._fail_streak[wid] = 0
+            await self._deliver(event, "detailed", critical=True)
             return
-        self._fail_streak[wid] = 0
-        strategy = "detailed"
-        await self._deliver(event, strategy, critical=True)
+        # 普通失败：有主管就交给主管（他要能重派/兜底）；没主管才闭嘴（原行为）
+        if self._route_up(event, wid):
+            return
+        logger.info("job failed (streak %d, no alert yet): %s", streak, event.payload)
 
     async def _on_decision_created(self, event: Event) -> None:
         """T2.2: merge rapid-fire questions from one window into one push.
@@ -153,7 +161,52 @@ class ReportService:
                 logger.exception("notifier %s failed", getattr(notifier, "name", "?"))
 
     async def _on_worker_question(self, event: Event) -> None:
+        wid = str(event.payload.get("window_id") or "")
+        if self._route_up(event, wid):
+            return
         await self._deliver(event, "detailed", critical=True)
+
+    # ------------------------------------------------- 逐级收敛（T9.4 / P1-1）
+    def _hierarchical(self, event: Event) -> bool:
+        """这个事件类型是否需要逐级路由（`HIERARCHICAL_EVENTS` 是权威口径）。"""
+        try:
+            from .supervision_service import HIERARCHICAL_EVENTS
+        except ImportError:  # pragma: no cover
+            return False
+        return event.type in HIERARCHICAL_EVENTS
+
+    def _route_up(self, event: Event, window_id: str) -> bool:
+        """把事件交给指挥链。True = 已交给主管，调用方**不要**再直连推送。
+
+        这是 `worker.report` / `supervisor.digest` 在生产路径上的生产者
+        ——初版这两个事件**没有任何投递者**，处理器写得对却永远不会被调用，
+        于是"逐级收敛"从未发生（审查报告 P1-1）。
+        """
+        sup = self.supervision
+        if sup is None or not window_id or not self._hierarchical(event):
+            return False
+        try:
+            return bool(sup.route_report(window_id, self._raw_text(event),
+                                         level="warn" if event.type == JOB_FAILED else "info"))
+        except Exception:  # noqa: BLE001 — 指挥链出问题不能吞掉通知本身
+            logger.exception("hierarchical routing failed; falling back to direct push")
+            return False
+
+    @staticmethod
+    def _raw_text(event: Event) -> str:
+        """给主管看的**原始**信息——不做"看管理员心情"的裁量。
+
+        裁量是管理员层的事：员工先把结果给主管，主管合并后才是给管理员的汇总。
+        """
+        p = event.payload
+        name = p.get("name") or p.get("window_name") or p.get("window_id", "?")
+        if event.type == WORKER_QUESTION:
+            return f"员工提问：{p.get('question', '')}"
+        if event.type == JOB_FAILED:
+            return f"任务「{name}」失败：{str(p.get('summary', ''))[:500]}"
+        if event.type == JOB_COMPLETED:
+            return f"任务「{name}」完成：{str(p.get('summary', ''))[:500]}"
+        return f"{event.type}: {str(p)[:300]}"
 
     async def _on_confirm_request(self, event: Event) -> None:
         await self._deliver(event, "detailed", critical=True)

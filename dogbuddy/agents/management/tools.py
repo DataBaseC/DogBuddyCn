@@ -28,7 +28,8 @@ class AdminServices:
                  workspaces: Any = None, memory: Any = None, config: Any = None,
                  progress: Callable[[], dict] | None = None,
                  self_status: Callable[[bool], dict] | None = None,
-                 self_update: Callable[..., dict] | None = None):
+                 self_update: Callable[..., dict] | None = None,
+                 supervision: Any = None):
         self.windows = windows      # WindowManager: create/list/get/update/pause/resume/delete/status/dispatch
         self.jobs = jobs            # JobManager: create/list/get/update/pause/resume/remove/run_now
         self.sessions = sessions    # SessionManager: get/compress/reset/inject
@@ -39,6 +40,8 @@ class AdminServices:
         # self-upgrade: (check_remote: bool) -> dict  /  (ref, force, start_delay) -> dict
         self.self_status = self_status
         self.self_update = self_update
+        # T9.4 指挥链：管理员→主管 的指令下发（`supervisor_command` 用）
+        self.supervision = supervision
 
 
 class FnTool:
@@ -442,6 +445,113 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
                start_delay=_p("integer", "seconds to wait before switching code (default 45)")),
         self_update, "shell"))
 
+    # -------------------------------------------------- T9.4 管理员 → 主管（P1-1）
+    async def supervisor_command(args: dict, ctx: ToolContext) -> ToolResult:
+        """把目标/优先级下发给项目主管（指挥链的第一跳）。
+
+        初版这里**没有任何入口**：`SupervisionService.command()` 零调用者，
+        四向信息流的第一向在生产里不可达（审查报告 P1-1）。
+        """
+        sup = getattr(svc, "supervision", None)
+        if sup is None:
+            return ToolResult.failure("指挥链服务不可用（supervision 未注入）")
+        pid = str(args.get("project_id") or "").strip()
+        text = str(args.get("text") or "").strip()
+        if not pid or not text:
+            return ToolResult.failure("project_id 与 text 都不能为空")
+        if svc.windows is not None and svc.windows.get(pid) is not None:
+            return ToolResult.failure(f"{pid} 是一个工位 id，不是项目 id——请用 window_list 之外的项目列表确认。")
+        try:
+            target = sup.supervisor_for(pid)
+        except Exception as e:  # noqa: BLE001
+            return ToolResult.failure(f"无法解析项目主管：{e}")
+        if not target:
+            return ToolResult.failure(
+                f"项目 {pid} 还没有主管工位：请先建一个 role=supervisor 的工位，"
+                f"并用 project_patch 把 owner_supervisor_id 指到它（或把主管工位挂进该项目）。")
+        sup.command(pid, text)
+        return ToolResult.success(f"已把指令下发给项目 {pid} 的主管工位 {target}。",
+                                  project_id=pid, supervisor=target)
+
+    tools.append(FnTool("supervisor_command",
+        "Send a goal / instruction from the ADMIN to a project's SUPERVISOR "
+        "(管理员→主管，指挥链第一跳). The supervisor then breaks it down and dispatches to its "
+        "project's workers. Use this instead of dispatching to employee windows directly when "
+        "the project has a supervisor.",
+        _props(project_id=_p("string", "project id", True),
+               text=_p("string", "the goal/instruction to hand down", True)),
+        supervisor_command, "write"))
+
+    # -------------------------------------------------- T9.6 审批闭环（P1-6）
+    async def approve_decision(args: dict, ctx: ToolContext) -> ToolResult:
+        """主管裁决一条**投给自己**的待批事项（员工升级上来的高危操作）。
+
+        初版完全没有这个通道：`loop.py` 把审批升级给主管后只投一条文本就返回失败，
+        主管手上**没有任何工具**能批准它 → 操作永久卡死（"配了主管反而更差"：
+        无主管时用户还能在控制台批准并重放）。现在升级会落 `pending_decisions`，
+        这个工具负责把它裁决掉，员工那边的 `decisions.wait()` 随即拿到答复并重放。
+        """
+        decisions = (getattr(ctx, "extra", None) or {}).get("decisions")
+        if decisions is None:
+            return ToolResult.failure("待决事项服务不可用（decisions 未注入）")
+        try:
+            did = int(args.get("decision_id"))
+        except (TypeError, ValueError):
+            return ToolResult.failure("decision_id 必须是整数")
+        approve = bool(args.get("approve"))
+        d = None
+        try:
+            d = ctx.db.get_pending_decision(did) if getattr(ctx, "db", None) is not None else None
+        except Exception as e:  # noqa: BLE001
+            return ToolResult.failure(f"查询待决事项失败：{e}")
+        if d is None:
+            return ToolResult.failure(f"待决事项 #{did} 不存在")
+        if d.status != "pending":
+            return ToolResult.failure(f"待决事项 #{did} 已经是 {d.status}，无需再裁决。")
+        # 只能裁决**投给自己**的（防止代理去批别的工位/别的项目的审批）。
+        # system 作用域（管理员）例外——它是全权层，也是升级链的终点。
+        scope = getattr(ctx, "scope", None)
+        is_system = bool(getattr(scope, "is_system", False))
+        if not is_system and str(getattr(d, "window_id", "")) != str(ctx.window_id or ""):
+            return ToolResult.failure(
+                f"待决事项 #{did} 不属于你（收件人 {getattr(d, 'window_id', '?')}），无权裁决。")
+        answer = "批准" if approve else "拒绝"
+        if decisions.answer(did, answer) is None:
+            return ToolResult.failure(f"裁决 #{did} 失败（可能已被别处处理）")
+        return ToolResult.success(
+            f"已{'批准' if approve else '拒绝'}待决事项 #{did}；"
+            + ("申请方将继续执行该操作。" if approve else "申请方会收到拒绝并停止该操作。"),
+            decision_id=did, approved=approve)
+
+    tools.append(FnTool("approve_decision",
+        "Approve or reject a pending approval request that was escalated TO YOU by a worker "
+        "(high-risk operation needing your sign-off). Use `decision_list`/the console to see "
+        "the id — it is also quoted in the escalation message.",
+        _props(decision_id=_p("integer", "pending decision id", True),
+               approve=_p("boolean", "true = 批准, false = 拒绝", True)),
+        approve_decision, "write"))
+
+    async def decision_list(args: dict, ctx: ToolContext) -> ToolResult:
+        """列出**投给自己**的待裁决事项（主管的收件箱）。"""
+        decisions = (getattr(ctx, "extra", None) or {}).get("decisions")
+        if decisions is None:
+            return ToolResult.failure("待决事项服务不可用（decisions 未注入）")
+        try:
+            items = [d for d in decisions.list(status="pending", limit=100)
+                     if is_system
+                     or str(getattr(d, "window_id", "")) == str(ctx.window_id or "")]
+        except Exception as e:  # noqa: BLE001
+            return ToolResult.failure(f"读取待决事项失败：{e}")
+        if not items:
+            return ToolResult.success("(没有待你裁决的事项)")
+        lines = [f"#{d.id} {'⚠️' if getattr(d, 'source', '') == 'escalated_to_supervisor' else '❓'} "
+                 f"{str(d.question).splitlines()[0][:120]}" for d in items]
+        return ToolResult.success("\n".join(lines), count=len(items))
+
+    tools.append(FnTool("decision_list",
+        "List the pending approval requests / questions waiting for YOU (the supervisor's inbox).",
+        _OBJ, decision_list))
+
     return tools
 
 
@@ -453,6 +563,7 @@ SYSTEM_TOOL_NAMES: frozenset[str] = frozenset({
     "report_set",                     # 全局上报策略
     "self_version", "self_update",    # 自升级：绝不下放给主管
     "memory_write", "memory_recall",  # 全局记忆（主管只有项目/工位记忆）
+    "supervisor_command",             # 管理员→主管 的指令下发（T9.4，主管不能命令自己）
 })
 
 #: 需要 **project** 作用域的：管本项目里的工位 / 任务 / 上下文 / 工作区
@@ -464,6 +575,8 @@ PROJECT_TOOLS: frozenset[str] = frozenset({
     "task_remove", "task_run_now",
     "context_view", "context_compress", "context_reset", "context_inject",
     "progress_report",
+    # T9.6 审批闭环（P1-6）：主管裁决员工升级上来的高危操作
+    "approve_decision", "decision_list",
 })
 
 

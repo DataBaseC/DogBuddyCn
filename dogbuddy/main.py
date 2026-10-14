@@ -131,6 +131,10 @@ class DogBuddyApp:
         # T9.6：审批逐级路由 —— 员工的高危操作先找主管；不可逆动作仍直接升级管理员
         self.windows.approval_router = self.supervision.approval_target
         self.windows.supervision_dispatch = self.supervision.dispatch_text
+        # T9.4（审查报告 P1-1）：把指挥链交给"上报生产者"与管理侧入口。
+        # 没有这一步，`worker.report`/`supervisor.command` 在生产路径上**无人投递**：
+        # 处理器与单测都是好的，但功能从不发生。
+        self.admin.set_supervision(self.supervision)
         self.notifiers = build_notifiers(config.notify, self.adapter, config.gateway.push_target)
         # worker questions / confirm requests must reach the admin conversation:
         # in v1.3 `AdminService.notify()` was never called, so a worker could ask
@@ -141,6 +145,8 @@ class DogBuddyApp:
             bus=self.bus, notifiers=self.notifiers, llm_factory=self.llm_factory,
             default_strategy=self.config_svc.get("report.default_strategy", "brief"))
         self.report.decisions = self.decisions
+        # T9.4（审查报告 P1-1）：逐级收敛的生产者入口
+        self.report.supervision = self.supervision
         self.scheduler = CronScheduler(
             store=self.job_store, run_job=self._run_job, bus=self.bus, tick_seconds=60)
         if self.adapter is not None:
@@ -296,11 +302,24 @@ class DogBuddyApp:
         return bool(self.config.llm.api_key) or self.config.llm.provider == "ollama"
 
     async def _on_worker_question(self, event: Event) -> None:
-        """Feed a worker's pending question into the admin session and let it react."""
+        """Feed a worker's pending question into the admin session and let it react.
+
+        T9.4（审查报告 P1-1）：项目**有主管**时，员工提问应由指挥链先给主管
+        （逐级收敛）。初版这里无条件直推管理员，于是"员工→主管→管理员"这条
+        链上永远少一跳——即使 `SupervisionService` 的处理器完全正确。
+        """
+        payload = event.payload or {}
+        wid = str(payload.get("window_id") or "")
+        if self.supervision is not None and wid:
+            try:
+                if self.supervision.routes_to_supervisor(wid):
+                    logger.info("worker question routed to supervisor (hierarchical): %s", wid)
+                    return
+            except Exception:  # noqa: BLE001 — 判定失败就按 v1 直连，不吞掉提问
+                logger.exception("hierarchical check failed for worker question")
         if not self._llm_ready():
             logger.info("worker question (no LLM configured): %s", event.payload.get("question", ""))
             return
-        payload = event.payload or {}
         question = str(payload.get("question") or "").strip()
         if not question:
             return
