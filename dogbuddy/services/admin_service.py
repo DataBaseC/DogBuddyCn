@@ -104,10 +104,28 @@ class AdminService:
 
     # ------------------------------------------------------- conversations (v9)
     def ensure_default_conversation(self) -> dict[str, Any]:
-        """保证至少有一个对话存在（首次启动 / 升级后自愈）。"""
+        """保证至少有一个对话存在；**并接管老版本留下的会话历史**。
+
+        升级自愈很关键：v9 之前控制台把会话记在 `admin:console`，如果不接管，
+        用户升级后打开对话页会看到空白（以为记录丢了），而历史其实还在库里。
+        """
         convs = self.db.list_conversations(include_archived=True)
         if convs:
             return convs[0]
+        try:
+            legacy = self.db.legacy_admin_windows()
+        except Exception:  # noqa: BLE001 — 接管失败也要能给出默认对话
+            legacy = []
+        for window_id, count in legacy:
+            if window_id == "admin:system" or count <= 0:
+                continue          # 系统通知会话不是"用户的对话"
+            conv_id = window_id.split(":", 1)[1] if window_id.startswith("admin:") else window_id
+            if not conv_id:
+                continue
+            title = "默认对话" if conv_id in ("console", "default") else conv_id
+            conv = self.db.insert_conversation(conv_id, title)
+            logger.info("接管老会话为对话：%s（%d 条消息）", conv_id, count)
+            return conv
         return self.db.insert_conversation(self.DEFAULT_CONVERSATION, "默认对话")
 
     def list_conversations(self, include_archived: bool = False) -> list[dict[str, Any]]:

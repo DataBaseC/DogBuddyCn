@@ -64,6 +64,39 @@ def test_默认对话自愈(tmp_path, monkeypatch):
     assert len(svc.list_conversations()) == 1
 
 
+def test_接管老版本会话历史(tmp_path, monkeypatch):
+    """升级自愈：v9 之前会话记在 `admin:console`，接管后**历史不能看起来丢了**。
+
+    这是真事——线上生产库升级时正好有 28 条历史挂在 admin:console 下。
+    """
+    app, _client = _app(tmp_path, monkeypatch)
+    # 造出"老版本残留"：对话表清空，历史只挂在 admin:console / admin:system
+    app.db._conn.execute("DELETE FROM conversations")
+    app.db._conn.commit()
+    for i in range(5):
+        app.db.add_message("admin:console", "user", f"第 {i} 条老消息")
+    app.db.add_message("admin:console", "assistant", "老回复")
+    app.db.add_message("admin:system", "user", "[system event] 噪音")
+
+    convs = app.admin.list_conversations()
+    assert len(convs) == 1, f"应恰好接管出一个对话，实际 {[c['id'] for c in convs]}"
+    conv = convs[0]
+    assert conv["id"] == "console", "要接管消息最多的那个会话，而不是新建空的"
+    assert conv["title"] == "默认对话"
+    assert conv["message_count"] == 6, "历史条数必须完整"
+    assert conv["preview"] == "第 4 条老消息"
+    assert all(c["id"] != "system" for c in convs), "系统通知会话不是用户的对话"
+    assert len(app.admin.history("console", 50)) == 6
+
+
+def test_没有老会话时用默认对话(tmp_path, monkeypatch):
+    app, _client = _app(tmp_path, monkeypatch)
+    app.db._conn.execute("DELETE FROM conversations")
+    app.db._conn.commit()
+    convs = app.admin.list_conversations()
+    assert len(convs) == 1 and convs[0]["id"] == "default"
+
+
 # --------------------------------------------------------------------------- 新建/命名
 def test_新建对话_自动编号(tmp_path, monkeypatch):
     app, _client = _app(tmp_path, monkeypatch)

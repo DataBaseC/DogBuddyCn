@@ -1177,6 +1177,20 @@ class Database:
             self._conn.commit()
         return bool(cur.rowcount)
 
+    def legacy_admin_windows(self) -> list[tuple[str, int]]:
+        """老版本留下的管理员会话窗口（`admin:<key>` + 消息数，按消息多寡降序）。
+
+        用途：v9 引入 `conversations` 表之前，控制台把会话记在 `admin:console` 之类
+        的合成窗口下。升级后如果没有对话行，这些历史就会变成**孤儿**——
+        用户打开对话页看到空白，会以为记录丢了。启动时用这个方法把它们接管回来。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT window_id, COUNT(*) AS n FROM messages "
+                "WHERE window_id LIKE 'admin:%' GROUP BY window_id ORDER BY n DESC"
+            ).fetchall()
+        return [(r["window_id"], int(r["n"] or 0)) for r in rows]
+
     def list_audit(self, limit: int = 200) -> list[AuditEntry]:
         with self._lock:
             rows = self._conn.execute(
