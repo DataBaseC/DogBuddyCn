@@ -120,8 +120,9 @@ class DogBuddyApp:
             sessions=self.sessions, workspaces=self.workspaces, memory=self.memory,
             config=self.config_svc, bus=self.bus,
             self_status=self.update_status, self_update=self.start_self_update)
-        # T9.3：主管工位装配（只给项目级管理工具，system 级永不下放）
-        self.windows.management_tools_factory = lambda w: self.admin.supervisor_tools()
+        # T9.3：主管工位装配（只给项目级管理工具，system 级永不下放）；
+        # P1-3：管理员工位也要装（否则是个带着管理员提示词却没有工具的壳）。
+        self.windows.management_tools_factory = lambda w: self.admin.tools_for(w)
         # T9.4：三层指挥链服务（管理员→主管→员工；无主管时退化直连）
         from .services.supervision_service import SupervisionService
         self.supervision = SupervisionService(

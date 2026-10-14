@@ -144,12 +144,19 @@ class WindowManager:
                                          jobs=self.job_store, run_job_now=self._run_job_now)
         # T9.3：主管工位额外装上"项目级管理工具"（system 级永远不给）。
         # 装配只是"少给"，真正的越权拦截在 PermissionGate.check_scope（fail-closed）。
-        if (getattr(w, "role", "") or "") == "supervisor" and self.management_tools_factory:
+        #
+        # 审查报告 P1-3：这里原来只认 `role == "supervisor"`，而 UI 的角色下拉里却有
+        # `admin` → 管理员工位一个管理工具都没装，而 `role.tool_names`（=ADMIN_TOOLS）
+        # 又拿去过滤只含通用 L4 工具的注册表 → **交集为空**，这个工位带着
+        # "你是管理员，去管理工位/任务"的提示词，却一个工具都没有。
+        role_name = (getattr(w, "role", "") or "")
+        if role_name in ("supervisor", "admin") and self.management_tools_factory:
             try:
                 for tool in self.management_tools_factory(w) or []:
                     registry.register(tool)
             except Exception:  # noqa: BLE001 — 装配失败不能让工位起不来
-                logger.warning("supervisor management tools failed to assemble", exc_info=True)
+                logger.warning("management tools failed to assemble for role=%s",
+                               role_name, exc_info=True)
         if self.mcp_bridge is not None and getattr(self.mcp_bridge, "started", False):
             try:
                 self.mcp_bridge.register_into(registry)  # T5.3: external tools on the shelf

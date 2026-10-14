@@ -82,6 +82,21 @@ class AdminService:
         from ..agents.management.tools import build_supervisor_tools
         return build_supervisor_tools(self._svc)
 
+    def tools_for(self, window: Any) -> list:
+        """按工位角色给管理工具（审查报告 P1-3）。
+
+        * `supervisor` → 只给 project 级（系统级永不下放）
+        * `admin` → 全给（它是管理员；空壳工位比多给工具更糟）
+        * 其他角色 → 空（普通员工不装管理工具）
+        """
+        role = (getattr(window, "role", "") or "")
+        if role == "supervisor":
+            return self.supervisor_tools()
+        if role == "admin":
+            from ..agents.management.tools import build_admin_tools
+            return build_admin_tools(self._svc)
+        return []
+
     def set_supervision(self, supervision: Any) -> None:
         """T9.4（审查报告 P1-1）：把指挥链交给管理侧工具。
 

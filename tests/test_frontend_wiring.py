@@ -108,3 +108,142 @@ def test_every_referenced_icon_is_defined():
         used |= set(re.findall(r"#ic-([a-z0-9-]+)", _read(path)))
     missing = used - defined
     assert not missing, f"引用了未定义的图标（会渲染成空白按钮）: {sorted(missing)}"
+
+
+# ===========================================================================
+# 以下六条是**审查报告第六节**补的：上面那 6 条不变量守得住"四处集合一致"，
+# 但守不住"接线真的生效"。报告的变异测试用三种手法实测绕过了它们，全部 6 passed：
+#
+#   A. 四处齐全但 case 体是空的：加 data-view="phantom" + <section id="view-phantom">
+#      + TITLES.phantom + `case 'phantom': break;` → 6 passed
+#      （`_render_view_cases()` 只用正则抓 `case 'x':`，不检查 case 体是否真的渲染）
+#   B. 导出改名（v0.4.0 前科复现）：`DogBuddyViews.Projects` → `ProjectsX`
+#      → 6 passed，`--check` exit=0，点「项目」空白页
+#   C. 命名空间打错一个字母：`DogBuddyViews.Decisions` → `DogBuddyViews.Decision`
+#      → 6 passed（app.js 是守护式 `if (V.Decisions)`，静默不加载）
+#
+# 结构性根因：只校验"文件名登记进 bundle-order.json"，**不校验文件里真的导出了
+# `DogBuddyViews.X`**；`_render_view_cases()` 只看 `case` 标签，不看 case 体。
+# ===========================================================================
+
+def _js_sources() -> list[Path]:
+    return [p for p in sorted((STATIC / "js").glob("*.js"))
+            if not p.name.endswith(".bundle.js")]
+
+
+def _exported_namespaces() -> dict[str, str]:
+    """`DogBuddyViews.X = ...` → {X: 文件名}。"""
+    out: dict[str, str] = {}
+    for p in _js_sources():
+        for m in re.finditer(r"DogBuddyViews\.([A-Za-z_$][\w$]*)\s*=", _read(p)):
+            out.setdefault(m.group(1), p.name)
+    return out
+
+
+def _render_view_bodies() -> str:
+    text = _read(APP_JS)
+    m = re.search(r"renderView:\s*function[^{]*\{(.*?)\n\s{4}\},", text, re.S)
+    assert m, "app.js 里找不到 renderView"
+    return m.group(1)
+
+
+def test_每个视图的_case_体真的调用了渲染函数():
+    """绕过手法 A：`case 'x': break;` 这种空壳必须被抓住。
+
+    初版只断言"case 存在"，于是"四处齐全但什么都不做"能全绿。
+    """
+    body = _render_view_bodies()
+    # 按 case 切块：`case 'x': ... 直到下一个 case/default`
+    blocks = re.split(r"case\s+'([a-z][a-z0-9-]*)'\s*:", body)
+    cases = {}
+    for i in range(1, len(blocks) - 1, 2):
+        cases[blocks[i]] = blocks[i + 1]
+    assert cases, "没抓到任何 case"
+
+    empty = []
+    for view, chunk in cases.items():
+        # 去掉 break / 注释 / 空白后还在不在
+        code = re.sub(r"//[^\n]*", "", chunk)
+        code = code.split("case ")[0]
+        code = re.sub(r"\bbreak\b|[\s;]", "", code)
+        if not code:
+            empty.append(view)
+    assert not empty, (
+        f"这些视图的 case 是空壳（点进去什么都不发生）: {sorted(empty)}。"
+        f"审查报告的手法 A 就是这样绕过旧断言的。")
+
+
+def test_每个视图导出的命名空间真实存在():
+    """绕过手法 B/C：`DogBuddyViews.Projects` 改名成 `ProjectsX`，或命名空间
+    打错一个字母（`DogBuddyViews.Decision`）——守护式调用会静默不加载。
+
+    初版只校验"文件名登记进 bundle-order.json"，**不校验文件里真的导出了它**。
+    """
+    exported = _exported_namespaces()
+    assert exported, "一个 DogBuddyViews.* 导出都没找到，正则或结构变了"
+
+    # 对每个视图，从 bundle-order.json 里找到它的源文件，确认该文件确实导出了
+    # 一个 DogBuddyViews.X（而不是只登记了文件名）
+    order = json.loads(_read(BUNDLE_ORDER))
+    registered = {Path(p).name for b in order for p in order[b]}
+    for name in sorted(registered):
+        if not name.startswith("views-") or name.endswith(".bundle.js"):
+            continue
+        text = _read(STATIC / "js" / name)
+        assert re.search(r"DogBuddyViews\.[A-Za-z_$][\w$]*\s*=", text), (
+            f"{name} 没有导出任何 DogBuddyViews.<Name>（改名/打错就静默不加载）")
+
+
+def test_视图_case_体引用的命名空间确实被导出():
+    """把 case 体里引用的 `V.X` / `DogBuddyViews.X` 与真实导出对照。"""
+    exported = _exported_namespaces()
+    body = _render_view_bodies()
+    referenced = set(re.findall(r"\bV\.([A-Za-z_$][\w$]*)", body))
+    referenced |= set(re.findall(r"DogBuddyViews\.([A-Za-z_$][\w$]*)", body))
+    assert referenced, "renderView 里没有引用任何视图命名空间？"
+    missing = sorted(referenced - set(exported))
+    assert not missing, (
+        f"renderView 引用了这些**没有被导出**的命名空间（点进去是空白）: {missing}；"
+        f"实际导出的: {sorted(exported)}")
+
+
+def test_未知_action_有兜底而不是静默():
+    """P1-16 的根因：`Windows.action()` 既没有 `params` 分支也没有 `else`，
+    于是按钮点下去**静默无反应**。现在必须有 else 出声。"""
+    text = _read(STATIC / "js" / "views-main.js")
+    m = re.search(r"action:\s*function[^{]*\{(.*?)\n\s{4}\},", text, re.S)
+    assert m, "找不到 Windows.action"
+    body = m.group(1)
+    assert re.search(r"\}\s*else\s*\{", body), \
+        "Windows.action 必须有 else 兜底（否则未接线的按钮静默无反应）"
+
+
+def test_指挥链接口有前端调用者():
+    """P1-2：`GET /api/projects/{id}/chain` 后端一直在，但前端零调用者。"""
+    text = _read(STATIC / "js" / "api.js")
+    assert "cmdChain" in text, "api.js 缺少指挥链接口客户端"
+    assert re.search(r"'/api/projects/'\s*\+\s*enc\(id\)\s*\+\s*'/chain'", text), \
+        "cmdChain 必须指向 /api/projects/{id}/chain"
+    views = _read(STATIC / "js" / "views-projects.js")
+    assert "cmdChain" in views and "cmd-chain" in views, \
+        "views-projects.js 必须真的调用它（否则还是只能 curl 的孤儿接口）"
+
+
+def test_参数面板真的有调用点():
+    """P1-16：`Params.openPanel` 初版只有定义、零调用点。"""
+    main = _read(STATIC / "js" / "views-main.js")
+    assert re.search(r"Params\.openPanel\s*\(", main), \
+        "views-main.js 必须真的调用 Params.openPanel（否则那个按钮点了没反应）"
+    assert "'params'" in main, "Windows.action 必须有 params 分支"
+
+
+def test_主管角色在控制台可选():
+    """P1-2：主管是 Batch 9 的核心能力，但前端 `supervisor` 出现 0 次。"""
+    main = _read(STATIC / "js" / "views-main.js")
+    assert 'value="supervisor"' in main, "新建工位的角色下拉必须能选 supervisor"
+    assert 'value="admin"' not in main, (
+        "不该再提供 admin 工位（v2 只有一个管理员；那个工位是空壳且口径冲突）")
+    projects = _read(STATIC / "js" / "views-projects.js")
+    assert "owner_supervisor_id" in projects and "prj-f-sup" in projects, \
+        "项目表单必须有『指定主管』字段（原来只能手工 PATCH）"
+

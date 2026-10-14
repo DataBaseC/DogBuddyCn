@@ -171,9 +171,15 @@
       mount: function (body) { return request('POST', '/api/projects/mount', body); },
       /* POST /api/projects/unmount/{window_id} */
       unmount: function (windowId) { return request('POST', '/api/projects/unmount/' + enc(windowId)); },
-      /* GET /api/projects/{id}/params-chain?window_id= → 继承链与实际生效值 */
+      /* GET /api/projects/{id}/params-chain?window_id= → 参数继承链与实际生效值 */
       chain: function (id, windowId) {
         return request('GET', '/api/projects/' + enc(id) + '/params-chain' + qs({ window_id: windowId }));
+      },
+      /* GET /api/projects/{id}/chain → 指挥链（管理员→主管→员工）与健康度。
+         审查报告 P1-2：这个接口后端一直在（T9.5 的验收点），但**前端没有任何调用者**
+         —— 全前端搜 chain 只命中上面的 params-chain。是个只能 curl 的孤儿接口。 */
+      cmdChain: function (id) {
+        return request('GET', '/api/projects/' + enc(id) + '/chain');
       }
     },
 

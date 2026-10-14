@@ -92,7 +92,8 @@
       '<div><div class="prj-name">' + U.esc(p.name) + '</div>' +
       '<div class="card-sub mono">' + U.esc(p.root_path) + '</div></div>' +
       '<div class="prj-actions">' +
-      '<button class="btn btn-soft btn-sm" data-prj="chain" data-id="' + U.esc(p.id) + '">参数链</button>' +
+      '<button class="btn btn-soft btn-sm" data-prj="chain" data-id="' + U.esc(p.id) + '" title="工位/项目/配置套/全局的参数继承">参数链</button>' +
+      '<button class="btn btn-soft btn-sm" data-prj="cmd-chain" data-id="' + U.esc(p.id) + '" title="管理员→主管→员工 的指挥链与健康度">指挥链</button>' +
       '<button class="btn btn-soft btn-sm" data-prj="mount" data-id="' + U.esc(p.id) + '">挂载工位</button>' +
       '<button class="btn btn-soft btn-sm" data-prj="edit" data-id="' + U.esc(p.id) + '">编辑</button>' +
       '<button class="btn btn-danger btn-sm" data-prj="del" data-id="' + U.esc(p.id) + '">' + U.icon('trash', 'sm') + '</button>' +
@@ -161,6 +162,7 @@
     if (kind === 'edit') return editProject(p);
     if (kind === 'mount') return mountWindow(p);
     if (kind === 'chain') return showChain(p);
+    if (kind === 'cmd-chain') return showCmdChain(p);
     if (kind === 'iter-start') return startIteration(p);
     if (kind === 'iter-run') return runIteration(p, true);
     if (kind === 'iter-chain') return showRounds(p);
@@ -314,7 +316,15 @@
     }).catch(function (e) { U.toast('error', e.message); });
   }
 
+  /* 主管候选要现拉一次（可能刚建了主管工位）——P1-2：以前没有这个字段，
+     owner_supervisor_id 只能手工 PATCH。 */
   function editProject(p) {
+    A.windows.list().then(function (d) {
+      openEditModal(p, d.windows || []);
+    }).catch(function () { openEditModal(p, []); });
+  }
+
+  function openEditModal(p, allWindows) {
     var isNew = !p;
     p = p || { name: '', root_path: '', params: {} };
     U.modal({
@@ -323,6 +333,17 @@
       body:
         '<div class="field"><span class="field-label">项目名 *</span>' +
         '<input class="input" id="prj-f-name" value="' + U.esc(p.name || '') + '" placeholder="如 DogBuddyCn 主仓库"></div>' +
+        '<div class="field"><span class="field-label">项目主管（谁负责这个项目：拆活、盯进度、裁决审批）</span>' +
+        '<select class="select" id="prj-f-sup">' +
+        '<option value="">（无主管 —— 事件直接连管理员）</option>' +
+        (allWindows || []).filter(function (w) { return w.role === 'supervisor'; })
+          .map(function (w) {
+            var sel = (p.owner_supervisor_id === w.id) ? ' selected' : '';
+            return '<option value="' + U.esc(w.id) + '"' + sel + '>' +
+              U.esc(w.name) + ' (' + U.esc(w.id) + ')</option>';
+          }).join('') +
+        '</select>' +
+        '<div class="hint">没有可选的主管？先到「工位」页新建一个角色为 supervisor 的工位。</div></div>' +
         '<div class="field"><span class="field-label">根目录（留空=在工作区根下用项目名建）</span>' +
         '<input class="input mono" id="prj-f-root" value="' + U.esc(p.root_path || '') + '" placeholder="/opt/dogbuddy/workspaces/xxx"></div>' +
         (isNew ? '<label class="mdl-check"><input type="checkbox" id="prj-f-git" checked>初始化 git 仓库</label>' : '') +
@@ -345,6 +366,8 @@
               root_path: body.querySelector('#prj-f-root').value.trim(),
               params: params
             };
+            var supEl = body.querySelector('#prj-f-sup');
+            if (supEl) payload.owner_supervisor_id = supEl.value;
             if (!payload.name) { U.toast('warn', '项目名不能为空'); return false; }
             if (isNew) payload.git_init = !!body.querySelector('#prj-f-git').checked;
             var req = isNew ? A.projects.create(payload) : A.projects.update(p.id, payload);
@@ -420,6 +443,38 @@
           '</div>' +
           '<div class="table-wrap"><table class="table"><thead><tr>' +
           '<th>参数</th><th>生效值</th><th>来源</th></tr></thead><tbody>' + rows + '</tbody></table></div>',
+        buttons: [{ label: '关闭', cls: 'btn-ghost' }]
+      });
+    }).catch(function (e) { U.toast('error', e.message); });
+  }
+
+  /* 指挥链一览（P1-2）：后端 `/api/projects/{id}/chain` 原来没有前端调用者。 */
+  function showCmdChain(p) {
+    A.projects.cmdChain(p.id).then(function (d) {
+      var sup = d.supervisor;
+      var supRow = sup
+        ? '<div class="card-sub">主管工位：<b>' + U.esc(sup.name) + '</b> ' +
+          '<span class="mono">' + U.esc(sup.id) + '</span> ' +
+          '<span class="chip">scope=' + U.esc(sup.scope) + '</span></div>'
+        : '<div class="card-sub">主管工位：<b>没有</b>（事件直接连管理员，兼容单管理员部署）</div>';
+      var workers = (d.workers || []).map(function (w) {
+        return '<tr><td class="mono">' + U.esc(w.id) + '</td><td>' + U.esc(w.name) + '</td>' +
+          '<td class="mono">' + U.esc(w.role) + '</td>' +
+          '<td><span class="chip">' + U.esc(w.status || '-') + '</span></td></tr>';
+      }).join('') || '<tr><td colspan="4" class="card-sub">该项目还没有员工工位</td></tr>';
+      var warn = (d.health || '').indexOf('ok') === 0 ? '' :
+        '<div class="hint" style="margin-top:8px">⚠ ' + U.esc(d.health) + '</div>';
+      U.modal({
+        title: '指挥链 · ' + U.esc(d.project.name),
+        wide: true,
+        body:
+          '<div class="card-sub" style="margin-bottom:8px">' +
+          '管理员 <b>system</b> → 主管 <b>project</b> → 员工。寻址：' +
+          '<span class="mono">' + U.esc(d.addressing) + '</span></div>' +
+          supRow + warn +
+          '<div class="table-wrap" style="margin-top:8px"><table class="table"><thead><tr>' +
+          '<th>工位 id</th><th>名称</th><th>角色</th><th>状态</th></tr></thead><tbody>' +
+          workers + '</tbody></table></div>',
         buttons: [{ label: '关闭', cls: 'btn-ghost' }]
       });
     }).catch(function (e) { U.toast('error', e.message); });

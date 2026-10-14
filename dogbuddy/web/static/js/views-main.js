@@ -833,6 +833,18 @@
         });
       } else if (act === 'model') {
         Windows.openModelModal(w);
+      } else if (act === 'params') {
+        // 审查报告 P1-16：按钮在（data-act="params"）、渲染函数在
+        // （views-params.js 的 Params.openPanel），但这里既没有分支也没有 else，
+        // 点下去静默无反应 —— 典型的"有零件、没接线"。
+        var V = global.DogBuddyViews || {};
+        if (V.Params && typeof V.Params.openPanel === 'function') {
+          V.Params.openPanel(w.id);
+        } else {
+          U.toast('warn', '参数面板未加载（views-params 未接线）');
+        }
+      } else if (act === 'chain') {
+        Windows.openChainModal(w);
       } else if (act === 'delete') {
         UI.confirm({
           title: '删除工位', danger: true, okLabel: '删除',
@@ -845,6 +857,10 @@
             Windows.load();
           }).catch(function (e) { U.toast('error', e.message); });
         });
+      } else {
+        // 未知 action 必须出声。P1-16 的根因就是"既没有分支也没有 else"，
+        // 于是按钮点了静默无反应，谁也不知道是漏接线还是执行失败。
+        U.toast('warn', '未知操作：' + act);
       }
     },
 
@@ -927,7 +943,7 @@
           '<div class="field"><span class="field-label">角色</span>' +
           '<select class="select" id="nw-role">' +
           '<option value="worker_programmer">worker_programmer（程序员）</option>' +
-          '<option value="admin">admin（管理员）</option>' +
+          '<option value="supervisor">supervisor（主管 · 负责一个/多个项目）</option>' +
           '</select></div>' +
           '<div class="field"><span class="field-label">模式</span>' +
           '<select class="select" id="nw-mode"><option>BUILD</option><option>PLAN</option><option>CHAT</option><option>REVIEW</option></select>' +
