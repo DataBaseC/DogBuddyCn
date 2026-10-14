@@ -314,6 +314,11 @@ def save_config(cfg: AppConfig, path: str | Path | None = None) -> Path:
     """
     p = config_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    # P2-12：目录不可写时 `mkstemp` 会按 TMP_MAX 次重试随机名，**长时间空转**
+    # （审查报告实测 222s 不返回），调用方拿不到快速失败。先探一下，立刻报错。
+    if not os.access(p.parent, os.W_OK):
+        raise PermissionError(
+            f"配置目录不可写：{p.parent}（无法保存配置；请检查权限或磁盘状态）")
     data = cfg.model_dump(mode="json")
     for env, (section, field) in _ENV_BINDINGS.items():
         if os.environ.get(env):

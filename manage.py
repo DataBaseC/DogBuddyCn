@@ -161,6 +161,12 @@ def cmd_start(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001 - config problems must not block a start attempt
         pass
     env = dict(os.environ, DOGBUDDY_CONFIG=args.config)
+    # P2-2：`dogbuddy.out` 原来只追加、从不轮转（跨多次重启无限增长）。
+    if OUT_FILE.exists() and OUT_FILE.stat().st_size > 5 * 1024 * 1024:
+        try:
+            OUT_FILE.replace(OUT_FILE.with_suffix(".out.1"))
+        except OSError:
+            pass
     log = open(OUT_FILE, "a", encoding="utf-8")
     proc = subprocess.Popen(
         [sys.executable, "-m", "dogbuddy.main"],

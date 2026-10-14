@@ -27,6 +27,26 @@ STATIC = REPO / "dogbuddy" / "web" / "static"
 # 动态拼接或第三方注入的名字，不该出现在静态扫描结果里
 IGNORE_CLASSES = {"cls", "key", "role", "class", "wide"}
 
+#: 只作为 **JS 选择器钩子**使用、本来就不需要 CSS 的类名模式。
+#: 例如 `U.$('.dec-approve')` 用来挂事件，样式由共存基类
+#: （`btn`/`input`/`icon-btn`/`msg`…）提供。
+_SELECTOR_RX = re.compile(
+    r"""(?:querySelector(?:All)?|closest|matches|\$\$?|U\.\$\$?)\s*\(\s*['"]([^'"]+)['"]""")
+_CLASS_IN_SELECTOR_RX = re.compile(r"\.([a-z][a-z0-9-]*)")
+
+
+def _selector_hooks(sources: list[Path]) -> set[str]:
+    """被 JS 当选择器用过的类名（`.a .b`、`.a > .b` 全部展开）。
+
+    审查报告 P2-8：初版把这类名字一律报成"没有定义 CSS"，于是 10 条全是误报，
+    `--strict` 在 HEAD 恒 exit=1，根本当不了 CI 门禁。这里把它们单独归类。
+    """
+    hooks: set[str] = set()
+    for path in sources:
+        for m in _SELECTOR_RX.finditer(_read(path)):
+            hooks |= set(_CLASS_IN_SELECTOR_RX.findall(m.group(1)))
+    return hooks
+
 
 def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8")
@@ -48,8 +68,20 @@ def scan_classes() -> tuple[dict[str, int], set[str]]:
     for path in sources:
         text = _read(path)
         for m in re.finditer(r'class="([^"]*)"', text):
-            for token in m.group(1).split():
-                if re.fullmatch(r"[a-z][a-z0-9-]*", token):
+            raw = m.group(1)
+            # JS 字符串拼接（`class="ctx-usage-fill ' + level + '"`）里，
+            # `[^"]*` 会把中间那截**代码**也吞进来，于是变量名 `level` 被当成类名
+            # —— 审查报告 P2-8 报的那条 `.level` 误报就是这么来的。
+            # 只取第一个引号/加号/美元符之前的字面量部分。
+            cut = len(raw)
+            for ch in ("'", '"', "+", "$"):
+                i = raw.find(ch)
+                if i != -1:
+                    cut = min(cut, i)
+            for token in raw[:cut].split():
+                # 必须以字母/数字结尾：拼接串被截断后会留下 `grp-msg-` / `toast-`
+                # 这种半截名字，旧的 `[a-z][a-z0-9-]*` 会把它当成合法类名。
+                if re.fullmatch(r"[a-z][a-z0-9-]*[a-z0-9]|[a-z]", token):
                     used[token] += 1
         for m in re.finditer(r"classList\.(?:add|toggle|remove)\('([a-z][a-z0-9-]*)'", text):
             used[m.group(1)] += 1
@@ -74,11 +106,19 @@ def main() -> int:
     problems = 0
 
     used, defined = scan_classes()
-    missing = sorted(c for c in used if c not in defined and c not in IGNORE_CLASSES)
+    hooks = _selector_hooks([STATIC / "index.html", *_js_sources()])
+    missing = sorted(c for c in used
+                     if c not in defined and c not in IGNORE_CLASSES and c not in hooks)
+    hook_only = sorted(c for c in used
+                       if c not in defined and c not in IGNORE_CLASSES and c in hooks)
     print(f"[CSS] 静态使用 {len(used)} 个 class，其中 {len(missing)} 个没有定义")
     for c in missing:
         print(f"    ★ .{c}  (出现 {used[c]} 次)")
         problems += 1
+    if hook_only:
+        print(f"    （另有 {len(hook_only)} 个只作 JS 选择器钩子、样式由基类提供，"
+              f"不计为问题：{', '.join('.' + c for c in hook_only[:8])}"
+              f"{' …' if len(hook_only) > 8 else ''}）")
 
     icons_used, icons_defined = scan_icons()
     icons_missing = sorted(icons_used - icons_defined)

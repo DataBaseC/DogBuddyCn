@@ -10,6 +10,7 @@ local file are sub-millisecond; the event loop only awaits around true IO
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -17,6 +18,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("dogbuddy.db")
 
 from .ports import (AuditEntry, Compaction, Group, GroupMember, Job, JobRun,
                     Message, PendingDecision, Project, Todo, Window)
@@ -1360,6 +1363,59 @@ class Database:
             self._conn.commit()
         return bool(cur.rowcount)
 
+
+    #: 历史保留天数（消息 / 任务运行记录 / 迭代轮次 / 已决待决事项 / 压缩摘要）
+    RETENTION_DAYS_DEFAULT = 90
+
+    def prune_history(self, keep_days: int | None = None) -> dict[str, int]:
+        """清理无界增长的历史（审查报告 P2-2）。
+
+        `messages` / `job_runs` / `pending_decisions` / `iteration_rounds` /
+        `compactions` 原来**只增不减**，库里也没有任何 `VACUUM`/`wal_checkpoint`。
+        报告按 15 分钟档外推 ≈ 132k 行 messages/月、1.6M 行/年。
+
+        只删**已终结**的行（未结束的任务/仍未决的事项一律不动）。
+        保留天数可用 `DOGBUDDY_RETENTION_DAYS` 覆盖。
+        """
+        days = int(keep_days or os.environ.get("DOGBUDDY_RETENTION_DAYS")
+                   or self.RETENTION_DAYS_DEFAULT)
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+        out: dict[str, int] = {}
+        with self._lock:
+            out["messages"] = self._conn.execute(
+                "DELETE FROM messages WHERE COALESCE(created_at,'')<>'' AND created_at < ?",
+                (cutoff,)).rowcount
+            out["job_runs"] = self._conn.execute(
+                "DELETE FROM job_runs WHERE COALESCE(finished_at,'')<>'' AND started_at < ?",
+                (cutoff,)).rowcount
+            out["iteration_rounds"] = self._conn.execute(
+                "DELETE FROM iteration_rounds WHERE COALESCE(finished_at,'')<>'' "
+                "AND started_at < ?", (cutoff,)).rowcount
+            out["pending_decisions"] = self._conn.execute(
+                "DELETE FROM pending_decisions WHERE status<>'pending' AND created_at < ?",
+                (cutoff,)).rowcount
+            out["compactions"] = self._conn.execute(
+                "DELETE FROM compactions WHERE COALESCE(created_at,'')<>'' AND created_at < ?",
+                (cutoff,)).rowcount
+            self._conn.commit()
+        return {k: int(v or 0) for k, v in out.items()}
+
+    def wal_checkpoint(self, truncate: bool = True) -> None:
+        """把 WAL 收回主库（P2-2：长读者按住时 WAL 能涨到 55MB 且进程存活期不回落）。"""
+        mode = "TRUNCATE" if truncate else "PASSIVE"
+        with self._lock:
+            try:
+                self._conn.execute(f"PRAGMA wal_checkpoint({mode})")
+            except sqlite3.Error:  # noqa: BLE001
+                logger.warning("wal checkpoint failed", exc_info=True)
+
+    def vacuum(self) -> None:
+        """回收删除后留下的空闲页。只在 prune 之后调用（VACUUM 会重写整库）。"""
+        with self._lock:
+            try:
+                self._conn.execute("VACUUM")
+            except sqlite3.Error:  # noqa: BLE001
+                logger.warning("vacuum failed", exc_info=True)
 
     def legacy_admin_windows(self) -> list[tuple[str, int]]:
         """老版本留下的管理员会话窗口（`admin:<key>` + 消息数，按消息多寡降序）。

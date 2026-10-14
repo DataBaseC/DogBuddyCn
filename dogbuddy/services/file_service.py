@@ -8,10 +8,13 @@ All paths are workspace-relative; escapes return PermissionError.
 from __future__ import annotations
 
 import base64
+import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("dogbuddy.services.files")
 
 MAX_PREVIEW_BYTES = 200 * 1024
 
@@ -25,14 +28,43 @@ LANG_MAP = {
 
 
 class FileService:
-    def __init__(self, roots: list[str | Path]):
-        """roots: allowed absolute base directories (workspaces)."""
-        self.roots = [Path(r).expanduser().resolve() for r in roots]
+    def __init__(self, roots: list[str | Path] | Any):
+        """roots: allowed absolute base directories (workspaces).
+
+        也可以传**可调用对象**（返回根列表）：工位/项目是运行中新建的，允许根必须
+        能跟着变。审查报告 P2-3：初版在启动时把根冻结成列表，于是运行中新建的
+        工位目录一律 `PermissionError → workspace not allowed`（403），必须重启服务。
+        """
+        self._roots_provider = roots if callable(roots) else None
+        self._provider_roots: list[Path] = []
+        self.roots: list[Path] = [Path(r).expanduser().resolve()
+                                  for r in ([] if callable(roots) else roots)]
+        self.refresh_roots()
+
+    def refresh_roots(self) -> None:
+        """重算"来自提供者"的根；调用方手动加进 `self.roots` 的条目保留。"""
+        if self._roots_provider is None:
+            return
+        try:
+            fresh = [Path(r).expanduser().resolve() for r in (self._roots_provider() or [])]
+        except Exception:  # noqa: BLE001 — 根解析失败不该让文件管理整体不可用
+            logger.warning("refreshing allowed roots failed", exc_info=True)
+            return
+        extras = [r for r in self.roots if r not in self._provider_roots]
+        self._provider_roots = fresh
+        self.roots[:] = fresh + [r for r in extras if r not in fresh]
+
+    def _allowed(self, p: Path) -> bool:
+        return p in self.roots or any(p.is_relative_to(r) for r in self.roots)
 
     def _root_for(self, workspace: str | None) -> Path:
         if workspace:
             p = Path(workspace).expanduser().resolve()
-            if p in self.roots or any(p.is_relative_to(r) for r in self.roots):
+            if self._allowed(p):
+                return p
+            # 可能是**运行中**才建出来的工位/项目目录 → 重算一次再判（P2-3）
+            self.refresh_roots()
+            if self._allowed(p):
                 return p
             raise PermissionError(f"workspace not allowed: {workspace}")
         return self.roots[0] if self.roots else Path.cwd()

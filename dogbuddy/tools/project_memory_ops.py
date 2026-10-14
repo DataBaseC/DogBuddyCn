@@ -50,12 +50,40 @@ def _memory_dir(ctx: ToolContext) -> Path | None:
     return None
 
 
+#: project_id 的长度上限（审查报告 P2-10：超长 id 会以 `[Errno 22]` 失败，
+#: 再被 OSError 吞成一句含糊的"写入项目记忆失败"，不提示"名字太长"）。
+MAX_PROJECT_ID = 128
+
+
 def project_memory_path(ctx: ToolContext, project_id: str) -> Path | None:
     base = _memory_dir(ctx)
-    if base is None or not project_id:
+    pid = str(project_id or "")
+    if base is None or not pid or len(pid) > MAX_PROJECT_ID:
         return None
-    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in project_id)
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in pid)
     return base / f"{safe}.md"
+
+
+def _validated_project_id(ctx: ToolContext, args: dict[str, Any]) -> tuple[str, str]:
+    """推出并**校验** project_id。返回 (pid, 错误说明)。
+
+    审查报告 P2-9：初版不校验存在性——可以造任意垃圾记忆文件，也可以拿猜到的
+    真实 id 覆写别人的文件（有 gate 时被作用域挡住，但 `ToolRegistry(gate=None)`
+    会退化成 `AllowAllGate`，装配漏传就失守）。
+    """
+    pid = _project_id(ctx, args)
+    if not pid:
+        return "", "无法确定项目：请传入 project_id，或把工位挂到项目上。"
+    if len(pid) > MAX_PROJECT_ID:
+        return "", f"project_id 太长（{len(pid)} > {MAX_PROJECT_ID} 字符），请用正常的项目 id。"
+    db = getattr(ctx, "db", None)
+    if db is not None:
+        try:
+            if db.get_project(pid) is None:
+                return "", f"项目 {pid} 不存在（不能给不存在的项目写记忆）。"
+        except Exception:  # noqa: BLE001 — 查不动就继续（不因为这个把功能锁死）
+            logger.warning("project existence check failed for %s", pid, exc_info=True)
+    return pid, ""
 
 
 class ProjectMemoryReadTool:
@@ -81,9 +109,9 @@ class ProjectMemoryReadTool:
     required_scope = "project_read"
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        pid = _project_id(ctx, args)
-        if not pid:
-            return ToolResult.failure("无法确定项目：请传入 project_id，或把工位挂到项目上。")
+        pid, err = _validated_project_id(ctx, args)
+        if err:
+            return ToolResult.failure(err)
         path = project_memory_path(ctx, pid)
         if path is None:
             return ToolResult.failure("项目记忆目录不可用（memory service 未注入）")
@@ -123,9 +151,9 @@ class ProjectMemoryWriteTool:
             return ToolResult.failure("content 不能为空")
         if len(content) > MAX_WRITE_CHARS:
             return ToolResult.failure(f"content 太长（>{MAX_WRITE_CHARS} 字符），请精简。")
-        pid = _project_id(ctx, args)
-        if not pid:
-            return ToolResult.failure("无法确定项目：请传入 project_id，或把工位挂到项目上。")
+        pid, err = _validated_project_id(ctx, args)
+        if err:
+            return ToolResult.failure(err)
         path = project_memory_path(ctx, pid)
         if path is None:
             return ToolResult.failure("项目记忆目录不可用（memory service 未注入）")

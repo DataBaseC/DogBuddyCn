@@ -3,6 +3,12 @@
 """main.py: DI assembly + lifecycle (gateway / cron / web / bus tasks)."""
 from __future__ import annotations
 
+import time
+
+import shutil
+
+import os
+
 import asyncio
 import logging
 import logging.handlers
@@ -38,6 +44,33 @@ from .web.app import WebServices, create_app
 from .web.sse import SseBroker
 
 logger = logging.getLogger("dogbuddy.main")
+
+
+#: 快照保留天数（P2-2：每次整工作区拷贝，上限 200MB，且原来没有 prune）
+SNAPSHOT_KEEP_DAYS = 14
+
+
+def _prune_snapshots(checkpoints_dir: Any, keep_days: int = 0) -> int:
+    """删掉过期的工作区快照目录（`snapshots/<UTC 时间戳>/`）。返回删除个数。"""
+    days = int(keep_days or os.environ.get("DOGBUDDY_SNAPSHOT_DAYS") or SNAPSHOT_KEEP_DAYS)
+    root = Path(checkpoints_dir or "") / "snapshots"
+    if not root.is_dir():
+        return 0
+    cutoff = time.time() - max(1, days) * 86400
+    removed = 0
+    try:
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            try:
+                if child.stat().st_mtime < cutoff:
+                    shutil.rmtree(child, ignore_errors=True)
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:
+        return removed
+    return removed
 
 
 class DogBuddyApp:
@@ -105,7 +138,8 @@ class DogBuddyApp:
         # 模型目录（模型管理页）：目录是备选清单，activate() 才写运行时配置并落盘
         self.models = ModelService(self.db, config, persist=self.persist_config,
                                    fetch_models=self.config_svc.fetch_models)
-        self.files = FileService(self._file_roots())
+        # P2-3：传**函数**而不是当前列表——运行中新建的工位目录要能立刻被允许
+        self.files = FileService(self._file_roots)
         # T8.5/T8.6：项目迭代计划 + 执行器（到点拉项目团队进共享工作区跑一轮）
         from .services.iteration_executor import IterationExecutor
         from .services.iteration_service import IterationService
@@ -167,18 +201,31 @@ class DogBuddyApp:
 
     # ------------------------------------------------------------- builders
     def _setup_logging(self) -> None:
-        self.config.logs_dir.mkdir(parents=True, exist_ok=True)
+        """装日志处理器。**先装 stderr，再尝试装文件**（审查报告 P2-5）。
+
+        初版第一步就是 `logs_dir.mkdir()`——磁盘/目录不可写时直接抛，而那时
+        文件处理器还没装上，于是**磁盘上没有任何日志可查**，只能看 stdout。
+        现在文件日志失败只降级，启动不受影响。
+        """
         root = logging.getLogger()
         root.setLevel(logging.INFO)
-        if not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers):
+        fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+        if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+            sh = logging.StreamHandler()
+            sh.setFormatter(fmt)
+            root.addHandler(sh)
+        if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers):
+            return
+        try:
+            self.config.logs_dir.mkdir(parents=True, exist_ok=True)
             fh = logging.handlers.RotatingFileHandler(
                 self.config.logs_dir / "dogbuddy.log", maxBytes=5 * 1024 * 1024,
                 backupCount=5, encoding="utf-8")
-            fh.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+            fh.setFormatter(fmt)
             root.addHandler(fh)
-            sh = logging.StreamHandler()
-            sh.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
-            root.addHandler(sh)
+        except OSError as e:
+            logging.getLogger("dogbuddy").warning(
+                "日志目录不可写（%s），仅输出到 stderr：%s", self.config.logs_dir, e)
 
     def _build_panel(self):
         from .external.panel_client import build_panel_client
@@ -346,6 +393,9 @@ class DogBuddyApp:
         except Exception:  # noqa: BLE001
             logger.exception("admin notify failed for confirm request")
 
+    def _prune_snapshots(self, checkpoints_dir: Any, keep_days: int = 0) -> int:
+        return _prune_snapshots(checkpoints_dir, keep_days)
+
     def _file_roots(self) -> list[str]:
         roots = [self.config.paths.workspaces]
         for w in self.db.list_windows():
@@ -393,6 +443,16 @@ class DogBuddyApp:
                 logger.warning("启动清扫：%d 条待决事项已过期", len(expired))
         except Exception:  # noqa: BLE001
             logger.warning("decision sweep failed", exc_info=True)
+        # P2-2：无界增长清理——历史表 + WAL 收回 + 快照目录
+        try:
+            pruned = self.db.prune_history()
+            self.db.wal_checkpoint()
+            freed = _prune_snapshots(self.config.checkpoints_dir)
+            if any(pruned.values()) or freed:
+                logger.info("历史清理：%s；快照目录删除 %d 个", pruned, freed)
+                self.db.audit("system", "history:prune", f"{pruned} snapshots={freed}")
+        except Exception:  # noqa: BLE001 — 清理失败不能挡住启动
+            logger.warning("history prune failed", exc_info=True)
         try:
             await self.mcp.start()  # T5: bridge before windows boot their registries
         except Exception:  # noqa: BLE001 — MCP never blocks startup

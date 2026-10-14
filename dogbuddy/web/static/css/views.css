@@ -205,6 +205,10 @@
 .msg { display: flex; gap: 10px; max-width: 86%; animation: msg-in 160ms ease both; }
 @keyframes msg-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
 .msg.user { align-self: flex-end; flex-direction: row-reverse; }
+/* 审查报告 P2-8：`.assistant` 一直只当语义标记用、没有任何规则（`.msg.user`/
+   `.msg.tool`/`.msg.system` 都有），于是 audit_ui 报它"用了但没定义"。
+   显式补上左对齐——既让语义完整，也让静态自检真的通过而不是靠白名单放过。 */
+.msg.assistant { align-self: flex-start; }
 .msg-avatar {
   width: 28px; height: 28px; flex: none;
   border-radius: 9px;
@@ -753,6 +757,9 @@ tr.history-row td { background: rgba(255, 255, 255, 0.02); padding: 0 12px 14px;
 .chat-msg { display: flex; flex-direction: column; gap: 5px; max-width: 78%; }
 .chat-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--tx-3); }
 .chat-who { font-weight: 600; color: var(--tx-2); }
+/* P2-8：`.chat-time` 原来靠 `.chat-meta` 继承字号与颜色、自己没有任何规则，
+   于是被 audit_ui 报成"用了但没定义"。时间戳用等宽数字，跳动时不抖。 */
+.chat-time { font-variant-numeric: tabular-nums; color: var(--tx-4); }
 .chat-body {
   padding: 10px 13px; border-radius: var(--r-lg); line-height: 1.62;
   font-size: 13px; color: var(--tx-1); white-space: normal; word-break: break-word;
