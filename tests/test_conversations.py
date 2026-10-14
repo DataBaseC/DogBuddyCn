@@ -97,6 +97,36 @@ def test_没有老会话时用默认对话(tmp_path, monkeypatch):
     assert len(convs) == 1 and convs[0]["id"] == "default"
 
 
+def test_补登记老会话并清掉空占位(tmp_path, monkeypatch):
+    """线上实测踩到的第二种形态：上一版已经先建了空的 default，
+    老历史挂在 admin:console 下 → 必须**补登记** + 清掉空占位，
+    否则用户打开对话页只看到一个空对话，以为历史丢了。"""
+    app, _client = _app(tmp_path, monkeypatch)
+    app.db._conn.execute("DELETE FROM conversations")
+    app.db._conn.commit()
+    app.db.insert_conversation("default", "默认对话")      # 上一版留下的空占位
+    for i in range(3):
+        app.db.add_message("admin:console", "user", f"老消息 {i}")
+
+    convs = app.admin.list_conversations()
+    ids = [c["id"] for c in convs]
+    assert "console" in ids, f"老会话必须被补登记，实际 {ids}"
+    assert "default" not in ids, f"空的占位对话应被清掉，实际 {ids}"
+    assert [c["message_count"] for c in convs if c["id"] == "console"] == [3]
+    # 幂等：再调一次不重复、也不误删
+    assert app.admin.sync_legacy_conversations() == 0
+    assert [c["id"] for c in app.admin.list_conversations()] == ids
+
+
+def test_空的手建对话不会被误删(tmp_path, monkeypatch):
+    """用户刚点"新建对话"还没说话 → 不能因为"0 条消息"就被清掉。"""
+    app, _client = _app(tmp_path, monkeypatch)
+    conv = app.admin.create_conversation("我的新对话")
+    assert app.admin.sync_legacy_conversations() == 0
+    ids = [c["id"] for c in app.admin.list_conversations()]
+    assert conv["id"] in ids, f"用户手建的对话被误删了：{ids}"
+
+
 # --------------------------------------------------------------------------- 新建/命名
 def test_新建对话_自动编号(tmp_path, monkeypatch):
     app, _client = _app(tmp_path, monkeypatch)

@@ -106,12 +106,17 @@ class AdminService:
     def ensure_default_conversation(self) -> dict[str, Any]:
         """保证至少有一个对话存在；**并接管老版本留下的会话历史**。
 
-        升级自愈很关键：v9 之前控制台把会话记在 `admin:console`，如果不接管，
-        用户升级后打开对话页会看到空白（以为记录丢了），而历史其实还在库里。
+        升级自愈有两个层次，缺一不可（第一版只做了其中一个，线上实测漏了）：
+          1. 对话表是空的 → 直接把老的 `admin:<key>` 会话接管成对话
+          2. 对话表已有内容（比如上一版先建了空的 `default`）→ **补登记**缺失的老会话，
+             并把那个空占位删掉，否则用户看不到自己 28 条历史，只看到一个空对话
         """
         convs = self.db.list_conversations(include_archived=True)
         if convs:
-            return convs[0]
+            self.sync_legacy_conversations()
+            convs = self.db.list_conversations(include_archived=True)
+            return convs[0] if convs else self.db.insert_conversation(
+                self.DEFAULT_CONVERSATION, "默认对话")
         try:
             legacy = self.db.legacy_admin_windows()
         except Exception:  # noqa: BLE001 — 接管失败也要能给出默认对话
@@ -127,6 +132,52 @@ class AdminService:
             logger.info("接管老会话为对话：%s（%d 条消息）", conv_id, count)
             return conv
         return self.db.insert_conversation(self.DEFAULT_CONVERSATION, "默认对话")
+
+    def sync_legacy_conversations(self) -> int:
+        """把老版本遗留在 `messages` 里的管理员会话补登记成对话（**幂等**）。
+
+        只在"该会话还没有对话行"时补；补进来之后如果发现有个**空占位对话**
+        （自动命名、0 条消息），就把它删掉——否则列表里会多一个空对话，
+        用户会以为自己翻到了错的地方。
+        返回补登记的条数。
+        """
+        try:
+            legacy = self.db.legacy_admin_windows()
+        except Exception:  # noqa: BLE001
+            return 0
+        known = {c["id"] for c in self.db.list_conversations(include_archived=True)}
+        imported: list[str] = []
+        for window_id, count in legacy:
+            if count <= 0 or window_id == "admin:system":
+                continue
+            conv_id = window_id.split(":", 1)[1] if window_id.startswith("admin:") else window_id
+            if not conv_id or conv_id in known:
+                continue
+            title = "默认对话" if conv_id in ("console", "default") else conv_id
+            self.db.insert_conversation(conv_id, title)
+            imported.append(conv_id)
+            logger.info("补登记老会话为对话：%s（%d 条消息）", conv_id, count)
+        if not imported:
+            return 0
+        # 清掉空的自动占位对话（有消息的、或用户手改过名的都不动）
+        for c in self.db.list_conversations(include_archived=True):
+            cid = c["id"]
+            if cid in imported:
+                continue
+            title = (c.get("title") or "").strip()
+            if title not in ("默认对话", "") and not title.startswith("对话 "):
+                continue
+            try:
+                if self.db.list_messages(f"admin:{cid}", 1):
+                    continue
+            except Exception:  # noqa: BLE001 — 判不出来就保守地留着
+                continue
+            self.db.delete_conversation(cid, drop_messages=False)
+            logger.info("清掉空的占位对话：%s", cid)
+        # 如果只剩下被清空的 default 而一个都不剩，补一个回来
+        if not self.db.list_conversations(include_archived=True):
+            self.db.insert_conversation(self.DEFAULT_CONVERSATION, "默认对话")
+        return len(imported)
 
     def list_conversations(self, include_archived: bool = False) -> list[dict[str, Any]]:
         self.ensure_default_conversation()
