@@ -37,7 +37,8 @@ class McpToolWrapper:
     """Adapts one MCP tool to the internal Tool protocol (registry.Tool)."""
 
     def __init__(self, client: StdioMcpClient, server: str, name: str,
-                 description: str, schema: dict[str, Any], permission: str):
+                 description: str, schema: dict[str, Any], permission: str,
+                 required_scope: str = "system"):
         self._client = client
         self.server = server
         self.tool = name
@@ -46,6 +47,11 @@ class McpToolWrapper:
         self.description = f"[MCP {server}] {description}".strip()
         self.parameters = schema or {"type": "object", "properties": {}}
         self.permission = permission if permission in _VALID_PERMS else "read"
+        # 审查报告 P1-11：MCP 工具原来**没有 required_scope**，于是它绕过作用域
+        # 维度、也不受"默认从紧"约束（`permission` 默认 read 时连 PLAN 都放行）。
+        # 外部工具是系统级能力（语义未知、可执行任意动作），默认按 system 收紧
+        # ——只有管理员能用。运维显式把 `mcp.required_scope` 调低才下放。
+        self.required_scope = required_scope or ""
         self.source = f"mcp:{server}"
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -82,6 +88,16 @@ class McpBridge:
         mapping = self._cfg("mcp.permissions", {}) or {}
         return str(mapping.get(f"{server}.{tool}", mapping.get(tool, "read")) or "read")
 
+    def _scope_for(self) -> str:
+        """MCP 工具的作用域（P1-11）。默认 `system`（只有管理员能用）。
+
+        外部工具的语义是不透明的（可能读写任意资源），所以默认按最严处理；
+        `mcp.required_scope` 可显式设为 `project` 或空串来下放。
+        """
+        raw = self._cfg("mcp.required_scope", "system")
+        val = str(raw if raw is not None else "system").strip().lower()
+        return val if val in ("system", "project", "project_read", "") else "system"
+
     # ----------------------------------------------------------- lifecycle
     async def start(self) -> int:
         """Connect every configured server; returns the number of tools found."""
@@ -106,7 +122,8 @@ class McpBridge:
                 for t in await client.list_tools():
                     self._tools.append(McpToolWrapper(
                         client, name, t.name, t.description, t.input_schema,
-                        self._permission_for(name, t.name)))
+                        self._permission_for(name, t.name),
+                        required_scope=self._scope_for()))
             except Exception as e:  # noqa: BLE001
                 logger.warning("mcp server %s tools/list failed: %s", name, e)
         self._started = True

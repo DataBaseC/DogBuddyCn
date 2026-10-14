@@ -10,6 +10,7 @@ local file are sub-millisecond; the event loop only awaits around true IO
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -81,7 +82,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -289,6 +290,19 @@ def _migrate_v10(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v11(conn: sqlite3.Connection) -> None:
+    """`job_runs.owner_pid`（审查报告 P1-13）。
+
+    启动清扫原来把所有 `running` 且未结束的运行记录一律标失败——但如果那是
+    **另一个活着的进程**（`manage.py update` 期间新旧进程并存）正在跑的任务，
+    这就是"杀活任务"。有了属主 pid，清扫只收"属主已死"的记录。
+    """
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(job_runs)").fetchall()}
+    if "owner_pid" not in existing:
+        conn.execute("ALTER TABLE job_runs ADD COLUMN owner_pid INTEGER DEFAULT 0")
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -303,7 +317,45 @@ _MIGRATIONS: dict[int, Any] = {
     8: _migrate_v8,
     9: _migrate_v9,
     10: _migrate_v10,
+    11: _migrate_v11,
 }
+
+
+def _as_utc(value: Any) -> datetime | None:
+    """把库里的 ISO 时间解析成带时区的 UTC 时间；解析不了返回 None。
+
+    审查报告 P1-12：`due_jobs` 原来用 SQL 的 TEXT 比较（`next_run_at <= ?`），
+    而库里存的时间可能带**不同时区偏移**——`now="…+08:00"` 与
+    `next_run_at="2026-10-14T15:00:00+00:00"`（实际还差 2.5 小时）会被字符串
+    比出 True → 任务抢跑。现在一律解析后按时区比较。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _pid_alive(pid: Any) -> bool:
+    """这个 pid 是否还活着。0/空 = 未知属主（老记录）→ 视为已死，可以被收掉。"""
+    try:
+        n = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if n <= 0:
+        return False
+    if n == os.getpid():
+        return True
+    try:
+        os.kill(n, 0)
+    except OSError:
+        return False
+    return True
 
 
 class SchemaTooNewError(RuntimeError):
@@ -618,11 +670,19 @@ class Database:
             return cur.rowcount > 0
 
     def due_jobs(self, now_iso: str) -> list[Job]:
+        """到点的任务。**按时区解析后比较**，不用 SQL 的 TEXT 比较（P1-12）。"""
+        now = _as_utc(now_iso)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM jobs WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=?",
-                (now_iso,)).fetchall()
-        return [self._to_job(r) for r in rows]
+                "SELECT * FROM jobs WHERE enabled=1 AND next_run_at IS NOT NULL").fetchall()
+        out: list[Job] = []
+        for r in rows:
+            nxt = _as_utc(r["next_run_at"])
+            if nxt is None:
+                continue
+            if now is None or nxt <= now:
+                out.append(self._to_job(r))
+        return out
 
     @staticmethod
     def _to_job(r: sqlite3.Row) -> Job:
@@ -640,10 +700,13 @@ class Database:
     # ------------------------------------------------------------ job_runs
     def start_run(self, job_id: str, window_id: str) -> JobRun:
         ts = _now_iso()
+        # P1-13：记下本次运行属于哪个进程，清扫时才能区分"崩溃留下的"与
+        # "另一个活着的进程正在跑的"（自更新期间新旧进程会并存）。
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO job_runs(job_id,window_id,started_at,status) VALUES(?,?,?,?)",
-                (job_id, window_id, ts, "running"))
+                "INSERT INTO job_runs(job_id,window_id,started_at,status,owner_pid)"
+                " VALUES(?,?,?,?,?)",
+                (job_id, window_id, ts, "running", os.getpid()))
             self._conn.commit()
             rid = cur.lastrowid
         return JobRun(id=rid, job_id=job_id, window_id=window_id, started_at=ts,
@@ -667,14 +730,29 @@ class Database:
         `running`，控制台永远显示"运行中"（进程早就没了）。
         """
         with self._lock:
-            runs = self._conn.execute(
-                "UPDATE job_runs SET status='failed', finished_at=?, "
-                "summary=CASE WHEN COALESCE(summary,'')='' THEN ? ELSE summary END "
-                "WHERE status='running' AND finished_at IS NULL",
-                (_now_iso(), reason)).rowcount
-            windows = self._conn.execute(
-                "UPDATE windows SET status='idle', updated_at=? WHERE status='running'",
-                (_now_iso(),)).rowcount
+            # P1-13：只收"属主进程已经死了"的运行记录。自更新期间新旧进程并存，
+            # 若无差别地把所有 running 标失败，就会**杀掉另一个进程正在跑的任务**。
+            live_runs = self._conn.execute(
+                "SELECT id, window_id, owner_pid FROM job_runs "
+                "WHERE status='running' AND finished_at IS NULL").fetchall()
+            dead = [r["id"] for r in live_runs if not _pid_alive(r["owner_pid"])]
+            busy_windows = {r["window_id"] for r in live_runs
+                            if _pid_alive(r["owner_pid"])}
+            runs = 0
+            for rid in dead:
+                runs += self._conn.execute(
+                    "UPDATE job_runs SET status='failed', finished_at=?, "
+                    "summary=CASE WHEN COALESCE(summary,'')='' THEN ? ELSE summary END "
+                    "WHERE id=? AND status='running'",
+                    (_now_iso(), reason, rid)).rowcount
+            windows = 0
+            for r in self._conn.execute(
+                    "SELECT id FROM windows WHERE status='running'").fetchall():
+                if r["id"] in busy_windows:
+                    continue  # 另一个活着的进程正在这个工位上跑任务
+                windows += self._conn.execute(
+                    "UPDATE windows SET status='idle', updated_at=? WHERE id=?",
+                    (_now_iso(), r["id"])).rowcount
             rounds = self._conn.execute(
                 "UPDATE iteration_rounds SET status='interrupted', finished_at=?, "
                 "summary=CASE WHEN COALESCE(summary,'')='' THEN ? ELSE summary END "
@@ -901,6 +979,34 @@ class Database:
                 (key, payload))
             self._conn.commit()
 
+    # -------------------------------------------------- 跨进程单例锁（P1-13）
+    #: cron 单例锁的 config 键
+    CRON_LOCK_KEY = "runtime.cron_lock"
+
+    def try_cron_lock(self, ttl_seconds: float = 180.0) -> bool:
+        """拿跨进程的 cron 单例锁。返回 True = 本进程可以跑这一轮 tick。
+
+        审查报告 P1-13：`_inflight` 是**进程内**集合，`manage.py update` 期间新旧
+        进程会同时 tick 同一批任务 → 同一个任务被跑两遍。这里用一个带属主 pid 与
+        TTL 的 config 行做互斥：持有者还活着且未过期 → 让给它。
+        """
+        me = os.getpid()
+        holder = self.get_config(self.CRON_LOCK_KEY) or {}
+        if isinstance(holder, dict):
+            pid = int(holder.get("pid") or 0)
+            since = _as_utc(holder.get("at"))
+            fresh = (since is not None and
+                     (datetime.now(timezone.utc) - since).total_seconds() < ttl_seconds)
+            if pid != me and fresh and _pid_alive(pid):
+                return False
+        self.set_config(self.CRON_LOCK_KEY, {"pid": me, "at": _now_iso()})
+        return True
+
+    def release_cron_lock(self) -> None:
+        holder = self.get_config(self.CRON_LOCK_KEY) or {}
+        if isinstance(holder, dict) and int(holder.get("pid") or 0) == os.getpid():
+            self.set_config(self.CRON_LOCK_KEY, {})
+
     # ----------------------------------------------------------- whitelist
     def whitelist_add(self, qq_id: str, name: str = "", role: str = "admin") -> None:
         with self._lock:
@@ -1088,11 +1194,21 @@ class Database:
         return bool(cur.rowcount)
 
     def due_iterations(self, now_iso: str) -> list[dict[str, Any]]:
+        """到点的迭代。同样按时区解析后比较（P1-12）。"""
+        now = _as_utc(now_iso)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM iterations WHERE status='active' AND COALESCE(next_run_at,'')<>'' "
-                "AND next_run_at<=? ORDER BY next_run_at", (now_iso,)).fetchall()
-        return [self._to_iteration(r) for r in rows]
+                "SELECT * FROM iterations WHERE status='active' "
+                "AND COALESCE(next_run_at,'')<>''").fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            nxt = _as_utc(r["next_run_at"])
+            if nxt is None:
+                continue
+            if now is None or nxt <= now:
+                out.append(self._to_iteration(r))
+        out.sort(key=lambda e: str(e.get("next_run_at") or ""))
+        return out
 
     def start_iteration_round(self, iteration_id: str, round_no: int,
                               window_count: int = 0) -> int:

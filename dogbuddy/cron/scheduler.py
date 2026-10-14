@@ -67,7 +67,19 @@ class CronScheduler:
 
     # --------------------------------------------------------------- tick
     async def tick(self) -> int:
-        """Run every due job (once each). Returns number dispatched."""
+        """Run every due job (once each). Returns number dispatched.
+
+        P1-13：先拿跨进程单例锁——`_inflight` 只在进程内有效，自更新期间新旧进程
+        会同时 tick 同一批任务，同一个任务被跑两遍。
+        """
+        repo = getattr(self.store, "repo", None)
+        if repo is not None and hasattr(repo, "try_cron_lock"):
+            try:
+                if not repo.try_cron_lock():
+                    logger.debug("cron tick 跳过：另一个进程持有 cron 锁")
+                    return 0
+            except Exception:  # noqa: BLE001 — 锁出问题不能停掉调度
+                logger.warning("cron lock check failed", exc_info=True)
         jobs = self.store.due()
         dispatched = 0
         for job in jobs:

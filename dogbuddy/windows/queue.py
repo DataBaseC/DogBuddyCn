@@ -39,6 +39,16 @@ class TaskQueue:
         self._current: TaskItem | None = None
         self._paused = False
         self._stopped = False
+        # 后台 shell 进程表：`shell(background=true)` 登记，窗口暂停/终止时统一回收。
+        # 审查报告 P1-15：初版 `kill_background()` 读的就是这个字段，但**全仓库
+        # 没有任何地方给它赋值**（工具写的是 `ctx.extra["bg_processes"]`），
+        # 于是它恒返回 0 —— 生产无 systemd/PRoot，后台 shell 永不回收。
+        # 现在这个列表是唯一的真相来源，由 `WindowRuntime.bg_processes` 引用同一对象。
+        self._bg_processes: list = []
+
+    @property
+    def bg_processes(self) -> list:
+        return self._bg_processes
 
     # ------------------------------------------------------------- enqueue
     def submit(self, task: TaskItem) -> None:

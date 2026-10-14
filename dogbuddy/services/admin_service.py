@@ -67,7 +67,9 @@ class AdminService:
         svc = AdminServices(windows=windows, jobs=jobs, sessions=sessions,
                             workspaces=workspaces, memory=memory, config=config,
                             progress=self._progress_dict,
-                            self_status=self_status, self_update=self_update)
+                            self_status=self_status, self_update=self_update,
+                            # P1-9：agent 路径改 profile 也要落盘
+                            persist=getattr(config, "persist", None))
         self.registry = ToolRegistry(gate=None, audit=db)
         self.registry.gate = _AdminGate()
         for tool in build_admin_tools(svc):

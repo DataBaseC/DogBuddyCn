@@ -9,6 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from dogbuddy.agents.core.permissions import PermissionGate
+from dogbuddy.agents.core.scope import Scope
 from dogbuddy.external.mcp_bridge import McpBridge, McpToolWrapper, safe_tool_name
 from dogbuddy.tools.registry import ToolContext, ToolRegistry
 
@@ -91,11 +93,20 @@ def test_bridge_defaults_to_read_and_registers(tmp_path):
             assert tool.source == "mcp:fake"
             assert tool.name == "mcp_fake_echo"
 
-            reg = ToolRegistry()
+            reg = ToolRegistry(gate=PermissionGate())
             assert bridge.register_into(reg) == 1
-            ctx = ToolContext(window_id="w1", workspace="/tmp", mode="BUILD")
-            res = await reg.execute("mcp_fake_echo", {"text": "yo"}, ctx)
+            # P1-11：MCP 工具默认 system 级 → 管理员（system 作用域）能用
+            admin_ctx = ToolContext(window_id="w1", workspace="/tmp", mode="BUILD",
+                                    scope=Scope(level="system", actor="admin"))
+            res = await reg.execute("mcp_fake_echo", {"text": "yo"}, admin_ctx)
             assert res.ok and res.output == "echo:yo"
+
+            # 员工/主管作用域拿不到（外部工具语义不透明，默认从紧）
+            worker_ctx = ToolContext(window_id="w1", workspace="/tmp", mode="BUILD",
+                                     scope=Scope(level="none"))
+            denied = await reg.execute("mcp_fake_echo", {"text": "yo"}, worker_ctx)
+            assert denied.ok is False, "MCP 工具不该对非 system 作用域开放"
+            assert denied.data.get("policy_denied") is True
         finally:
             await bridge.close()
 

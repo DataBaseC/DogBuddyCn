@@ -232,6 +232,10 @@ def test_C5_孤儿任务与工位被清扫(tmp_path):
                                 workspace_path="", model="", mode="BUILD",
                                 status="running"))
     run = db.start_run("job1", "w1")
+    # P1-13：清扫只收"属主进程已死"的运行记录；这里把属主改成一个不存在的 pid
+    # 来模拟"进程崩了/被重启"（否则测试进程自己就是属主，不该被收）。
+    db._conn.execute("UPDATE job_runs SET owner_pid=999999 WHERE id=?", (run.id,))
+    db._conn.commit()
     assert db.get_window("w1").status == "running"
 
     swept = db.sweep_orphan_runs()
@@ -277,7 +281,10 @@ def test_C5_启动时自动清扫(tmp_path, monkeypatch):
     # 模拟"上次崩溃时留下的悬挂任务"
     app.db.insert_window(Window(id="wdead", name="悬挂", role="worker_programmer",
                                 workspace_path="", model="", mode="BUILD", status="running"))
-    app.db.start_run("jdead", "wdead")
+    run = app.db.start_run("jdead", "wdead")
+    # P1-13：属主必须是"已死的进程"，否则清扫会（正确地）跳过它
+    app.db._conn.execute("UPDATE job_runs SET owner_pid=999999 WHERE id=?", (run.id,))
+    app.db._conn.commit()
 
     with TestClient(app.web_app):  # lifespan → start()
         # 断言要在 with 内做：退出 with 会触发 shutdown → db.close()

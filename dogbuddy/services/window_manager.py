@@ -155,7 +155,11 @@ class WindowManager:
                 self.mcp_bridge.register_into(registry)  # T5.3: external tools on the shelf
             except Exception:  # noqa: BLE001 — bridged tools never break a boot
                 logger.warning("mcp tool registration failed", exc_info=True)
-        rt = WindowRuntime(window=w, session=session, queue=queue, registry=registry)
+        # P1-15：让运行时与队列**共用同一个后台进程表**——工具登记进
+        # ctx.extra["bg_processes"]（= rt.bg_processes），而回收走
+        # queue.kill_background()（= queue._bg_processes）。同一个列表才收得掉。
+        rt = WindowRuntime(window=w, session=session, queue=queue, registry=registry,
+                           bg_processes=queue.bg_processes)
         self._runtime[w.id] = rt
         rt.queue.runner = self._make_default_runner(rt)
         self._ensure_worker(rt)

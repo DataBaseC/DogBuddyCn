@@ -20,6 +20,23 @@ from ...tools.registry import ToolContext, ToolResult
 logger = logging.getLogger("dogbuddy.agents.admin")
 
 
+def _persist_profiles(svc: "AdminServices") -> bool:
+    """把改了 profile 的配置写到磁盘（审查报告 P1-9）。
+
+    `profile_save`/`profile_remove` 改的是内存里的 app config；不落盘就等于
+    "改了、重启就没了"。Web 路由那条路径一直有 `persist()`，agent 路径漏了。
+    落盘失败不算工具失败（配置在内存里仍然生效），但必须如实告知模型。
+    """
+    fn = getattr(svc, "persist", None)
+    if not callable(fn):
+        return False
+    try:
+        return bool(fn())
+    except Exception:  # noqa: BLE001 — 落盘失败不该炸掉这次工具调用
+        logger.exception("persisting profiles failed")
+        return False
+
+
 class AdminServices:
     """Port shape expected from L2 (implemented by services/*). All optional;
     a missing service degrades the corresponding tool to a clear failure."""
@@ -29,7 +46,8 @@ class AdminServices:
                  progress: Callable[[], dict] | None = None,
                  self_status: Callable[[bool], dict] | None = None,
                  self_update: Callable[..., dict] | None = None,
-                 supervision: Any = None):
+                 supervision: Any = None,
+                 persist: Callable[[], Any] | None = None):
         self.windows = windows      # WindowManager: create/list/get/update/pause/resume/delete/status/dispatch
         self.jobs = jobs            # JobManager: create/list/get/update/pause/resume/remove/run_now
         self.sessions = sessions    # SessionManager: get/compress/reset/inject
@@ -42,6 +60,10 @@ class AdminServices:
         self.self_update = self_update
         # T9.4 指挥链：管理员→主管 的指令下发（`supervisor_command` 用）
         self.supervision = supervision
+        # 配置落盘（审查报告 P1-9）：`profile_save`/`profile_remove` 改的是内存里的
+        # app config，**不调 persist 就等于重启即丢**。Web 路由那边是调了的
+        # （`web/routes/settings.py`），agent 路径漏了。
+        self.persist = persist
 
 
 class FnTool:
@@ -327,9 +349,11 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         app.save_profile(name, section)
         if args.get("set_active"):
             app.active_llm_profile = name
-        svc.config.db.audit("admin", "profile:save", name)
+        saved = _persist_profiles(svc)
+        svc.config.db.audit("admin", "profile:save", f"{name} persisted={saved}")
         return ToolResult.success(f"profile saved: {name}"
-                                  + (" (active)" if app.active_llm_profile == name else ""))
+                                  + (" (active)" if app.active_llm_profile == name else "")
+                                  + ("" if saved else "（警告：未能写入磁盘，重启后会丢）"))
 
     tools.append(FnTool("profile_save",
         "Create or update a named LLM config set (model/base_url/key may be updated partially).",
@@ -346,8 +370,10 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         ok = app.delete_profile(name)
         if ok and app.active_llm_profile == name:
             app.active_llm_profile = ""
-        svc.config.db.audit("admin", "profile:remove", name)
-        return ToolResult.success(f"removed: {name}" if ok else f"not found: {name}")
+        saved = _persist_profiles(svc)
+        svc.config.db.audit("admin", "profile:remove", f"{name} persisted={saved}")
+        return ToolResult.success((f"removed: {name}" if ok else f"not found: {name}")
+                                  + ("" if saved else "（警告：未能写入磁盘，重启后会回来）"))
 
     tools.append(FnTool("profile_remove", "Delete a named LLM config set (the default one is kept).",
         _props(name=_p("string", "profile name", True)), profile_remove, "write"))
