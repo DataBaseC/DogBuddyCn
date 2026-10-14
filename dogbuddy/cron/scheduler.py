@@ -24,7 +24,9 @@ logger = logging.getLogger("dogbuddy.cron.scheduler")
 
 @dataclass
 class JobOutcome:
-    status: str  # ok | failed | rate_limited
+    #: ok | failed | rate_limited | timeout
+    #: `timeout` 是 P2-7 补的：本轮等待超时但**任务仍在后台跑**，不是失败。
+    status: str
     summary: str = ""
     log_path: str = ""
     detail: dict[str, Any] = field(default_factory=dict)
@@ -122,6 +124,16 @@ class CronScheduler:
             self.store.repo.finish_run(run.id, "rate_limited", outcome.summary, outcome.log_path)
             self._emit(RATE_LIMIT_STATUS, {"job_id": job.id, "window_id": job.window_id,
                                            "summary": outcome.summary})
+        elif outcome.status == "timeout":
+            # P2-7：等待超时**不是失败**——任务还在后台跑，只是本轮不再等它。
+            # 初版把它当 failed → 30 分钟以上的长任务连续 3 轮被自动暂停并通知
+            # "失败 3 次"，而任务其实成功了。这里不计连败、不暂停、不报失败。
+            self.store.mark_timeout(job)
+            self.store.repo.finish_run(run.id, "timeout", outcome.summary, outcome.log_path)
+            logger.warning("任务 %s 本轮等待超时（不计失败）：%s", job.id, outcome.summary)
+            self._emit(JOB_QUIET, {"job_id": job.id, "window_id": job.window_id,
+                                   "name": job.name, "summary": outcome.summary,
+                                   "reason": "run still in progress past the wait window"})
         else:
             fails, auto_paused = self.store.mark_failure(job)
             self.store.repo.finish_run(run.id, "failed", outcome.summary, outcome.log_path)

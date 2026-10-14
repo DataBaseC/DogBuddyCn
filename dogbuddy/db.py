@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -271,6 +271,24 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """`iteration_rounds(iteration_id, round)` 唯一约束（审查报告 P1-8）。
+
+    原来表上只有一条普通索引，于是"手动推一轮绕过并发锁"时同一个 round 会插两行
+    （报告实测：两次 `run_one` 并发都进了 round 1，`iteration_rounds` 出现两行
+    round=1，而 `iterations.round` 仍是 1）。
+
+    执行器层的并发锁已经修掉；这里是**数据库层的兜底**——先清掉历史重复行
+    （保留 id 最小的那条），再建唯一索引。
+    """
+    conn.execute(
+        "DELETE FROM iteration_rounds WHERE id NOT IN "
+        "(SELECT MIN(id) FROM iteration_rounds GROUP BY iteration_id, round)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_iter_round "
+                 "ON iteration_rounds(iteration_id, round)")
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -284,6 +302,7 @@ _MIGRATIONS: dict[int, Any] = {
     7: _migrate_v7,
     8: _migrate_v8,
     9: _migrate_v9,
+    10: _migrate_v10,
 }
 
 
@@ -643,6 +662,9 @@ class Database:
         进程崩溃/被重启时会有 `job_runs` 卡在 `running`（finished_at 为空），
         以及 `windows` 卡在 `running`。如果不处理，这些任务永远没有结论、
         面板上也一直显示"运行中"。启动时统一标失败并写明原因。
+
+        审查报告 P2-6：初版**不碰 `iteration_rounds`** → 迭代轮次永久卡在
+        `running`，控制台永远显示"运行中"（进程早就没了）。
         """
         with self._lock:
             runs = self._conn.execute(
@@ -653,8 +675,14 @@ class Database:
             windows = self._conn.execute(
                 "UPDATE windows SET status='idle', updated_at=? WHERE status='running'",
                 (_now_iso(),)).rowcount
+            rounds = self._conn.execute(
+                "UPDATE iteration_rounds SET status='interrupted', finished_at=?, "
+                "summary=CASE WHEN COALESCE(summary,'')='' THEN ? ELSE summary END "
+                "WHERE status='running' AND finished_at IS NULL",
+                (_now_iso(), reason)).rowcount
             self._conn.commit()
-        return {"runs": int(runs or 0), "windows": int(windows or 0)}
+        return {"runs": int(runs or 0), "windows": int(windows or 0),
+                "iteration_rounds": int(rounds or 0)}
 
     def list_runs(self, job_id: str | None = None, limit: int = 50) -> list[JobRun]:
         q = "SELECT * FROM job_runs"
@@ -1068,13 +1096,21 @@ class Database:
 
     def start_iteration_round(self, iteration_id: str, round_no: int,
                               window_count: int = 0) -> int:
+        """开一轮。`(iteration_id, round)` 有唯一约束（迁移 v10），重复开同一轮
+        不会再插第二行——返回已存在那行的 id（幂等，P1-8 的数据库层兜底）。"""
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO iteration_rounds(iteration_id,round,started_at,status,window_count)"
+                "INSERT OR IGNORE INTO iteration_rounds"
+                "(iteration_id,round,started_at,status,window_count)"
                 " VALUES(?,?,?,'running',?)",
                 (iteration_id, round_no, _now_iso(), window_count))
             self._conn.commit()
-            return int(cur.lastrowid or 0)
+            if cur.rowcount:
+                return int(cur.lastrowid or 0)
+            row = self._conn.execute(
+                "SELECT id FROM iteration_rounds WHERE iteration_id=? AND round=?",
+                (iteration_id, round_no)).fetchone()
+            return int(row["id"]) if row is not None else 0
 
     def finish_iteration_round(self, round_id: int, status: str, summary: str = "",
                                progress: int = 0, goal_achieved: bool = False) -> None:

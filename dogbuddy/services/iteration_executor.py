@@ -89,6 +89,24 @@ class IterationExecutor:
         finally:
             self._inflight.discard(iteration_id)
 
+    async def run_now(self, iteration_id: str) -> dict[str, Any]:
+        """手动推一轮（`POST /iterations/{id}/run_now`）。
+
+        审查报告 P1-8：路由原来**直接调 `run_one()`**，绕过了 `_inflight` 这把
+        自动 tick 用的并发锁 —— 连点两次、或自动轮次正在跑时手动推，会让同一个
+        迭代并发跑两轮，`iteration_rounds` 出现两行相同的 round（表上还没有
+        UNIQUE 约束）。这里与 tick 共用同一把锁。
+        """
+        if iteration_id in self._inflight:
+            logger.info("iteration %s 已有一轮在执行中，忽略手动推轮", iteration_id)
+            return {"skipped": True, "reason": "该迭代已有一轮在执行中（并发锁）",
+                    "iteration_id": iteration_id}
+        self._inflight.add(iteration_id)
+        try:
+            return await self.run_one(iteration_id)
+        finally:
+            self._inflight.discard(iteration_id)
+
     # ---------------------------------------------------------------- 单轮
     async def run_one(self, iteration_id: str) -> dict[str, Any]:
         entry = self.db.get_iteration(iteration_id)

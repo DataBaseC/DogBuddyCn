@@ -235,7 +235,8 @@ def test_C5_孤儿任务与工位被清扫(tmp_path):
     assert db.get_window("w1").status == "running"
 
     swept = db.sweep_orphan_runs()
-    assert swept == {"runs": 1, "windows": 1}
+    assert swept["runs"] == 1 and swept["windows"] == 1
+    assert swept.get("iteration_rounds") == 0, "没有迭代轮次要收"
     assert db.get_window("w1").status == "idle"
     row = [r for r in db.list_runs(limit=10) if r.id == run.id][0]
     assert row.status == "failed"
@@ -251,8 +252,10 @@ def test_C5_幂等且不误伤正常记录(tmp_path):
     done = db.start_run("job1", "w1")
     db.finish_run(done.id, "ok", "成功完成")
 
-    assert db.sweep_orphan_runs() == {"runs": 0, "windows": 0}, "第一次就没有孤儿"
-    assert db.sweep_orphan_runs() == {"runs": 0, "windows": 0}, "幂等"
+    first = db.sweep_orphan_runs()
+    assert first["runs"] == 0 and first["windows"] == 0, "第一次就没有孤儿"
+    again = db.sweep_orphan_runs()
+    assert again["runs"] == 0 and again["windows"] == 0, "幂等"
     row = [r for r in db.list_runs(limit=10) if r.id == done.id][0]
     assert row.status == "ok" and row.summary == "成功完成", "已结束的记录不能被改写"
     db.close()

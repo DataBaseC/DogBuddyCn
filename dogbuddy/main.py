@@ -377,13 +377,21 @@ class DogBuddyApp:
         # C5: 收尸——上次崩溃/被重启时卡在 running 的任务与工位
         try:
             swept = self.db.sweep_orphan_runs()
-            if swept.get("runs") or swept.get("windows"):
-                logger.warning("孤儿清扫：修正 %d 条任务运行记录、%d 个工位状态",
-                               swept["runs"], swept["windows"])
+            if swept.get("runs") or swept.get("windows") or swept.get("iteration_rounds"):
+                logger.warning("孤儿清扫：修正 %d 条任务运行记录、%d 个工位状态、%d 个迭代轮次",
+                               swept["runs"], swept["windows"], swept.get("iteration_rounds", 0))
                 self.db.audit("system", "orphan:sweep",
-                              f"runs={swept['runs']} windows={swept['windows']}")
+                              f"runs={swept['runs']} windows={swept['windows']} "
+                              f"iteration_rounds={swept.get('iteration_rounds', 0)}")
         except Exception:  # noqa: BLE001 — 清扫失败不能挡住启动
             logger.warning("orphan sweep failed", exc_info=True)
+        # P2-6：重启后把已经超时的待决事项翻成 timeout（否则它们永远挂着）
+        try:
+            expired = self.decisions.sweep()
+            if expired:
+                logger.warning("启动清扫：%d 条待决事项已过期", len(expired))
+        except Exception:  # noqa: BLE001
+            logger.warning("decision sweep failed", exc_info=True)
         try:
             await self.mcp.start()  # T5: bridge before windows boot their registries
         except Exception:  # noqa: BLE001 — MCP never blocks startup

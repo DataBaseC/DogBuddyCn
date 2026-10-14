@@ -412,11 +412,41 @@ class WindowManager:
         rt.queue.submit(TaskItem(prompt=prompt, job_id=job_id, urgent=False,
                                  kind=kind or "prompt", llm_profile=llm_profile or "",
                                  meta={"future": future}))
+        timeout = self._wait_timeout(window_id)
         try:
-            result = await asyncio.wait_for(future, timeout=1800.0)
+            result = await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
-            return JobOutcome(status="failed", summary="task timed out (30min)")
+            # P2-7（审查报告）：超时**不是失败**。任务还在后台队列里跑，只是本轮
+            # 不再等它。初版返回 status="failed" → 调度器计连败 → 30 分钟以上的
+            # 长任务连续 3 轮被自动暂停并通知用户"失败 3 次"，而任务其实成功了。
+            logger.warning("job %s 等待 %.0fs 仍未结束：本轮停止等待（任务继续在后台运行，"
+                           "不计失败）", job_id, timeout)
+            return JobOutcome(
+                status="timeout",
+                summary=f"超过 {int(timeout)}s 仍未结束：本轮已停止等待，任务仍在后台继续运行"
+                        f"（不算失败，也不计入连败）。")
         return self._to_outcome(result)
+
+    #: cron 路径等待单轮结束的默认上限（秒）。工位参数 `task_timeout` 可覆盖。
+    CRON_WAIT_TIMEOUT: float = 1800.0
+
+    def _wait_timeout(self, window_id: str) -> float:
+        """本轮等待上限。长任务（构建/大批量跑测试）可用工位参数 `task_timeout` 调大。
+
+        P2-7：这个值只决定"等多久就不再等"，**不决定成败**——超时不计失败。
+        """
+        try:
+            w = self.get(window_id)
+            if w is not None:
+                raw = (self.params_for(w) or {}).get("task_timeout")
+                if raw:
+                    val = float(raw)
+                    if val > 0:
+                        return val
+        except Exception:  # noqa: BLE001 — 参数读不出来就用默认值
+            logger.warning("reading task_timeout failed for %s", window_id, exc_info=True)
+        return float(self.CRON_WAIT_TIMEOUT)
+
 
     def dispatch_manual(self, window_id: str, prompt: str) -> None:
         """Manual (human-initiated) run — head-of-queue, fire-and-forget."""

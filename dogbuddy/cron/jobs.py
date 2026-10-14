@@ -346,3 +346,17 @@ class JobStore:
         job.last_run_at = _now().isoformat()
         job.next_run_at = (_now() + timedelta(minutes=5)).isoformat()
         self.repo.upsert_job(job)
+
+    def mark_timeout(self, job: Job) -> None:
+        """本轮等待超时——**不是失败**，所以不碰 fail_count（审查报告 P2-7）。
+
+        初版把"30 分钟还没跑完"当 failed，于是长任务连续三轮被自动暂停、
+        并通知用户"失败 3 次"，而任务其实**成功了**。这里只把下次运行时间往后排。
+        """
+        job.last_run_at = _now().isoformat()
+        if job.schedule_type == "once":
+            job.enabled = False
+            job.next_run_at = None
+        else:
+            job.next_run_at = compute_next_run(job.schedule, job.last_run_at)
+        self.repo.upsert_job(job)

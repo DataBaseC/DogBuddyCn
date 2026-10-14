@@ -89,6 +89,15 @@ class ReportService:
             bus.subscribe(DECISION_CREATED, self._on_decision_created)
         except ImportError:  # pragma: no cover — standalone wiring in tests
             pass
+        # P1-10（审查报告）：迭代**停摆**是火警。初版 `iteration.stopped` 全仓库只有
+        # `web/sse.py` 的 `subscribe("*")` 一个订阅者——即"当时开着浏览器标签的人"，
+        # 没走 notify。而设计是"用户长时间不在场、数据自取"，于是项目停了没人知道、
+        # 也不知道停因。ROADMAP T8.6 写的是"发事件并写明原因"——**发事件 ≠ 触达人**。
+        try:
+            from .iteration_executor import ITERATION_STOPPED
+            bus.subscribe(ITERATION_STOPPED, self._on_iteration_stopped)
+        except ImportError:  # pragma: no cover
+            pass
 
     # -------------------------------------------------------------- handlers
     async def _on_job_completed(self, event: Event) -> None:
@@ -210,6 +219,25 @@ class ReportService:
 
     async def _on_confirm_request(self, event: Event) -> None:
         await self._deliver(event, "detailed", critical=True)
+
+    async def _on_iteration_stopped(self, event: Event) -> None:
+        """迭代停摆 → 必须触达人（P1-10）。
+
+        这是"火警"：迭代因连续无进展 / 到上限 / 连续崩溃而停下，如果不通知，
+        用户按设计"长时间不在场、数据自取"就只会看到一个静默停住的项目。
+        停因必须一起报出去（否则用户不知道该改什么）。
+        """
+        p = event.payload or {}
+        text = (f"🛑 项目迭代已停止（第 {p.get('round', '?')} 轮）\n"
+                f"原因：{p.get('reason') or '(未说明)'}\n"
+                f"目标：{str(p.get('goal') or '')[:200]}\n"
+                f"最后进展：{str(p.get('summary') or '')[:400]}")
+        self._remember(text)
+        for notifier in self._targets(event):
+            try:
+                await notifier.send(text)
+            except Exception:  # noqa: BLE001 — 一个通道失败不能挡住其余
+                logger.exception("notifier %s send failed", getattr(notifier, "name", "?"))
 
     async def _on_rate_limit(self, event: Event) -> None:
         # visible in UI status; no push spam

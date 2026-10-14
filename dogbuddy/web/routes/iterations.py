@@ -111,7 +111,10 @@ def router(svc, auth_deps) -> APIRouter:
         if ex is None:
             raise HTTPException(status_code=503, detail="迭代执行器未启用")
         try:
-            return {"result": await ex.run_one(iteration_id)}
+            # 走 `run_now`（而不是 `run_one`）：它与自动 tick 共用 `_inflight` 并发锁，
+            # 否则连点两次会让同一迭代并发跑两轮、轮次号重复（审查报告 P1-8）。
+            runner = getattr(ex, "run_now", None) or ex.run_one
+            return {"result": await runner(iteration_id)}
         except Exception as e:  # noqa: BLE001 — 一轮失败要给人话
             raise HTTPException(status_code=500, detail=f"本轮执行失败：{e}") from e
 
