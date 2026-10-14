@@ -340,6 +340,16 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 > 现状底座：`cron/jobs.py` 4 种排程 + 60s tick + `job_runs` + 连续失败 auto_paused；
 > `llm/retry.py` 指数退避（10s→20→…cap 300s，5 次，**不读 Retry-After、无历史记忆**）。
 
+> **组一 · 任务自动化（✅ 已完成，v0.7.1）**：新增 19 个专项测试，全量 303 绿、零回归。
+>
+> | 项 | 落地 | 说明 |
+> |---|---|---|
+> | **T8.1 自助排期** | `tools/automation_ops.py: ScheduleTool` + `registry.build_registry(jobs=…)` | 工位可用 `schedule` 工具建/改/删/暂停/恢复/立即执行/列出定时任务。**权限从紧**：只能管**本工位**与**同项目**工位的任务，跨项目一律拒绝（`_allowed_windows` + 逐操作校验），所有写操作过 PermissionGate 并审计。排期表达式写错会**回传正确语法让模型自改**。注意 `ADMIN_TOOLS` 必须恰好等于 `agents/admin/tools.py` 的集合（管理员用独立注册表），所以这三件工具只进员工工具箱——这个约束被不变量测试守着 |
+> | **T8.2 条件任务** | `NotifyOwnerTool` + `JobOutcome.notify*` + `scheduler` 分支 + `JOB_QUIET` 事件 | `report_strategy=conditional` 时**只有工位调用过 `notify_owner` 才真的通知**；没调用就静默（发 `job.quiet`，不发 `job.completed`），砍掉"没事也报一遍"。有事时报告用**工位写给人的那段话**（`notify_text`）而不是整段执行输出。`brief` 任务行为不变 |
+> | **T8.3 自调度** | `RescheduleTool` + `JobStore.mark_success(next_run_at=…)` + `scheduler` | 工位在本轮里用 `reschedule`（`after='2h'` 或 `at=ISO`）自决下次运行时间，**覆盖 cron 默认**；带 60s 下限（防疯狂空转）与 90 天上限；一次性任务自调度后**保持启用**（工位意图是"过会儿再来"，不是跑完即止）；任务失败时**不安排**下次运行（失败有失败的处理） |
+>
+> 数据流：工具把意图写进 `ctx.extra` → `PromptRunner` 提取成 `RunnerResult.next_run_at/notify*` → `WindowManager._to_outcome` 映射到 `JobOutcome` → `CronScheduler` 消费。中间任何一跳丢失都会让工位的意图失效，所以每一跳都有测试。
+
 > **组三 · 限速自适应退避（✅ 已完成，v0.7.0）**：新增 20 个专项测试，全量 284 绿、零回归。
 >
 > | 项 | 落地 | 说明 |

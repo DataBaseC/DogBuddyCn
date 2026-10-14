@@ -98,6 +98,9 @@ class DogBuddyApp:
         self.workspaces = WorkspaceManager(config.paths.workspaces, self.db)
         self.job_store = JobStore(self.db)
         self.jobs = JobManager(self.job_store, self.windows)
+        # T8.1：把 JobStore 与"立即执行"入口交给工位，schedule 工具才能真正排期
+        self.windows.job_store = self.job_store
+        self.windows.run_job_now = self.jobs.run_now
         self.config_svc = ConfigService(self.db, config, persist=self.persist_config)
         # 模型目录（模型管理页）：目录是备选清单，activate() 才写运行时配置并落盘
         self.models = ModelService(self.db, config, persist=self.persist_config,

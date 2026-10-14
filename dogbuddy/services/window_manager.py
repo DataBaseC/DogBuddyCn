@@ -80,6 +80,10 @@ class WindowManager:
         # T5.1: bridged MCP tools are registered into every window registry
         self.mcp_bridge = mcp_bridge
         self.checkpoints_dir = str(checkpoints_dir)
+        # T8.1：自助排期工具需要 JobStore + "立即执行"入口。
+        # 由 main 在 JobManager 建好后 setattr 注入（窗口在 start() 才 boot，时序安全）。
+        self.job_store: Any = None
+        self.run_job_now: Callable[[str], Any] | None = None
         self.max_iterations = max_iterations
         self.builder = ContextBuilder(memory_service=memory)
         self.threshold = threshold
@@ -120,10 +124,17 @@ class WindowManager:
         if loop is not None and loop.is_running():
             rt.worker = loop.create_task(rt.queue.run_loop())
 
+    def _run_job_now(self, job_id: str) -> Any:
+        """T8.1：让工位触发的 run_now 真正跑起来（委派给 main 注入的入口）。"""
+        if self.run_job_now is None:
+            raise RuntimeError("立即执行不可用（未注入 run_job_now）")
+        return self.run_job_now(job_id)
+
     def _boot(self, w: Window) -> WindowRuntime:
         session = WindowSession(w, self.db, self.db, self.db)
         queue = TaskQueue(w.id, on_status=lambda s: self._set_status(w.id, s))
-        registry = build_worker_registry(w.role, gate=self.gate, audit=self.db)
+        registry = build_worker_registry(w.role, gate=self.gate, audit=self.db,
+                                         jobs=self.job_store, run_job_now=self._run_job_now)
         if self.mcp_bridge is not None and getattr(self.mcp_bridge, "started", False):
             try:
                 self.mcp_bridge.register_into(registry)  # T5.3: external tools on the shelf
@@ -514,7 +525,15 @@ class WindowManager:
 
     @staticmethod
     def _to_outcome(result: Any) -> JobOutcome:
-        return JobOutcome(status=result.status, summary=(result.summary or "")[:1000])
+        """RunnerResult → JobOutcome。T8.2/T8.3 的信号必须原样带过去，
+        否则工位的"有事才通知"和"下次何时跑"会在最后一跳丢掉。"""
+        return JobOutcome(
+            status=result.status, summary=(result.summary or "")[:1000],
+            next_run_at=getattr(result, "next_run_at", None),
+            notify=bool(getattr(result, "notify", False)),
+            notify_text=getattr(result, "notify_text", "") or "",
+            notify_level=getattr(result, "notify_level", "info") or "info",
+            detail=dict(getattr(result, "meta", None) or {}))
 
     # -------------------------------------------------------------- views
     def recent_messages(self, window_id: str, limit: int = 100) -> list[dict[str, Any]]:

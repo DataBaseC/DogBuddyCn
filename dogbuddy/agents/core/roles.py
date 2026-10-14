@@ -81,6 +81,10 @@ ADMIN_TOOLS = [
     # self-upgrade of the running deployment (NOT delegable to an employee window)
     "self_version", "self_update",
 ]
+# 注意：ADMIN_TOOLS 必须**恰好等于** `agents/admin/tools.py` 里注册的工具集
+# （管理员用的是自己独立的注册表，不含通用工具箱；`schedule`/`reschedule`/
+#  `notify_owner` 属于员工通用工具箱，所以只在下面 WORKER_PROGRAMMER_TOOLS 里）。
+# 不变量测试：tests/test_self_upgrade_tool.py::test_admin_role_exposes_every_registered_tool
 
 WORKER_PROGRAMMER_TOOLS = [
     "read_file", "write_file", "edit_file", "shell",
@@ -88,6 +92,8 @@ WORKER_PROGRAMMER_TOOLS = [
     "todo_view", "todo_add", "todo_done",
     "checkpoint_create", "checkpoint_rollback",
     "explore_subagent", "ask_user", "server_exec",
+    # Batch 8 组一：员工也能给自己排期、自决节奏、有事才通知（权限从紧）
+    "schedule", "reschedule", "notify_owner",
 ]
 
 

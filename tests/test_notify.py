@@ -354,8 +354,9 @@ def test_scheduler_emits_report_channel():
     class FakeStore:
         repo = FakeRepo()
 
-        def mark_success(self, job):
-            pass
+        def mark_success(self, job, next_run_at=None):
+            # T8.3: 调度器会把"自调度覆盖值"作为第二个参数传进来
+            self.last_next_run_at = next_run_at
 
         def mark_failure(self, job):
             return (1, True)

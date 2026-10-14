@@ -18,6 +18,8 @@ logger = logging.getLogger("dogbuddy.events")
 # well-known event types
 JOB_COMPLETED = "job.completed"
 JOB_FAILED = "job.failed"
+JOB_QUIET = "job.quiet"          # T8.2 条件任务：跑完了但"无事可报"，静默记录
+RATE_LIMIT_PAUSED = "rate_limit.paused"  # T8.8 封禁级限速：任务已暂停（非失败）
 WORKER_QUESTION = "worker.question"
 CONFIRM_REQUEST = "confirm.request"
 WINDOW_STATUS = "window.status"

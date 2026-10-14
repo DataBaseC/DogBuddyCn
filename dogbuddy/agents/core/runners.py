@@ -45,6 +45,12 @@ class RunnerResult:
     pending_confirms: list[str] = field(default_factory=list)
     pending_questions: list[str] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
+    # T8.3 自调度：本次任务自决的下次运行时间（ISO）；None = 用 job 默认 cron
+    next_run_at: str | None = None
+    # T8.2 条件通知：任务主动要求通知管理员（report_strategy=conditional 时决定是否报告）
+    notify: bool = False
+    notify_text: str = ""
+    notify_level: str = "info"
 
 
 @runtime_checkable
@@ -77,12 +83,21 @@ class PromptRunner:
             status = "ok"
         if status != "rate_limited" and "rate limited" in (result.content or "").lower():
             status = "rate_limited"
+        # T8.2/T8.3：工具把"要不要通知"和"下次何时跑"写进 ctx.extra，这里取出来交给调度器
+        extra = getattr(env.ctx, "extra", None) or {}
+        notify = extra.get("notify") if isinstance(extra.get("notify"), dict) else None
         return RunnerResult(
             status=status, summary=result.content or "",
             pending_confirms=result.pending_confirms,
             pending_questions=result.pending_questions,
+            next_run_at=(extra.get("next_run_at") or None) if status == "ok" else None,
+            notify=bool(notify),
+            notify_text=(notify or {}).get("text", ""),
+            notify_level=(notify or {}).get("level", "info"),
             meta={"iterations": result.iterations, "tool_calls": result.tool_calls,
-                  "stop_reason": result.stop_reason})
+                  "stop_reason": result.stop_reason,
+                  **({"reschedule_reason": extra["reschedule_reason"]}
+                     if extra.get("reschedule_reason") else {})})
 
 
 class ScriptRunner:

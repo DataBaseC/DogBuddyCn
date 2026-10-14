@@ -10,11 +10,15 @@ from ...tools.registry import ToolRegistry, build_registry
 
 def build_worker_registry(role: str | RoleSpec = "worker_programmer",
                           gate: PermissionGate | None = None,
-                          audit: any = None) -> ToolRegistry:
+                          audit: any = None,
+                          jobs: any = None, run_job_now: any = None) -> ToolRegistry:
     spec = role if isinstance(role, RoleSpec) else get_role(role)
     if spec is None:
         spec = get_role("worker_programmer")
-    registry = build_registry(gate=gate or PermissionGate(), audit=audit)
+    # `jobs`/`run_job_now` (T8.1) 让 `schedule` 工具能真的建/触发定时任务；
+    # 不注入时工具仍在架子上但执行会返回"排期服务不可用"
+    registry = build_registry(gate=gate or PermissionGate(), audit=audit,
+                              jobs=jobs, run_job_now=run_job_now)
     # tool set is enforced at schema level (AgentLoop filters by spec.tool_names);
     # the registry itself stays complete so explore_subagent can rebuild subsets.
     return registry

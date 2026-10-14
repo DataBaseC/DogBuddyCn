@@ -208,10 +208,16 @@ class ToolRegistry:
 
 
 def build_registry(gate: PermissionGate | None = None, audit: Any = None,
-                   include: list[str] | None = None) -> ToolRegistry:
+                   include: list[str] | None = None,
+                   jobs: Any = None, run_job_now: Any = None) -> ToolRegistry:
     """Register the standard programmer toolbox. Import kept local so individual
-    tool modules can be tested without pulling the whole package in."""
+    tool modules can be tested without pulling the whole package in.
+
+    `jobs` (JobStore) + `run_job_now` 是 T8.1 自助排期需要的注入点——不注入时
+    `schedule` 工具仍会注册，但执行时返回"排期服务不可用"（便于纯工具测试）。
+    """
     from . import ask_user as _ask
+    from . import automation_ops as _auto
     from . import checkpoint as _ckpt
     from . import file_ops as _file
     from . import search_ops as _search
@@ -224,6 +230,7 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
     tools: list[Tool] = [
         *_file.all_tools(), *_shell.all_tools(), *_search.all_tools(),
         *_todo.all_tools(), *_ckpt.all_tools(), *_sub.all_tools(),
+        *_auto.all_tools(jobs=jobs, runner=run_job_now),
         _ask.AskUserTool(), _srv.ServerExecTool(),
     ]
     for t in tools:

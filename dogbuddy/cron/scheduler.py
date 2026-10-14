@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from ..events.bus import JOB_COMPLETED, JOB_FAILED, RATE_LIMIT_STATUS, Event
+from ..events.bus import JOB_COMPLETED, JOB_FAILED, JOB_QUIET, RATE_LIMIT_STATUS, Event
 from .jobs import JobStore
 
 logger = logging.getLogger("dogbuddy.cron.scheduler")
@@ -28,6 +28,12 @@ class JobOutcome:
     summary: str = ""
     log_path: str = ""
     detail: dict[str, Any] = field(default_factory=dict)
+    # T8.3 自调度：本次任务自决的下次运行时间（ISO）；None = 用 job 默认 cron
+    next_run_at: str | None = None
+    # T8.2 条件通知：任务主动要求通知管理员
+    notify: bool = False
+    notify_text: str = ""
+    notify_level: str = "info"
 
 
 class CronScheduler:
@@ -86,12 +92,30 @@ class CronScheduler:
             outcome = JobOutcome(status="failed", summary=str(e))
 
         if outcome.status == "ok":
-            self.store.mark_success(job)
+            # T8.3 自调度：任务自决的下次运行时间覆盖默认 cron
+            self.store.mark_success(job, getattr(outcome, "next_run_at", None))
             self.store.repo.finish_run(run.id, "ok", outcome.summary, outcome.log_path)
-            self._emit(JOB_COMPLETED, {"job_id": job.id, "window_id": job.window_id,
+            strategy = (getattr(job, "report_strategy", "") or "")
+            notified = bool(getattr(outcome, "notify", False))
+            # T8.2 条件任务："有事才通知"——conditional 且没调 notify_owner 就静默，
+            # 砍掉无用通知（跑动记录仍留在 job_runs 里，控制台查得到）
+            if strategy == "conditional" and not notified:
+                logger.info("job %s 完成但无事可报（conditional），静默记录", job.id)
+                self._emit(JOB_QUIET, {"job_id": job.id, "window_id": job.window_id,
                                        "name": job.name, "summary": outcome.summary,
-                                       "report_strategy": job.report_strategy,
-                                       "report_channel": getattr(job, "report_channel", "") or ""})
+                                       "reason": "conditional: nothing to report"})
+            else:
+                summary = outcome.summary
+                if strategy == "conditional" and notified:
+                    # 有条件通知时，报告用**工位写给人的那段话**，而不是整段执行输出
+                    summary = (getattr(outcome, "notify_text", "") or outcome.summary)
+                self._emit(JOB_COMPLETED, {"job_id": job.id, "window_id": job.window_id,
+                                           "name": job.name, "summary": summary,
+                                           "notify": notified,
+                                           "notify_level": getattr(outcome, "notify_level", "info"),
+                                           "report_strategy": job.report_strategy,
+                                           "next_run_at": getattr(job, "next_run_at", None),
+                                           "report_channel": getattr(job, "report_channel", "") or ""})
         elif outcome.status == "rate_limited":
             # rate-limit waiting is NOT a failure (M-H counting semantics)
             self.store.mark_rate_limited(job)

@@ -305,10 +305,18 @@ class JobStore:
     def due(self) -> list[Job]:
         return self.repo.due_jobs(_now().isoformat())
 
-    def mark_success(self, job: Job) -> None:
+    def mark_success(self, job: Job, next_run_at: str | None = None) -> None:
+        """记成功。`next_run_at` 是 T8.3 自调度的覆盖值（本次任务自决的下次时间）。
+
+        自调度优先于 cron 默认计算，且**即使是一次性任务也会保持启用**
+        （工位的意图是"过一会儿再来"，不是"跑完就完"）。
+        """
         job.last_run_at = _now().isoformat()
         job.fail_count = 0
-        if job.schedule_type == "once":
+        if next_run_at:
+            job.next_run_at = next_run_at
+            job.enabled = True
+        elif job.schedule_type == "once":
             job.enabled = False
             job.next_run_at = None
         else:
