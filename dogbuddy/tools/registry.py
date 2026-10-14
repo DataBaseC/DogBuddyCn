@@ -61,6 +61,9 @@ class ToolContext:
     checkpoint_root: str = ""
     memory_service: Any = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # T9.1：调用者的作用域（由 ScopeResolver 从角色推导后注入；
+    # None = 未声明 → 管理类工具会被 fail-closed 拒绝）
+    scope: Any = None
 
 
 @runtime_checkable
@@ -141,7 +144,13 @@ class ToolRegistry:
                 tool_failure=True)
         if approved:
             ctx.extra["confirmed"] = True  # human-approved replay (T4.1)
-        decision = self.gate.check(name, tool.permission, args, ctx)
+        required = getattr(tool, "required_scope", "") or ""
+        try:
+            decision = self.gate.check(name, tool.permission, args, ctx,
+                                       required_scope=required)
+        except TypeError:
+            # 兼容只接受 4 参数的旧 gate/测试替身
+            decision = self.gate.check(name, tool.permission, args, ctx)
         if not decision.allowed:
             if decision.needs_confirm:
                 self._audit(ctx, name, f"needs_confirm: {decision.reason}", args)
@@ -220,6 +229,7 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
     from . import automation_ops as _auto
     from . import checkpoint as _ckpt
     from . import file_ops as _file
+    from . import project_memory_ops as _pmem
     from . import search_ops as _search
     from . import server_exec as _srv
     from . import shell_ops as _shell
@@ -231,6 +241,7 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
         *_file.all_tools(), *_shell.all_tools(), *_search.all_tools(),
         *_todo.all_tools(), *_ckpt.all_tools(), *_sub.all_tools(),
         *_auto.all_tools(jobs=jobs, runner=run_job_now),
+        *_pmem.all_tools(),
         _ask.AskUserTool(), _srv.ServerExecTool(),
     ]
     for t in tools:

@@ -26,6 +26,7 @@ class ProjectPatch(BaseModel):
     name: str | None = None
     root_path: str | None = None
     params: dict[str, Any] | None = None
+    owner_supervisor_id: str | None = None   # T9.4：指定该项目的主管工位
 
 
 class MountIn(BaseModel):
@@ -40,11 +41,25 @@ def _dto(p: Any, db: Any) -> dict:
     return {
         "id": p.id, "name": p.name, "root_path": p.root_path,
         "params": p.params or {}, "created_at": p.created_at, "updated_at": p.updated_at,
+        # T9.4：该项目的主管（指挥链的中间层）；空 = 无主管（事件直连管理员）
+        "owner_supervisor_id": getattr(p, "owner_supervisor_id", "") or "",
+        "owner_supervisor_name": _supervisor_name(db, p),
         "windows": [{"id": w.id, "name": w.name, "subdir": getattr(w, "subdir", "") or ""}
                     for w in windows],
         "groups": [{"id": g.id, "name": g.name} for g in groups],
         "window_count": len(windows), "group_count": len(groups),
     }
+
+
+def _supervisor_name(db: Any, p: Any) -> str:
+    sid = getattr(p, "owner_supervisor_id", "") or ""
+    if not sid:
+        return ""
+    try:
+        w = db.get_window(sid)
+    except Exception:  # noqa: BLE001
+        return ""
+    return getattr(w, "name", "") if w is not None else ""
 
 
 def router(svc, auth_deps) -> APIRouter:
@@ -123,6 +138,38 @@ def router(svc, auth_deps) -> APIRouter:
         svc.db.audit("web", "project:unmount", window_id)
         return {"unmounted": window_id,
                 "projects": [_dto(x, svc.db) for x in svc.db.list_projects()]}
+
+    @r.get("/projects/{project_ref}/chain", dependencies=auth_deps)
+    def chain(project_ref: str) -> dict:
+        """指挥链一览：管理员 → 主管 → 员工（T9.4 的可视化依据）。"""
+        p = svc.db.get_project(project_ref)
+        if p is None:
+            raise HTTPException(status_code=404, detail=f"项目不存在：{project_ref}")
+        sup_id = getattr(p, "owner_supervisor_id", "") or ""
+        sup = svc.db.get_window(sup_id) if sup_id else None
+        workers = []
+        for w in svc.db.list_windows():
+            if (getattr(w, "project_id", "") or "") != p.id:
+                continue
+            if w.id == sup_id:
+                continue
+            workers.append({"id": w.id, "name": w.name, "role": w.role,
+                            "status": getattr(w, "status", "")})
+        health = "ok"
+        if sup_id and sup is None:
+            health = "主管工位不存在 → 事件退化直连管理员"
+        elif not sup_id:
+            health = "无主管 → 事件直连管理员（兼容单管理员部署）"
+        return {
+            "project": {"id": p.id, "name": p.name, "root_path": p.root_path},
+            "admin": {"scope": "system", "note": "管理员工位：全部资源与配置"},
+            "supervisor": ({"id": sup.id, "name": sup.name, "scope": "project",
+                            "scope_projects": [p.id]}
+                           if sup is not None else None),
+            "workers": workers,
+            "health": health,
+            "addressing": "project_id → projects.owner_supervisor_id → 主管工位",
+        }
 
     @r.get("/projects/{project_ref}/params-chain", dependencies=auth_deps)
     def params_chain(project_ref: str, window_id: str | None = None) -> dict:

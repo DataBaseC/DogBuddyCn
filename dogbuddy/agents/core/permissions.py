@@ -100,12 +100,24 @@ def _outside_workspace(path_str: str, workspace: str) -> bool:
 
 class PermissionGate:
     """The real gate (L3). Optional confirm_fn marks that user IM confirmation is
-    available; when absent, dangerous commands are denied outright."""
+    available; when absent, dangerous commands are denied outright.
 
-    def __init__(self, confirm_available: bool = False):
+    Batch 9 · T9.1：新增**作用域维度**（fail-closed）。管理类工具声明
+    `required_scope`（project|system）；调用前校验「目标资源 ∈ 调用者 Scope」。
+    判定不出来 = 拒绝——宁可错杀不可放行（越权是安全红线）。
+    """
+
+    def __init__(self, confirm_available: bool = False, scope_resolver: Any = None):
         self.confirm_available = confirm_available
+        self.scope_resolver = scope_resolver
 
-    def check(self, tool_name: str, permission: str, args: dict[str, Any], ctx: ToolContext) -> GateDecision:
+    def check(self, tool_name: str, permission: str, args: dict[str, Any],
+              ctx: ToolContext, required_scope: str = "") -> GateDecision:
+        # --- T9.1 作用域裁决（在模式矩阵之前：作用域是更硬的约束）---
+        scope_denied = self.check_scope(tool_name, args, ctx, required_scope)
+        if scope_denied is not None:
+            return scope_denied
+
         mode = (ctx.mode or "BUILD").upper()
         scheduled = bool(ctx.extra.get("scheduled"))
         confirmed = bool(ctx.extra.get("confirmed"))
@@ -135,6 +147,77 @@ class PermissionGate:
             return self._check_dangerous(args, ctx, confirmed, allow_all=False)
 
         return GateDecision(True)
+
+    # ------------------------------------------------------- T9.1 作用域
+    def check_scope(self, tool_name: str, args: dict[str, Any], ctx: ToolContext,
+                    required_scope: str = "") -> GateDecision | None:
+        """返回拒绝决定，或 None（放行）。
+
+        **fail-closed**：工具声明了 `required_scope` 却无法判定目标归属 → 拒绝。
+        未声明 `required_scope` 的工具（读写文件/shell 等）不走这条路。
+        """
+        required = str(required_scope or "").strip().lower()
+        if not required:
+            return None  # 普通工具：作用域管不着
+
+        scope = getattr(ctx, "scope", None)
+        if scope is None:
+            return GateDecision(False, f"{tool_name} 需要 {required} 作用域，但调用者未声明作用域（拒绝）")
+        if required == "system" and not scope.is_system:
+            return GateDecision(
+                False, f"越权：{tool_name} 需要 system 作用域（仅管理员），"
+                       f"当前 {scope.describe()}")
+        if required == "project":
+            if scope.is_system:
+                return None
+            if scope.rank == 0:
+                return GateDecision(False, f"越权：{tool_name} 需要 project 作用域，"
+                                           f"当前 {scope.describe()}")
+            target_pid, how = self.resolve_target_project(args, ctx)
+            if not target_pid:
+                # fail-closed：说得出需要 project，却定位不到目标 → 拒绝
+                return GateDecision(
+                    False, f"越权：无法判定 {tool_name} 的目标项目（{how}）；"
+                           f"作用域校验失败即拒绝（fail-closed）。"
+                           f"请显式传入 project_id/window_id 之一。")
+            if not scope.allows_project(target_pid):
+                return GateDecision(
+                    False, f"越权：目标属于项目 {target_pid}，不在你的作用域 "
+                           f"{scope.describe()} 内（主管只能管自己负责的项目）")
+        return None
+
+    def resolve_target_project(self, args: dict[str, Any], ctx: ToolContext) -> tuple[str, str]:
+        """从参数里推出"这次调用想动哪个项目"。返回 (project_id, 依据说明)。"""
+        resolver = self.scope_resolver
+        if resolver is None:
+            from .scope import ScopeResolver
+            resolver = ScopeResolver(getattr(ctx, "db", None))
+
+        # 1) 直接给了 project_id
+        pid = str(args.get("project_id") or args.get("project") or "").strip()
+        if pid:
+            return pid, "args.project_id"
+        # 2) 给了工位 → 查它挂在哪个项目
+        for key in ("window_id", "window", "target_window"):
+            wid = str(args.get(key) or "").strip()
+            if wid:
+                resolved = resolver.project_of_window(wid)
+                return resolved, f"window:{wid}→project"
+        # 3) 群组 / 任务 / 迭代
+        gref = str(args.get("group_id") or args.get("group") or "").strip()
+        if gref:
+            return resolver.project_of_group(gref), f"group:{gref}→project"
+        jid = str(args.get("job_id") or args.get("task_id") or "").strip()
+        if jid:
+            return resolver.project_of_job(jid), f"job:{jid}→project"
+        iid = str(args.get("iteration_id") or "").strip()
+        if iid:
+            return resolver.project_of_iteration(iid), f"iteration:{iid}→project"
+        # 4) 退路：调用者自己就是某个项目的（主管给自己项目建任务时常见）
+        own = getattr(ctx, "extra", {}).get("project_id")
+        if own:
+            return str(own), "ctx.project_id"
+        return "", "无可判定的目标"
 
     def _check_dangerous(self, args: dict[str, Any], ctx: ToolContext, confirmed: bool,
                          allow_all: bool) -> GateDecision:

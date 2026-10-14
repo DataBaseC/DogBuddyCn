@@ -331,6 +331,29 @@ class AgentLoop:
 
         # safeguard 2 — 托管代审 (skipped entirely for irreversible commands)
         reviewer = ctx.extra.get("approval_reviewer")
+
+        # T9.6：审批**逐级**路由（员工→主管→管理员）。不可逆动作直接升级管理员。
+        # 只有"该找主管"时才把问题投给主管；投出去后本轮仍然暂停（不能算批准）。
+        router = ctx.extra.get("approval_router")
+        if router is not None:
+            try:
+                route = router(ctx.window_id, irreversible) or {}
+            except Exception:  # noqa: BLE001 — 路由失败按最保守处理（留给管理员）
+                route = {"target": "admin"}
+            if route.get("target") == "supervisor" and route.get("window_id"):
+                dispatch = ctx.extra.get("supervision_dispatch")
+                if callable(dispatch):
+                    try:
+                        dispatch(route["window_id"],
+                                 f"【待你审批 · 来自工位 {ctx.window_id}】\n{question}")
+                        _log(f"escalated_to_supervisor:{route.get('window_id')}")
+                        return ToolResult.failure(
+                            f"[已提请主管审批] {reason}\n"
+                            f"申请已提交给你的主管（工位 {route['window_id']}）；"
+                            f"在主管批准之前，操作不会执行。")
+                    except Exception:  # noqa: BLE001 — 投递失败就退化成找管理员
+                        logger.warning("approval escalation to supervisor failed", exc_info=True)
+
         if reviewer is not None and not irreversible:
             try:
                 verdict = await reviewer(tc.name, tc.arguments, reason)

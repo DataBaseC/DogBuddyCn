@@ -5,6 +5,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# T9.3：主管工具集需要"项目级管理工具"的名字清单。management 模块是角色无关的
+# 工具装配层（不反向 import roles），所以这条依赖不会成环。
+from ..management.tools import PROJECT_TOOLS
+
 
 @dataclass
 class RoleSpec:
@@ -20,6 +24,9 @@ class RoleSpec:
     needs_approval: bool = False                       # 每个写操作是否都要人先批
     iteration_speed: str = "standard"                  # slow | standard | fast：推进节奏档
     note: str = ""                                     # 画像备注（写给人看）
+    # ---- T9.1 作用域（角色体系 v2 的横切维度）----
+    scope_level: str = "none"                          # none | project | system
+    capability: str = ""                               # 一句话能力定位（装配/审计用）
 
     @property
     def tool_breadth(self) -> str:
@@ -42,6 +49,8 @@ class RoleSpec:
             "default_mode": self.default_mode,
             "is_admin": self.is_admin,
             "note": self.note,
+            "scope_level": self.scope_level,
+            "capability": self.capability,
         }
 
 
@@ -125,7 +134,37 @@ WORKER_PROGRAMMER_TOOLS = [
     "schedule", "reschedule", "notify_owner",
     # Batch 8 组二：项目迭代轮次的进展汇报（T8.6 停止条件的唯一依据）
     "report_iteration",
+    # Batch 9 · T9.5：项目记忆——员工**只读**（防一个员工改掉全项目规矩）
+    "project_memory_read",
 ]
+
+
+SUPERVISOR_SYSTEM_PROMPT = """You are a PROJECT SUPERVISOR (主管) for one or more projects.
+
+Your job is the middle layer of a three-tier chain:
+  管理员(admin) → **你(主管)** → 员工工位(worker)
+
+Responsibilities:
+- Break the owner's goal into concrete pieces and dispatch them to YOUR project's
+  employee windows (`window_list`/`task_create`/`task_run_now` show and drive them).
+- Collect results and questions, merge them, and report UP concisely
+  (`progress_report`) — do not forward raw noise.
+- You may do a small piece of work yourself when that is faster than explaining it
+  (you have the full employee toolbox), but your default is to delegate.
+- Keep the project's iteration plan moving: check progress, unblock workers.
+
+Hard rules (enforced by the permission gate, not by good intentions):
+- You may ONLY touch windows/tasks/groups that belong to projects you supervise.
+  Calling a management tool on another project's window WILL be denied.
+- You have NO system-level tools: no config, no profiles, no self-update,
+  no global memory, no account management. If a task needs those, report upward.
+- Group instructions per project to avoid mixing contexts when you supervise several.
+
+Style: terse, technical, no fluff."""
+
+#: 主管工具集 = 员工工具 + **项目级**管理工具（T9.3）
+#: 注意：不含任何 system 级工具（config/self_update/账号/全局记忆）——装配层过滤 + 运行时裁决双层保证
+SUPERVISOR_TOOLS = sorted(set(WORKER_PROGRAMMER_TOOLS) | set(PROJECT_TOOLS) | {"project_memory_write"})
 
 
 def register_builtin_roles() -> None:
@@ -136,7 +175,18 @@ def register_builtin_roles() -> None:
         # T8.4 画像：管理员管的是系统本身，改动风险高 → 节奏保守
         domains=["运维", "部署", "配置", "调度"],
         can_deliver_alone=True, needs_approval=False, iteration_speed="slow",
-        note="管理员工位：管工位/项目/任务/配置/自升级。改动影响面大，迭代节奏按保守档。"))
+        note="管理员工位：管工位/项目/任务/配置/自升级。改动影响面大，迭代节奏按保守档。",
+        scope_level="system", capability="系统级：全部资源与配置"))
+    register_role(RoleSpec(
+        name="supervisor", display_name="主管",
+        system_prompt=SUPERVISOR_SYSTEM_PROMPT, tool_names=SUPERVISOR_TOOLS,
+        default_mode="BUILD",
+        # T9.1/T9.3：中间层。scope=project（只认自己负责的项目）
+        domains=["拆解", "派活", "汇总", "推进"],
+        can_deliver_alone=False, needs_approval=False, iteration_speed="standard",
+        note="主管工位：三层指挥链的中间层。能派活给本项目员工并收回报，"
+             "**不能**碰别的项目、也没有系统级工具（config/自升级/全局记忆）。",
+        scope_level="project", capability="项目级：只管自己负责的项目"))
     register_role(RoleSpec(
         name="worker_programmer", display_name="程序员",
         system_prompt=WORKER_PROGRAMMER_SYSTEM_PROMPT, tool_names=WORKER_PROGRAMMER_TOOLS,

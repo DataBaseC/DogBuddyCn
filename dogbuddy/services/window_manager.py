@@ -84,6 +84,13 @@ class WindowManager:
         # 由 main 在 JobManager 建好后 setattr 注入（窗口在 start() 才 boot，时序安全）。
         self.job_store: Any = None
         self.run_job_now: Callable[[str], Any] | None = None
+        # T9.3/T9.1：主管工位的管理工具装配 + 作用域解析（由 main 注入）
+        self.management_tools_factory: Callable[[Any], list] | None = None
+        # T9.6：审批逐级路由 + 向主管投递（由 main 注入 SupervisionService 的两个方法）
+        self.approval_router: Callable[[str, bool], dict] | None = None
+        self.supervision_dispatch: Callable[[str, str], Any] | None = None
+        from ..agents.core.scope import ScopeResolver
+        self.scope_resolver = ScopeResolver(db)
         self.max_iterations = max_iterations
         self.builder = ContextBuilder(memory_service=memory)
         self.threshold = threshold
@@ -135,6 +142,14 @@ class WindowManager:
         queue = TaskQueue(w.id, on_status=lambda s: self._set_status(w.id, s))
         registry = build_worker_registry(w.role, gate=self.gate, audit=self.db,
                                          jobs=self.job_store, run_job_now=self._run_job_now)
+        # T9.3：主管工位额外装上"项目级管理工具"（system 级永远不给）。
+        # 装配只是"少给"，真正的越权拦截在 PermissionGate.check_scope（fail-closed）。
+        if (getattr(w, "role", "") or "") == "supervisor" and self.management_tools_factory:
+            try:
+                for tool in self.management_tools_factory(w) or []:
+                    registry.register(tool)
+            except Exception:  # noqa: BLE001 — 装配失败不能让工位起不来
+                logger.warning("supervisor management tools failed to assemble", exc_info=True)
         if self.mcp_bridge is not None and getattr(self.mcp_bridge, "started", False):
             try:
                 self.mcp_bridge.register_into(registry)  # T5.3: external tools on the shelf
@@ -436,11 +451,18 @@ class WindowManager:
             llm_factory=llm_factory,
             ask_user_fn=self._make_ask_user(w.id),
             checkpoint_root=self.checkpoints_dir,
+            # T9.1：作用域由角色推导后注入（模型无法在参数里自报身份）
+            scope=self.scope_resolver.for_window(w),
             extra={"scheduled": bool(task.job_id), "manual": not task.job_id,
                    "bg_processes": rt.bg_processes,
                    # T4.2: trust level from workbench params + allowlist from config
                    "trust": (w.params or {}).get("trust", "normal"),
                    "approval_allowlist": self._approval_allowlist(),
+                   # T9.1：作用域校验的兜底依据（主管给自己项目建任务时用）
+                   "project_id": getattr(w, "project_id", "") or "",
+                   # T9.6：审批逐级路由（员工→主管→管理员）+ 向主管投递的通道
+                   "approval_router": self.approval_router,
+                   "supervision_dispatch": self.supervision_dispatch,
                    # T4.3: 托管代审 reviewer (None = ask the owner directly)
                    "approval_reviewer": self._approval_reviewer(w)},
         )

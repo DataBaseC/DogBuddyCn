@@ -69,6 +69,13 @@ class AdminService:
         self.registry.gate = _AdminGate()
         for tool in build_admin_tools(svc):
             self.registry.register(tool)
+        # T9.3：主管工位要用的管理工具（只含 project 级）。存下 svc 供装配取用。
+        self._svc = svc
+
+    def supervisor_tools(self) -> list:
+        """主管工具集：**只含 project 级管理工具**（不含 config/self_update/全局记忆）。"""
+        from ..agents.management.tools import build_supervisor_tools
+        return build_supervisor_tools(self._svc)
 
     # ------------------------------------------------------------- sessions
     def session_for(self, sender: str) -> WindowSession:

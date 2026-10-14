@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -235,6 +235,26 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """三层指挥链（Batch 9）：projects.owner_supervisor_id + admins（多管理员实体化）。
+
+    `owner_supervisor_id` 是**寻址枢纽**：员工上报 / 管理员下指令都靠
+    `project_id → owner_supervisor_id → 主管工位` 找到该找谁；
+    为空 = 该项目没有主管，事件退化直连管理员（兼容单管理员部署）。
+    """
+    pcols = {r[1] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
+    if "owner_supervisor_id" not in pcols:
+        conn.execute("ALTER TABLE projects ADD COLUMN owner_supervisor_id TEXT DEFAULT ''")
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS admins(
+      id TEXT PRIMARY KEY, name TEXT DEFAULT '', role_level TEXT DEFAULT 'admin',
+      token_hash TEXT DEFAULT '', note TEXT DEFAULT '', enabled INTEGER DEFAULT 1,
+      created_at TEXT, updated_at TEXT);
+    CREATE INDEX IF NOT EXISTS idx_admins_enabled ON admins(enabled, role_level);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -246,6 +266,7 @@ _MIGRATIONS: dict[int, Any] = {
     5: _migrate_v5,
     6: _migrate_v6,
     7: _migrate_v7,
+    8: _migrate_v8,
 }
 
 
@@ -850,12 +871,15 @@ class Database:
     # ------------------------------------------------- projects (T7.1, v6)
     @staticmethod
     def _to_project(r: sqlite3.Row) -> Project:
+        keys = r.keys()
         try:
             params = json.loads(r["params_json"] or "{}")
         except (json.JSONDecodeError, TypeError):
             params = {}
         return Project(id=r["id"], name=r["name"], root_path=r["root_path"],
                        params=params if isinstance(params, dict) else {},
+                       owner_supervisor_id=((r["owner_supervisor_id"] or "")
+                                            if "owner_supervisor_id" in keys else ""),
                        created_at=r["created_at"] or "", updated_at=r["updated_at"] or "")
 
     def insert_project(self, p: Project) -> Project:
@@ -863,10 +887,11 @@ class Database:
         p.updated_at = _now_iso()
         with self._lock:
             self._conn.execute(
-                "INSERT INTO projects(id,name,root_path,params_json,created_at,updated_at)"
-                " VALUES(?,?,?,?,?,?)",
+                "INSERT INTO projects(id,name,root_path,params_json,owner_supervisor_id,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
                 (p.id, p.name, p.root_path,
-                 json.dumps(p.params or {}, ensure_ascii=False), p.created_at, p.updated_at))
+                 json.dumps(p.params or {}, ensure_ascii=False),
+                 getattr(p, "owner_supervisor_id", "") or "", p.created_at, p.updated_at))
             self._conn.commit()
         return p
 
@@ -884,7 +909,7 @@ class Database:
         return [self._to_project(r) for r in rows]
 
     def update_project(self, project_id: str, **fields: Any) -> Project | None:
-        allowed = {"name", "root_path", "params"}
+        allowed = {"name", "root_path", "params", "owner_supervisor_id"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return self.get_project(project_id)
@@ -1028,6 +1053,60 @@ class Database:
                 "SELECT * FROM iteration_rounds WHERE iteration_id=? ORDER BY round DESC LIMIT ?",
                 (iteration_id, limit)).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------- admins (T9.5, v8)
+    _ADMIN_FIELDS = ("name", "role_level", "token_hash", "note", "enabled")
+
+    def list_admins(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        q = "SELECT * FROM admins"
+        if enabled_only:
+            q += " WHERE enabled=1"
+        q += " ORDER BY role_level='owner' DESC, created_at"
+        with self._lock:
+            rows = self._conn.execute(q).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_admin(self, admin_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            r = self._conn.execute("SELECT * FROM admins WHERE id=? OR name=?",
+                                   (admin_id, admin_id)).fetchone()
+        return dict(r) if r else None
+
+    def upsert_admin(self, entry: dict[str, Any]) -> dict[str, Any]:
+        aid = str(entry.get("id") or "").strip() or uuid.uuid4().hex[:12]
+        now = _now_iso()
+        with self._lock:
+            existing = self._conn.execute("SELECT * FROM admins WHERE id=?",
+                                          (aid,)).fetchone()
+            if existing is None:
+                cols: dict[str, Any] = {"id": aid, "created_at": now, "updated_at": now}
+                for f in self._ADMIN_FIELDS:
+                    if entry.get(f) is not None:
+                        cols[f] = 1 if (f == "enabled" and entry[f]) else (
+                            0 if f == "enabled" else entry[f])
+                names = ", ".join(cols)
+                marks = ", ".join("?" for _ in cols)
+                self._conn.execute(f"INSERT INTO admins({names}) VALUES({marks})",
+                                   tuple(cols.values()))
+            else:
+                patch = {f: entry[f] for f in self._ADMIN_FIELDS
+                         if f in entry and entry[f] is not None}
+                if "enabled" in patch:
+                    patch["enabled"] = 1 if patch["enabled"] else 0
+                patch["updated_at"] = now
+                sets = ", ".join(f"{k}=?" for k in patch)
+                self._conn.execute(f"UPDATE admins SET {sets} WHERE id=?",
+                                   (*patch.values(), aid))
+            self._conn.commit()
+            row = self._conn.execute("SELECT * FROM admins WHERE id=?", (aid,)).fetchone()
+        return dict(row) if row else {}
+
+    def delete_admin(self, admin_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM admins WHERE id=? OR name=?",
+                                     (admin_id, admin_id))
+            self._conn.commit()
+        return bool(cur.rowcount)
 
     def list_audit(self, limit: int = 200) -> list[AuditEntry]:
         with self._lock:

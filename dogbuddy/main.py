@@ -120,6 +120,17 @@ class DogBuddyApp:
             sessions=self.sessions, workspaces=self.workspaces, memory=self.memory,
             config=self.config_svc, bus=self.bus,
             self_status=self.update_status, self_update=self.start_self_update)
+        # T9.3：主管工位装配（只给项目级管理工具，system 级永不下放）
+        self.windows.management_tools_factory = lambda w: self.admin.supervisor_tools()
+        # T9.4：三层指挥链服务（管理员→主管→员工；无主管时退化直连）
+        from .services.supervision_service import SupervisionService
+        self.supervision = SupervisionService(
+            db=self.db, windows=self.windows, bus=self.bus,
+            admin_notify=self._notify_admin_up, route_reports=True)
+        self.supervision.start()
+        # T9.6：审批逐级路由 —— 员工的高危操作先找主管；不可逆动作仍直接升级管理员
+        self.windows.approval_router = self.supervision.approval_target
+        self.windows.supervision_dispatch = self.supervision.dispatch_text
         self.notifiers = build_notifiers(config.notify, self.adapter, config.gateway.push_target)
         # worker questions / confirm requests must reach the admin conversation:
         # in v1.3 `AdminService.notify()` was never called, so a worker could ask
@@ -228,6 +239,23 @@ class DogBuddyApp:
             return self.config_svc.get(key, default)
         except AttributeError:
             return default
+
+    def _notify_admin_up(self, text: str, level: str = "info") -> None:
+        """T9.4 退化路径：无主管时员工上报直连管理员。
+
+        与既有通知链保持一致（走 AdminService.notify → 通知器），
+        只是加一个层级前缀，让人一眼看出这条是"没有主管才直达"的。
+        """
+        prefix = {"alert": "【需处理】", "warn": "【需关注】"}.get(level, "")
+        msg = f"{prefix}{text}"
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self.admin.notify(msg))
+            else:  # pragma: no cover — 非事件循环上下文（脚本/测试）
+                loop.run_until_complete(self.admin.notify(msg))
+        except Exception:  # noqa: BLE001 — 退化通知失败不能炸总线
+            logger.warning("admin notify failed for hierarchical fallback", exc_info=True)
 
     def _on_llm_wait(self, profile: str, attempt: int, delay: float) -> None:
         """Rate-limit backoff surfaced for the console badge (per profile)."""

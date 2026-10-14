@@ -117,6 +117,7 @@ class Project:
     name: str
     root_path: str
     params: dict[str, Any] = field(default_factory=dict)  # 项目级默认参数（工位可覆盖）
+    owner_supervisor_id: str = ""  # T9.4 该项目的主管工位；空 = 无主管（事件直连管理员）
     created_at: str = ""
     updated_at: str = ""
 
