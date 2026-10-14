@@ -92,6 +92,9 @@ def router(svc, auth_deps) -> APIRouter:
                 "needs_approval": bool(getattr(spec, "needs_approval", False)),
                 "iteration_speed": getattr(spec, "iteration_speed", "standard"),
                 "note": getattr(spec, "note", ""),
+                # T9.1：作用域等级（控制台要能看出"这个角色能管到哪一层"）
+                "scope_level": getattr(spec, "scope_level", "none"),
+                "capability": getattr(spec, "capability", ""),
             })
 
         names = {t["name"] for t in tools}
