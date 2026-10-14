@@ -125,11 +125,15 @@ class AgentLoop:
                                   f"{e.wait_seconds / 60:.0f} 分钟，任务已挂起等待重试。")
                 break
             except Exception as e:  # noqa: BLE001 — classified below, never swallowed
-                cls = errors.classify(e)
+                # 这里是 **LLM 调用**失败，不是工具参数问题 → assume_tool_args=False。
+                # 否则框架自己抛的 TypeError 会被归成 tool_failure，并把
+                # "参数或调用方式有问题，请按报错修正后重新调用" 喂给模型。
+                cls = errors.classify(e, assume_tool_args=False)
                 logger.exception("LLM chat failed (%s)", cls.value)
                 self.session.append("system", f"[LLM error/{cls.value}] {errors.describe(e)}")
                 result.stop_reason = "error"
-                result.content = f"LLM call failed ({cls.value}): {e}. {errors.action_hint(e)}"
+                result.content = (f"LLM 调用失败（{cls.value}）：{e}。"
+                                  f"{errors.action_hint(e, assume_tool_args=False)}")
                 break
 
             if not resp.tool_calls:
@@ -199,7 +203,7 @@ class AgentLoop:
                 # **不要**当普通瞬态续跑（否则先白等好几轮退避才暂停）
                 raise
             except Exception as e:  # noqa: BLE001 — classified immediately
-                cls = errors.classify(e)
+                cls = errors.classify(e, assume_tool_args=False)
                 if cls is not ErrorClass.TRANSIENT:
                     raise
                 last = e

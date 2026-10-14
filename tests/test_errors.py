@@ -102,3 +102,64 @@ def test_分类永不抛异常():
             errors.classify(exc)
         except Exception as e:  # noqa: BLE001
             pytest.fail(f"classify 不该抛: {e!r}")
+
+
+# ---------------------------------------------------------------- 2026-10-14 线上回归
+def test_LLM层的_TypeError_不再被归成工具参数问题():
+    """线上实测：框架自己抛的 TypeError 被判成 tool_failure，然后对模型说
+    "参数或调用方式有问题，请按报错修正后重新调用" —— 把 harness bug 推给模型，
+    模型无从修正，只会不停换参数重试（在限流账号上白烧额度）。
+
+    真实案例：`object async_generator can't be used in 'await' expression`
+    （`openai_compat.stream_chat` 把异步生成器当协程 await）。
+    """
+    from dogbuddy.errors import Disposition, ErrorClass, action_hint, classify, disposition_for
+
+    exc = TypeError("object async_generator can't be used in 'await' expression")
+
+    # 工具路径：保持原行为（模型参数问题 → 回传自改）
+    assert classify(exc, assume_tool_args=True) is ErrorClass.TOOL_FAILURE
+    assert "参数" in action_hint(exc, assume_tool_args=True)
+
+    # LLM 层：框架错误，不是模型的参数问题
+    assert classify(exc, assume_tool_args=False) is ErrorClass.PERMANENT
+    hint = action_hint(exc, assume_tool_args=False)
+    assert "参数" not in hint, f"不该让模型去改参数：{hint}"
+    assert disposition_for(ErrorClass.PERMANENT) is Disposition.STOP
+
+    # 默认值必须保持 True（不改变既有调用点的行为）
+    assert classify(exc) is ErrorClass.TOOL_FAILURE
+
+
+def test_LLM调用失败的消息不甩锅给模型():
+    """AgentLoop 的 LLM 失败路径必须用 assume_tool_args=False。"""
+    import inspect
+
+    from dogbuddy.agents.core import loop as loop_mod
+    src = inspect.getsource(loop_mod.AgentLoop)
+    assert "errors.classify(e, assume_tool_args=False)" in src, \
+        "LLM 调用失败路径必须按『非工具参数』分类"
+    assert "action_hint(e, assume_tool_args=False)" in src
+
+
+def test_执行失败不会被记成_ok():
+    """`AgentResult` 没有 `ok` 属性 → 旧代码 `getattr(result, "ok", True)` 恒为 True，
+    每次执行都记成 ok。运行历史里的"假成功"就是这么来的。"""
+    from types import SimpleNamespace
+
+    from dogbuddy.services.window_manager import _run_status
+
+    # 旧写法在这三种情况下都会给出 "ok"
+    for stop in ("error", "done", "max_iterations", "rate_limited"):
+        got = _run_status(SimpleNamespace(stop_reason=stop))
+        if stop == "error":
+            assert got == "failed", "LLM 调用失败必须记成 failed，不能是 ok"
+        elif stop == "rate_limited":
+            assert got == "rate_limited", "限速等待不是失败，但也不能记成 ok"
+        else:
+            assert got == "ok"
+
+    # 没有 stop_reason 的旧式结果对象：按 ok 属性判，默认 False（不是 True）
+    assert _run_status(SimpleNamespace(ok=True)) == "ok"
+    assert _run_status(SimpleNamespace(ok=False)) == "failed"
+    assert _run_status(SimpleNamespace()) == "failed", "缺 ok 属性时应按失败处理，不能默认成功"

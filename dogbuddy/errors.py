@@ -151,19 +151,30 @@ def unwrap(exc: BaseException) -> BaseException:
     return cur
 
 
-def classify(exc: BaseException) -> ErrorClass:
+def classify(exc: BaseException, *, assume_tool_args: bool = True) -> ErrorClass:
     """任何异常 → 四类之一。**永远不抛**（分类失败按 PERMANENT 处理）。
 
     先 `unwrap` 再分类：`RetryExhausted(ConnectTimeout)` 会按根因判为**瞬态**，
     于是 loop 层的 C1 续跑才有机会再试（provider 内部的重试次数与 loop 层的续跑
     是两层，loop 层的次数由 `AgentLoop.transient_retries` 收紧）。
+
+    `assume_tool_args`（2026-10-14 新增，默认 True 保持既有行为）：
+    `KeyError/TypeError/ValueError/AttributeError/IndexError` 这条启发式**只在
+    "异常来自工具调用"时成立**——它的含义是"模型给的参数不合法 → 回传让它自己改"。
+
+    但同一个 `classify` 也被用在 **LLM 调用**的失败路径上。那里若把框架自己抛的
+    `TypeError`（例如 `object async_generator can't be used in 'await' expression`，
+    一个纯 harness bug）判成 TOOL_FAILURE，`action_hint` 就会对模型说
+    "参数或调用方式有问题，请按报错修正后重新调用" —— **把框架的 bug 推给模型**，
+    模型无从修正，只会不停换参数重试，在限流账号上白烧额度。
+    LLM 层请传 `assume_tool_args=False`（这类错误按 PERMANENT 处理）。
     """
     if isinstance(exc, DogBuddyError):
         return exc.error_class
 
     root = unwrap(exc)
     if root is not exc and not isinstance(root, DogBuddyError):
-        return classify(root)
+        return classify(root, assume_tool_args=assume_tool_args)
 
     # 1) httpx 家族
     if httpx is not None:
@@ -184,8 +195,9 @@ def classify(exc: BaseException) -> ErrorClass:
     if isinstance(root, OSError) and root.errno in _TRANSIENT_ERRNOS:
         return ErrorClass.TRANSIENT
 
-    # 3) 模型给的参数不合法 → 回传自改
-    if isinstance(root, (KeyError, TypeError, ValueError, AttributeError, IndexError)):
+    # 3) 模型给的参数不合法 → 回传自改（**仅当异常确实来自工具调用**）
+    if assume_tool_args and isinstance(
+            root, (KeyError, TypeError, ValueError, AttributeError, IndexError)):
         return ErrorClass.TOOL_FAILURE
 
     return ErrorClass.PERMANENT
@@ -207,9 +219,13 @@ def describe(exc: BaseException) -> str:
     return f"{cls.value}: {type(root).__name__}: {root}"
 
 
-def action_hint(exc: BaseException) -> str:
-    """给模型/用户看的一句话处置建议（坏参数时最有价值）。"""
-    cls = classify(exc)
+def action_hint(exc: BaseException, *, assume_tool_args: bool = True) -> str:
+    """给模型/用户看的一句话处置建议（坏参数时最有价值）。
+
+    `assume_tool_args=False` 用于 LLM 层：那里的 TypeError/ValueError 是框架问题，
+    不该让模型"去改参数"。
+    """
+    cls = classify(exc, assume_tool_args=assume_tool_args)
     d = disposition_for(cls)
     if d is Disposition.RETRY:
         return "这是瞬态失败，会退避重试；不要重复调用同一路径。"

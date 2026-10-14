@@ -34,6 +34,27 @@ def _ErrorResult(msg: str) -> RunnerResult:  # noqa: N802 — mirrors _to_outcom
     return RunnerResult(status="failed", summary=msg)
 
 
+def _run_status(result: Any) -> str:
+    """一次执行 → `job_runs.status`。
+
+    审查发现（2026-10-14 线上）：这里原来写
+    `"ok" if getattr(result, "ok", True) else "failed"`，而 `AgentResult`
+    **没有 `ok` 属性** → 默认 True → **每次执行都记成 ok**，哪怕
+    `stop_reason == "error"`（LLM 调用失败会出现这种情况）。
+    结果就是运行历史里一条"status=ok、summary 是报错"的假成功行。
+
+    现在按 `stop_reason` 判定：
+      done / max_iterations → ok（跑到上限不是失败）
+      rate_limited          → rate_limited（限速等待，不是失败）
+      其余（error 等）       → failed
+    """
+    stop = str(getattr(result, "stop_reason", "") or "")
+    if stop:
+        return {"done": "ok", "max_iterations": "ok",
+                "rate_limited": "rate_limited"}.get(stop, "failed")
+    return "ok" if getattr(result, "ok", False) else "failed"
+
+
 @dataclass
 class WindowRuntime:
     window: Window
@@ -551,8 +572,14 @@ class WindowManager:
             finally:
                 if run_id is not None:
                     try:
+                        # P0：`AgentResult` **没有** `ok` 属性，原来写
+                        # `"ok" if getattr(result, "ok", True) else "failed"` ——
+                        # 默认值 True 让**每次执行都记成 ok**，哪怕
+                        # `stop_reason == "error"`（LLM 调用失败）。
+                        # 表现：运行历史里出现一条 status=ok、summary 却是报错的行，
+                        # "失败"被记成"成功"。
                         self.db.finish_run(
-                            run_id, "ok" if getattr(result, "ok", True) else "failed",
+                            run_id, _run_status(result),
                             (getattr(result, "summary", "") or "")[:500])
                     except Exception:  # noqa: BLE001
                         logger.warning("job run finish failed", exc_info=True)
