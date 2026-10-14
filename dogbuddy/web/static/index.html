@@ -276,12 +276,14 @@
         <div class="toolbar">
           <div>
             <h2 class="page-title">与管理员的对话</h2>
-            <p class="card-sub">管理员 Agent · 建工位 / 派任务 / 查进度，全自然语言</p>
+            <p class="card-sub">只有一个管理员与您对接 · 可以开多个对话（各自独立上下文）· 建工位 / 派任务 / 查进度</p>
           </div>
           <div class="chat-tools">
-            <select class="select select-sm" id="chat-sender" title="会话身份（每个身份一份独立持久会话）"></select>
+            <select class="select select-sm" id="chat-sender" title="选择对话（每个对话一份独立上下文）"></select>
+            <button class="btn btn-soft btn-sm" id="chat-new"><svg class="ic"><use href="#ic-plus"/></svg>新建对话</button>
+            <button class="btn btn-soft btn-sm" id="chat-rename" title="重命名当前对话"><svg class="ic"><use href="#ic-edit"/></svg>重命名</button>
             <button class="btn btn-soft btn-sm" id="chat-refresh"><svg class="ic"><use href="#ic-refresh"/></svg>刷新</button>
-            <button class="btn btn-soft btn-sm" id="chat-reset"><svg class="ic"><use href="#ic-trash"/></svg>清空会话</button>
+            <button class="btn btn-soft btn-sm" id="chat-reset"><svg class="ic"><use href="#ic-trash"/></svg>清空</button>
           </div>
         </div>
         <div class="card chat-card">
@@ -476,6 +478,6 @@
 <div id="toast-root" class="toast-root"></div>
 
 <!-- 页面只加载 bundle：源文件顺序见 tools/bundle-order.json，由 tools/rebuild-bundles.py 拼接 -->
-<script src="/assets/js/index.bundle.js?v=f9fd85639e"></script>
+<script src="/assets/js/index.bundle.js?v=1464c25436"></script>
 </body>
 </html>

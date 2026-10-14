@@ -416,7 +416,7 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 > | **T9.2 工具统一化** | `agents/admin/tools.py` → `agents/management/tools.py`（admin 变兼容再导出） | 每个工具加 `required_scope`；`SYSTEM_TOOL_NAMES`（10 个）vs `PROJECT_TOOLS`（22 个）；**未归类的新工具默认 system**（不下放主管）。管理员 = 全部 32 个工具，**行为逐位不变** |
 > | **T9.3 主管装配** | `agents/supervisor/tools.py`、`SUPERVISOR_TOOLS`、`SUPERVISOR_SYSTEM_PROMPT` | 主管 = 员工工具 + 项目级管理工具 + `project_memory_write`（共 42），**零 system 级**。主管工位 workspace = 项目根（吃 T7），提示词要求多项目时按 project 分段 |
 > | **T9.4 指挥链服务** | `services/supervision_service.py` | 四向事件 `supervisor.command` / `worker.report` / `supervisor.digest` / `project.iteration.step`；寻址 `project_id → owner_supervisor_id → 主管工位`；**无主管/主管工位不存在 → 退化直连管理员**（v1 行为零回归）。`report_up()` 按角色自动分流 |
-> | **T9.5 数据与 API** | 迁移 v8（`projects.owner_supervisor_id` + `admins`）、`routes/admins.py`、`tools/project_memory_ops.py`、`/api/projects/{id}/chain` | 项目主管字段是寻址枢纽；多管理员 CRUD（`role_level ∈ {owner,admin}`，**令牌只存 sha256 且不回显**，配置文件 token 视作 owner 永不失联）；项目记忆 `memory/projects/<id>.md`（**主管可写、员工只读**）；`/chain` 摊开 管理员→主管→员工 与健康度 |
+> | **T9.5 数据与 API** | 迁移 v8（`projects.owner_supervisor_id` + `admins`）、**迁移 v9（`conversations`）**、`tools/project_memory_ops.py`、`/api/projects/{id}/chain` | 项目主管字段是寻址枢纽；**v2 最终口径：只有一个管理员**（多管理员 CRUD 已移除，`admins` 表保留但不再用于鉴权/CRUD）；**用户可新建多个对话**（各自独立上下文，见 `docs/DECISIONS-指挥链口径.md`）；项目记忆 `memory/projects/<id>.md`（**主管可写、员工只读**）；`/chain` 摊开 管理员→主管→员工 与健康度 |
 > | **T9.6 既有批次修正** | `loop._approval_flow` + `SupervisionService.approval_target` | 审批改**逐级**：不可逆动作永远升级管理员（第一道保险）；普通高危先投主管；**投出去后本轮仍然暂停**（不能算批准）。无主管 → 管理员 |
 >
 > **验收达成**：主管能派活给本项目员工并收回报 ✅；**主管改他人工位失败** ✅（`test_主管改他人工位必须失败`）；管理员功能零回归 ✅（工具集合与 32 个工具逐位一致）；无主管退化直连 ✅；作用域 fail-closed ✅。

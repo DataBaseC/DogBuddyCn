@@ -99,12 +99,22 @@
     overview: function () { return request('GET', '/api/overview'); },        /* GET /api/overview */
 
     /* ---------------- 控制台 ↔ 管理员对话 ---------------- */
-    adminChatAdmins: function () { return request('GET', '/api/admin/chat/admins'); },
+    /* ---------------- 对话（v9：一个管理员，多个对话） ---------------- */
+    chatConversations: function () { return request('GET', '/api/admin/chat/conversations'); },
+    chatCreateConversation: function (title) {
+      return request('POST', '/api/admin/chat/conversations', { title: title || '' });
+    },
+    chatRenameConversation: function (id, title) {
+      return request('PATCH', '/api/admin/chat/conversations/' + enc(id), { title: title });
+    },
+    chatDeleteConversation: function (id) {
+      return request('DELETE', '/api/admin/chat/conversations/' + enc(id));
+    },    adminChatAdmins: function () { return request('GET', '/api/admin/chat/admins'); },
     adminChatMessages: function (sender, limit) {
-      return request('GET', '/api/admin/chat/messages' + qs({ sender: sender, limit: limit || 100 }));
+      return request('GET', '/api/admin/chat/messages' + qs({ conversation: sender, limit: limit || 100 }));
     },
     adminChat: function (text, sender) {
-      return request('POST', '/api/admin/chat', { text: text, sender: sender || 'console' });
+      return request('POST', '/api/admin/chat', { text: text, conversation: sender || 'default' });
     },
     adminChatReset: function (sender) {
       return request('POST', '/api/admin/chat/reset', { sender: sender || 'console' });

@@ -535,7 +535,11 @@ def test_T9_4_指挥链接口(tmp_path, monkeypatch):
         assert "self_update" not in names and "config_set" not in names
 
 
-def test_T9_5_多管理员_CRUD_不回显令牌(tmp_path, monkeypatch):
+def test_v2_只有一个管理员_且没有多管理员接口(tmp_path, monkeypatch):
+    """v2 口径（2026-10-14 用户拍板）：**只有一个管理员**与用户对接。
+
+    所以多管理员 CRUD 已被移除——这条测试就是防止它被"好心"加回来。
+    """
     from fastapi.testclient import TestClient
     from dogbuddy.config import AppConfig, LLMConfig, PathsConfig, WebConfig
     from dogbuddy.main import DogBuddyApp
@@ -549,24 +553,10 @@ def test_T9_5_多管理员_CRUD_不回显令牌(tmp_path, monkeypatch):
     client = TestClient(app.web_app)
     client.headers["X-Auth-Token"] = "tok"
     with client:
-        assert client.get("/api/admins", headers={"X-Auth-Token": ""}).status_code == 401
+        # 多管理员接口不该存在
+        assert client.get("/api/admins").status_code == 404
+        assert client.post("/api/admins", json={"name": "x"}).status_code == 404
+        # 管理员会话接口明确声明"单管理员"
+        assert client.get("/api/admin/chat/admins").json()["single_admin"] is True
 
-        created = client.post("/api/admins", json={
-            "name": "ops-bot", "role_level": "admin", "token": "s3cret-token",
-            "note": "值班机器人"}).json()["admin"]
-        assert created["has_token"] is True
-        assert "token" not in created and "token_hash" not in created, "绝不能回显令牌"
-        aid = created["id"]
-
-        # 库里只存哈希
-        row = app.db.get_admin(aid)
-        assert row["token_hash"] and row["token_hash"] != "s3cret-token"
-        assert len(row["token_hash"]) == 64
-
-        assert client.patch(f"/api/admins/{aid}", json={"enabled": False}).json()["admin"]["enabled"] is False
-        assert client.patch(f"/api/admins/{aid}", json={"role_level": "boss"}).status_code == 400
-        assert client.post("/api/admins", json={"name": "ops-bot"}).status_code == 400  # 重名
-        assert client.post("/api/admins", json={"name": "x", "role_level": "boss"}).status_code == 400
-        assert client.delete(f"/api/admins/{aid}").status_code == 200
-        assert client.delete(f"/api/admins/{aid}").status_code == 404
 

@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -255,6 +255,22 @@ def _migrate_v8(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """对话（conversations）——v2 口径：**只有一个管理员**与用户对接，
+    但用户可以有**多个对话**（各自独立的上下文，互不串味）。
+
+    一行 = 一个对话；`id` 就是会话键（`WindowSession` 挂在合成窗口 `admin:<id>` 下），
+    消息仍存在 `messages` 表里，所以这里只维护标题/时间这类元数据。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS conversations(
+      id TEXT PRIMARY KEY, title TEXT DEFAULT '', archived INTEGER DEFAULT 0,
+      created_at TEXT, updated_at TEXT, last_message_at TEXT);
+    CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at DESC);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -267,6 +283,7 @@ _MIGRATIONS: dict[int, Any] = {
     6: _migrate_v6,
     7: _migrate_v7,
     8: _migrate_v8,
+    9: _migrate_v9,
 }
 
 
@@ -1105,6 +1122,58 @@ class Database:
         with self._lock:
             cur = self._conn.execute("DELETE FROM admins WHERE id=? OR name=?",
                                      (admin_id, admin_id))
+            self._conn.commit()
+        return bool(cur.rowcount)
+
+    # ------------------------------------------------- conversations (v9)
+    def insert_conversation(self, conv_id: str, title: str = "") -> dict[str, Any]:
+        now = _now_iso()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO conversations(id,title,archived,created_at,updated_at,"
+                "last_message_at) VALUES(?,?,0,?,?,?)",
+                (conv_id, title or "", now, now, ""))
+            self._conn.commit()
+        return self.get_conversation(conv_id) or {}
+
+    def get_conversation(self, conv_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            r = self._conn.execute("SELECT * FROM conversations WHERE id=?",
+                                   (conv_id,)).fetchone()
+        return dict(r) if r else None
+
+    def list_conversations(self, include_archived: bool = False) -> list[dict[str, Any]]:
+        q = "SELECT * FROM conversations"
+        if not include_archived:
+            q += " WHERE COALESCE(archived,0)=0"
+        q += " ORDER BY COALESCE(last_message_at, created_at) DESC, created_at DESC"
+        with self._lock:
+            rows = self._conn.execute(q).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_conversation(self, conv_id: str, **fields: Any) -> dict[str, Any] | None:
+        allowed = {"title", "archived", "last_message_at"}
+        patch = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not patch:
+            return self.get_conversation(conv_id)
+        patch["updated_at"] = _now_iso()
+        if "archived" in patch:
+            patch["archived"] = 1 if patch["archived"] else 0
+        sets = ", ".join(f"{k}=?" for k in patch)
+        with self._lock:
+            self._conn.execute(f"UPDATE conversations SET {sets} WHERE id=?",
+                               (*patch.values(), conv_id))
+            self._conn.commit()
+        return self.get_conversation(conv_id)
+
+    def delete_conversation(self, conv_id: str, drop_messages: bool = True) -> bool:
+        """删对话：连它的消息一起删（对话是用户可见的完整单位）。"""
+        with self._lock:
+            if drop_messages:
+                # 消息落在合成窗口 `admin:<id>` 下；老的 IM 会话可能直接用 <id>
+                self._conn.execute("DELETE FROM messages WHERE window_id IN (?,?)",
+                                   (f"admin:{conv_id}", conv_id))
+            cur = self._conn.execute("DELETE FROM conversations WHERE id=?", (conv_id,))
             self._conn.commit()
         return bool(cur.rowcount)
 

@@ -9,27 +9,84 @@
   global.DogBuddyViews = global.DogBuddyViews || {};
 
   var SENDER_KEY = 'dogbuddy_chat_sender';
-  var state = { sender: 'console', messages: [], admins: [], llmOk: true, sending: false };
+  /* v9（v2 口径）：只有一个管理员与用户对接；用户可以开多个对话，
+     每个对话是一份独立上下文。`sender` 字段保留为"对话 id"（后端同名）。 */
+  var state = { sender: 'default', messages: [], admins: [], conversations: [],
+                llmOk: true, sending: false };
 
   function sender() {
-    try { return global.localStorage.getItem(SENDER_KEY) || 'console'; } catch (e) { return 'console'; }
+    try { return global.localStorage.getItem(SENDER_KEY) || 'default'; } catch (e) { return 'default'; }
   }
   function setSender(s) {
     state.sender = s;
     try { global.localStorage.setItem(SENDER_KEY, s); } catch (e) { /* 忽略 */ }
+  }
+  function currentConversation() {
+    return state.conversations.filter(function (c) { return c.id === state.sender; })[0] || null;
   }
 
   /* ---------------- 渲染 ---------------- */
   function renderSenders() {
     var sel = U.$('#chat-sender');
     if (!sel) return;
-    var list = state.admins.slice();
-    if (list.indexOf(state.sender) < 0) list.push(state.sender);
-    list = list.filter(Boolean).sort();
-    sel.innerHTML = list.map(function (n) {
-      return '<option value="' + U.esc(n) + '"' + (n === state.sender ? ' selected' : '') + '>' +
-        U.esc(n === 'console' ? '控制台会话' : n) + '</option>';
+    var list = state.conversations.slice();
+    if (!list.length) list = [{ id: state.sender, title: '默认对话' }];
+    sel.innerHTML = list.map(function (c) {
+      var label = c.title || c.id;
+      var n = c.message_count || 0;
+      return '<option value="' + U.esc(c.id) + '"' + (c.id === state.sender ? ' selected' : '') + '>' +
+        U.esc(label) + (n ? '（' + n + '）' : '') + '</option>';
     }).join('');
+  }
+
+  function newConversation() {
+    A.chatCreateConversation('').then(function (r) {
+      var conv = (r && r.conversation) || {};
+      state.conversations = (r && r.conversations) || state.conversations;
+      if (conv.id) setSender(conv.id);
+      U.toast('success', '已新建对话：' + (conv.title || conv.id || ''));
+      return load();
+    }).catch(function (e) { U.toast('error', '新建失败：' + (e && e.message ? e.message : e)); });
+  }
+
+  function renameConversation() {
+    var conv = currentConversation();
+    U.modal({
+      title: '重命名对话',
+      body: '<div class="field"><span class="field-label">对话名称</span>' +
+        '<input class="input" id="conv-title" value="' +
+        U.esc((conv && conv.title) || state.sender) + '"></div>',
+      buttons: [
+        { label: '取消', cls: 'btn-ghost' },
+        { label: '保存', cls: 'btn-primary', onClick: function (body) {
+          var v = (body.querySelector('#conv-title').value || '').trim();
+          if (!v) { U.toast('warn', '名称不能为空'); return false; }
+          A.chatRenameConversation(state.sender, v).then(function (r) {
+            state.conversations = (r && r.conversations) || state.conversations;
+            renderSenders();
+            U.toast('success', '已重命名');
+          }).catch(function (e) { U.toast('error', e.message); });
+        } }
+      ]
+    });
+  }
+
+  function deleteConversation() {
+    var conv = currentConversation();
+    if (state.conversations.length <= 1) { U.toast('warn', '至少要保留一个对话'); return; }
+    U.confirm({
+      title: '删除对话',
+      text: '将删除「' + ((conv && conv.title) || state.sender) + '」及其全部消息。确定？',
+      danger: true
+    }).then(function (ok) {
+      if (!ok) return;
+      A.chatDeleteConversation(state.sender).then(function (r) {
+        state.conversations = (r && r.conversations) || [];
+        if (state.conversations.length) setSender(state.conversations[0].id);
+        U.toast('success', '已删除');
+        return load();
+      }).catch(function (e) { U.toast('error', e.message); });
+    });
   }
 
   function bubble(m) {
@@ -82,10 +139,20 @@
   /* ---------------- 数据 ---------------- */
   function load() {
     setSender(sender());
-    return A.adminChatAdmins().then(function (info) {
-      state.admins = (info && info.admins) || [];
+    return A.chatConversations().then(function (info) {
+      state.conversations = (info && info.conversations) || [];
+      state.admins = state.conversations.map(function (c) { return c.id; });
       state.llmOk = !info || info.llm_configured !== false;
+      if (!state.conversations.length) {
+        return A.chatCreateConversation('').then(function (r) {
+          state.conversations = (r && r.conversations) || [];
+          if (state.conversations.length) setSender(state.conversations[0].id);
+        });
+      }
+      if (!currentConversation()) setSender(state.conversations[0].id);
       renderSenders();
+      return null;
+    }).then(function () {
       return A.adminChatMessages(state.sender, 200);
     }).then(function (res) {
       state.messages = (res && res.messages) || [];
@@ -176,6 +243,14 @@
 
     var rs = U.$('#chat-reset');
     if (rs) rs.addEventListener('click', reset);
+
+    /* v9：对话管理 */
+    var nw = U.$('#chat-new');
+    if (nw) nw.addEventListener('click', newConversation);
+    var rn = U.$('#chat-rename');
+    if (rn) rn.addEventListener('click', renameConversation);
+    var del = U.$('#chat-delete');
+    if (del) del.addEventListener('click', deleteConversation);
   }
 
   global.DogBuddyViews.Chat = {

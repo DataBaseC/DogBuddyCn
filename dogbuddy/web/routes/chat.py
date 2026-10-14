@@ -1,13 +1,13 @@
 # DogBuddyCn — admin chat routes (L1 Interface)
 # Copyright (C) 2026 DogBuddyCn contributors — AGPL-3.0
-"""Console ↔ admin agent conversation.
+"""控制台 ↔ 管理员对话。
 
-Before this module the ONLY way to talk to the admin agent was the QQ gateway:
-`AdminService.handle_user_message` was called from `gateway/router.py` and from
-nowhere else, so the web console could create windows and jobs but could not ask
-the admin anything. These routes close that gap.
+v2 口径（2026-10-14 用户拍板）：
+* **只有一个管理员**，它是用户唯一的对接窗口（员工不直接找用户，逐级上报）
+* **用户可以有多个对话**：每个对话是一份独立上下文，互不串味
+  （就像"新建对话"：换一件事就开一个，避免把不相关的话题混在一条历史里）
 
-Handlers only validate params → call `svc.admin` → return DTOs (no business).
+`conversation` 参数是新名字；老客户端传 `sender` 仍然可用（同一个键空间）。
 """
 from __future__ import annotations
 
@@ -17,11 +17,27 @@ from pydantic import BaseModel
 
 class ChatIn(BaseModel):
     text: str
-    sender: str = "default"   # one persistent admin conversation per sender
+    # 注意：这里**不能给默认值**，否则老客户端只传 sender 时会被默认值吞掉
+    conversation: str | None = None
+    sender: str | None = None       # 兼容老客户端（同一个键空间）
 
 
-class SenderIn(BaseModel):
-    sender: str = "default"
+class ConversationIn(BaseModel):
+    title: str = ""
+
+
+class ConversationPatch(BaseModel):
+    title: str
+
+
+class ResetIn(BaseModel):
+    conversation: str | None = None
+    sender: str | None = None
+
+
+def _conv_id(conversation: str | None, sender: str | None) -> str:
+    """对话键：`conversation` 优先，其次兼容老字段 `sender`，都没有则默认对话。"""
+    return ((conversation or sender or "default").strip() or "default")
 
 
 def router(svc, auth_deps) -> APIRouter:
@@ -33,36 +49,70 @@ def router(svc, auth_deps) -> APIRouter:
         except Exception:  # noqa: BLE001
             return False
 
+    # ------------------------------------------------------------ 对话管理
+    @r.get("/admin/chat/conversations", dependencies=auth_deps)
+    def list_conversations(include_archived: bool = False) -> dict:
+        return {"conversations": svc.admin.list_conversations(include_archived),
+                "llm_configured": _llm_ready(),
+                "note": "只有一个管理员与用户对接；这里管理的是**对话**（各自独立上下文）。"}
+
+    @r.post("/admin/chat/conversations", dependencies=auth_deps)
+    def create_conversation(body: ConversationIn) -> dict:
+        conv = svc.admin.create_conversation(body.title)
+        return {"conversation": conv, "conversations": svc.admin.list_conversations()}
+
+    @r.patch("/admin/chat/conversations/{conv_id}", dependencies=auth_deps)
+    def rename_conversation(conv_id: str, body: ConversationPatch) -> dict:
+        try:
+            conv = svc.admin.rename_conversation(conv_id, body.title)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        return {"conversation": conv, "conversations": svc.admin.list_conversations()}
+
+    @r.delete("/admin/chat/conversations/{conv_id}", dependencies=auth_deps)
+    def delete_conversation(conv_id: str) -> dict:
+        if not svc.admin.delete_conversation(conv_id):
+            raise HTTPException(status_code=404, detail=f"对话不存在：{conv_id}")
+        return {"deleted": conv_id, "conversations": svc.admin.list_conversations()}
+
+    # ------------------------------------------------------------ 消息
     @r.get("/admin/chat/admins", dependencies=auth_deps)
     def list_admins() -> dict:
+        """兼容旧接口：v2 只有一个管理员，这里返回已打开的对话键。"""
         return {"admins": svc.admin.active_admins(),
-                "llm_configured": _llm_ready()}
+                "llm_configured": _llm_ready(),
+                "single_admin": True}
 
     @r.get("/admin/chat/messages", dependencies=auth_deps)
-    def messages(sender: str = "default", limit: int = 100) -> dict:
+    def messages(conversation: str | None = None, sender: str | None = None,
+                 limit: int = 100) -> dict:
         limit = max(1, min(int(limit), 500))
-        return {"sender": sender, "messages": svc.admin.history(sender, limit)}
+        cid = _conv_id(conversation, sender)
+        return {"conversation": cid, "sender": cid,
+                "messages": svc.admin.history(cid, limit)}
 
     @r.post("/admin/chat", dependencies=auth_deps)
     async def chat(body: ChatIn) -> dict:
         text = (body.text or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="text 不能为空")
-        sender = (body.sender or "default").strip() or "default"
+        cid = _conv_id(body.conversation, body.sender)
         if not _llm_ready():
             raise HTTPException(
                 status_code=409,
                 detail="LLM 尚未配置：请到「设置」填写 base_url / model / api_key 后再对话")
-        reply = await svc.admin.handle_user_message(text, sender=sender)
-        svc.db.audit("web", "admin:chat", f"sender={sender} len={len(text)}")
-        return {"sender": sender, "reply": reply,
-                "messages": svc.admin.history(sender, 100)}
+        reply = await svc.admin.handle_user_message(text, sender=cid)
+        svc.db.audit("web", "admin:chat", f"conversation={cid} len={len(text)}")
+        return {"conversation": cid, "sender": cid, "reply": reply,
+                "messages": svc.admin.history(cid, 100),
+                "conversations": svc.admin.list_conversations()}
 
     @r.post("/admin/chat/reset", dependencies=auth_deps)
-    def reset(body: SenderIn) -> dict:
-        sender = (body.sender or "default").strip() or "default"
-        dropped = svc.admin.reset(sender)
-        svc.db.audit("web", "admin:reset", f"sender={sender} dropped={dropped}")
-        return {"sender": sender, "dropped": dropped}
+    def reset(body: ResetIn | None = None, conversation: str | None = None) -> dict:
+        sender = body.sender if body else None
+        cid = _conv_id(conversation or (body.conversation if body else None), sender)
+        dropped = svc.admin.reset(cid)
+        svc.db.audit("web", "admin:reset", f"conversation={cid} dropped={dropped}")
+        return {"conversation": cid, "dropped": dropped}
 
     return r

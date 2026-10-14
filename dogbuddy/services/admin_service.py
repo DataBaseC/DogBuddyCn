@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any, Callable
 
 from ..agents.admin.tools import AdminServices, build_admin_tools
 from ..agents.core.loop import AgentLoop
 from ..agents.core.roles import get_role
+from ..db import _now_iso
 from ..ports import Window
 from ..tools.registry import ToolContext, ToolRegistry
 from ..windows.context import ContextBuilder
@@ -78,10 +80,16 @@ class AdminService:
         return build_supervisor_tools(self._svc)
 
     # ------------------------------------------------------------- sessions
+    #: 默认对话的 id —— 老部署（迁移前只有一条会话）沿用同一个键，升级后历史不丢
+    DEFAULT_CONVERSATION = "default"
+
     def session_for(self, sender: str) -> WindowSession:
-        """Admins are NOT unique: one persistent conversation per authorized user
-        (`admin:<user_id>`), created lazily. Global memory stays shared."""
-        key = (sender or "default").strip() or "default"
+        """按**对话 id** 取（或惰性建）一个持久会话，消息落在合成窗口 `admin:<id>`。
+
+        v2 口径：**管理员只有一个**（与用户对接的唯一窗口），但对话可以有多个——
+        每个对话是一份独立的上下文，互不串味。
+        """
+        key = (sender or self.DEFAULT_CONVERSATION).strip() or self.DEFAULT_CONVERSATION
         sess = self._sessions.get(key)
         if sess is None:
             window = Window(id=f"admin:{key}", name=f"admin:{key}", role="admin",
@@ -91,7 +99,77 @@ class AdminService:
         return sess
 
     def active_admins(self) -> list[str]:
+        """（兼容旧接口）当前已加载的会话键。v2 只有一个管理员，这里是"已打开的对话"。"""
         return sorted(self._sessions)
+
+    # ------------------------------------------------------- conversations (v9)
+    def ensure_default_conversation(self) -> dict[str, Any]:
+        """保证至少有一个对话存在（首次启动 / 升级后自愈）。"""
+        convs = self.db.list_conversations(include_archived=True)
+        if convs:
+            return convs[0]
+        return self.db.insert_conversation(self.DEFAULT_CONVERSATION, "默认对话")
+
+    def list_conversations(self, include_archived: bool = False) -> list[dict[str, Any]]:
+        self.ensure_default_conversation()
+        out = []
+        for c in self.db.list_conversations(include_archived=include_archived):
+            cid = c["id"]
+            try:
+                msgs = self.db.list_messages(f"admin:{cid}", 200)
+                count = len(msgs)
+                last = next((m.content for m in reversed(msgs) if m.role == "user"), "")
+            except Exception:  # noqa: BLE001 — 统计失败不影响列出
+                count, last = 0, ""
+            out.append({**c, "message_count": count,
+                        "preview": (last or "")[:80]})
+        return out
+
+    def create_conversation(self, title: str = "") -> dict[str, Any]:
+        """新建对话（用户点「新建对话」）。标题留空则按"对话 N"自动命名。"""
+        self.ensure_default_conversation()
+        existing = self.db.list_conversations(include_archived=True)
+        cid = f"c-{uuid.uuid4().hex[:10]}"
+        if not (title or "").strip():
+            used = {c.get("title", "") for c in existing}
+            n = 1
+            while f"对话 {n}" in used:
+                n += 1
+            title = f"对话 {n}"
+        conv = self.db.insert_conversation(cid, title.strip())
+        self.db.audit("web", "conversation:create", f"{cid} {title}")
+        return conv
+
+    def rename_conversation(self, conv_id: str, title: str) -> dict[str, Any]:
+        if self.db.get_conversation(conv_id) is None:
+            raise KeyError(f"对话不存在：{conv_id}")
+        conv = self.db.update_conversation(conv_id, title=(title or "").strip())
+        self.db.audit("web", "conversation:rename", f"{conv_id} -> {title}")
+        return conv or {}
+
+    def delete_conversation(self, conv_id: str) -> bool:
+        conv = self.db.get_conversation(conv_id)
+        if conv is None:
+            return False
+        self._sessions.pop(conv_id, None)          # 丢掉内存里的会话
+        ok = self.db.delete_conversation(conv_id)
+        self.ensure_default_conversation()          # 删光了也要留一个可用的
+        self.db.audit("web", "conversation:delete", conv_id)
+        return ok
+
+    def _touch_conversation(self, conv_id: str, user_text: str) -> None:
+        """更新"最近活动时间"；**首条用户消息自动当标题**（用户不用手动命名）。"""
+        conv = self.db.get_conversation(conv_id)
+        if conv is None:
+            conv = self.db.insert_conversation(conv_id, "")
+        patch: dict[str, Any] = {"last_message_at": _now_iso()}
+        title = (conv.get("title") or "").strip()
+        # 只有"还是自动名/空"时才用首条消息命名，不覆盖用户手改的标题
+        if user_text and (not title or title == "默认对话" or title.startswith("对话 ")):
+            first = " ".join(user_text.split())[:40]
+            if first:
+                patch["title"] = first
+        self.db.update_conversation(conv_id, **patch)
 
     def _lock_for(self, key: str) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -123,15 +201,24 @@ class AdminService:
     async def _run_turn(self, text: str, sender: str) -> str:
         role_spec = get_role("admin")
         session = self.session_for(sender)
+        # v9：对话首条消息自动成为标题；同时刷新"最近活动时间"
+        if text and sender != "system":
+            try:
+                self._touch_conversation(sender, text)
+            except Exception:  # noqa: BLE001 — 元数据失败不能挡住对话本身
+                logger.warning("conversation touch failed", exc_info=True)
         ctx = ToolContext(window_id=session.window.id, workspace=".", mode="AUTO",
                           actor=f"admin:{sender}", todo_repo=self.db, db=self.db,
                           llm_factory=self.llm_factory,
-                          memory_service=self.memory, extra={"manual": True})
+                          memory_service=self.memory, extra={"manual": True,
+                                                             "conversation": sender})
         loop = AgentLoop(
             llm=self.llm_factory(), registry=self.registry, session=session,
             builder=self.builder, tool_names=role_spec.tool_names if role_spec else None,
             max_iterations=self.max_iterations)
-        result = await loop.run(f"[{sender}] {text}" if text else "", ctx)
+        # 多对话时不要把发送者前缀塞进提示词（v2 只有一个管理员，前缀只会干扰）
+        prompt = text if sender == self.DEFAULT_CONVERSATION else (text or "")
+        result = await loop.run(prompt, ctx)
         return result.content or "(no reply)"
 
     async def notify(self, text: str) -> str:
