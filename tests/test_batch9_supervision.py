@@ -415,11 +415,67 @@ def test_T9_5_主管写员工读_员工不能写(tmp_path):
 
 
 def test_T9_5_项目记忆工具带_project_作用域():
+    """读写是**两个不同级别**（审查报告 P1-4）。
+
+    初版给两者都标 `"project"`，并断言"员工读得到"——两条断言各自都对，
+    合起来锁死了一个不可能的中间态：员工 scope 是 none/rank=0，
+    `check_scope` 在 rank==0 处直接拒绝、**连目标项目都不解析**，
+    于是"员工只读"根本不存在。现在：
+
+    * 写 = `project`（管理权，仅主管）
+    * 读 = `project_read`（项目成员可读：员工读自己所属项目）
+    """
     from dogbuddy.tools.registry import build_registry
     reg = build_registry()
-    for name in ("project_memory_read", "project_memory_write"):
-        t = reg.get(name)
-        assert t is not None and t.required_scope == "project", name
+    write = reg.get("project_memory_write")
+    read = reg.get("project_memory_read")
+    assert write is not None and write.required_scope == "project"
+    assert read is not None and read.required_scope == "project_read"
+
+
+def test_T9_5_员工只读在注册表全链路上成立():
+    """★ 走 `ToolRegistry.execute()`——初版的作用域断言全都绕开了注册表。
+
+    报告第六节的变异 v1 证明：把注册表里的 `required_scope` 转发删掉，
+    仓库里所有作用域测试仍然全绿，而员工能把整篇项目记忆读出来。
+    """
+    import asyncio
+
+    from dogbuddy.agents.core.permissions import PermissionGate
+    from dogbuddy.agents.core.scope import Scope
+    from dogbuddy.tools.registry import ToolContext, build_registry
+
+    def _run(coro):
+        return asyncio.new_event_loop().run_until_complete(coro)
+
+    reg = build_registry(gate=PermissionGate())
+
+    # 员工：作用域 none，但**自己所属项目**可读
+    import tempfile
+    from pathlib import Path as _Path
+
+    from dogbuddy.memory.service import MemoryService
+
+    mem_root = _Path(tempfile.mkdtemp(prefix="pmem-"))
+    (mem_root / "projects").mkdir(parents=True, exist_ok=True)
+    (mem_root / "projects" / "p1.md").write_text("# 项目约定\n- 只用 UTF-8\n", encoding="utf-8")
+    memory = MemoryService(mem_root)
+
+    worker = Scope(level="none", read_project_ids=frozenset({"p1"}), actor="w1")
+    ctx_ok = ToolContext(window_id="w1", workspace=".", mode="BUILD", scope=worker,
+                         memory_service=memory)
+    got = _run(reg.execute("project_memory_read", {"project_id": "p1"}, ctx_ok))
+    assert got.ok is True, got.output
+    assert "只用 UTF-8" in got.output
+
+    # 员工读**别人**的项目 → 拒绝（project_id 是模型自报的，必须校验）
+    other = _run(reg.execute("project_memory_read", {"project_id": "p2"}, ctx_ok))
+    assert other.ok is False and other.data.get("policy_denied") is True
+
+    # 员工写项目记忆 → 拒绝（需要管理权）
+    w = _run(reg.execute("project_memory_write", {"project_id": "p1", "content": "x"}, ctx_ok))
+    assert w.ok is False and w.data.get("policy_denied") is True
+
 
 
 # --------------------------------------------------------------------------- T9.6 审批逐级

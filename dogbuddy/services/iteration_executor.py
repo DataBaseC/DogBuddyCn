@@ -196,19 +196,34 @@ class IterationExecutor:
                 rt = self.windows._rt(wid)
                 ctx_ws = self.windows.effective_workspace(w)
                 rt.session.workspace_override = ctx_ws
+                from ..agents.core.roles import get_role
+                role_spec = get_role(w.role)
                 loop = AgentLoop(
                     llm=self.windows._llm(w.llm_profile or None, w.model or None),
                     registry=rt.registry, session=rt.session,
                     builder=self.windows.builder,
                     compactor=self.windows._compactor_for(w),
-                    tool_names=None,
+                    # 角色白名单。初版写死 None —— 而 `schemas(only=None)` 是"不过滤"，
+                    # 于是迭代路径把**注册表全量**交给模型：员工拿到了白名单外的
+                    # `project_memory_write`，MCP 工具接入后更是无门通道
+                    # （审查报告 P1-7）。未知角色同样不给工具（fail-closed）。
+                    tool_names=role_spec.tool_names if role_spec else [],
                     max_iterations=self.windows.params_for(w).get("max_iterations", 25))
                 from ..tools.registry import ToolContext
                 ctx = ToolContext(window_id=w.id, workspace=ctx_ws, mode=w.mode,
                                   actor="worker", todo_repo=self.db, db=self.db,
                                   panel=self.windows.panel,
                                   ask_user_fn=self.windows._make_ask_user(w.id),
-                                  checkpoint_root=self.windows.checkpoints_dir)
+                                  checkpoint_root=self.windows.checkpoints_dir,
+                                  memory_service=getattr(self.windows, "memory", None),
+                                  # T9.1：作用域由角色推导后注入。初版只在
+                                  # window_manager 注入，迭代/群组路径 `ctx.scope=None`
+                                  # → 主管在这两条路径上用不了自己的管理工具
+                                  # （审查报告 P1-5）。
+                                  scope=self.windows.scope_resolver.for_window(w),
+                                  extra={"trust": (w.params or {}).get("trust", "normal"),
+                                         "project_id": getattr(w, "project_id", "") or ""})
+
                 res = await loop.run(prompt, ctx)
                 results.append({"window_id": wid, "ok": res.stop_reason == "done",
                                 "summary": res.content or "",

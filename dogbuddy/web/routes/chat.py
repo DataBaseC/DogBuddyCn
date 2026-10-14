@@ -11,8 +11,18 @@ v2 口径（2026-10-14 用户拍板）：
 """
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+# 对话 id 的形状：只允许字母/数字/下划线/连字符，1..64 位。
+# 注意 12 位 hex 的**工位 id 也会通过这个正则**——所以 DAO 层的
+# 「裸 id 只在不是真实工位时才删」这道兜底不可省（审查报告 P0-3）。
+_CONV_ID_RX = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# 系统保留频道：`admin:system` 是员工提问 / 危险命令确认 / 逐级上报的落点，
+# 不是一个"用户对话"，绝不能被对话 API 读取、重命名、删除或清空。
+_RESERVED_CONV_IDS = frozenset({"system"})
 
 
 class ChatIn(BaseModel):
@@ -35,9 +45,27 @@ class ResetIn(BaseModel):
     sender: str | None = None
 
 
+def _validated_conv_id(cid: str) -> str:
+    """对话 id 白名单校验（审查报告 P0-3）。
+
+    初版 `_conv_id` 只做 `strip()`，于是对话 id 可以是任意字符串——
+    包括一个**真实工位 id**，删除时就连带抹掉那个工位的全部历史。
+    """
+    cid = str(cid or "").strip()
+    if not _CONV_ID_RX.match(cid):
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法对话 id：{cid!r}（只允许 1-64 位字母/数字/下划线/连字符）")
+    if cid in _RESERVED_CONV_IDS:
+        raise HTTPException(
+            status_code=400, detail=f"{cid!r} 是系统保留频道，不能作为对话操作")
+    return cid
+
+
 def _conv_id(conversation: str | None, sender: str | None) -> str:
     """对话键：`conversation` 优先，其次兼容老字段 `sender`，都没有则默认对话。"""
-    return ((conversation or sender or "default").strip() or "default")
+    return _validated_conv_id(conversation or sender or "default")
+
 
 
 def router(svc, auth_deps) -> APIRouter:
@@ -63,17 +91,21 @@ def router(svc, auth_deps) -> APIRouter:
 
     @r.patch("/admin/chat/conversations/{conv_id}", dependencies=auth_deps)
     def rename_conversation(conv_id: str, body: ConversationPatch) -> dict:
+        cid = _validated_conv_id(conv_id)
         try:
-            conv = svc.admin.rename_conversation(conv_id, body.title)
+            conv = svc.admin.rename_conversation(cid, body.title)
         except KeyError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
         return {"conversation": conv, "conversations": svc.admin.list_conversations()}
 
     @r.delete("/admin/chat/conversations/{conv_id}", dependencies=auth_deps)
     def delete_conversation(conv_id: str) -> dict:
-        if not svc.admin.delete_conversation(conv_id):
-            raise HTTPException(status_code=404, detail=f"对话不存在：{conv_id}")
-        return {"deleted": conv_id, "conversations": svc.admin.list_conversations()}
+        cid = _validated_conv_id(conv_id)
+        if not svc.admin.delete_conversation(cid):
+            raise HTTPException(status_code=404, detail=f"对话不存在：{cid}")
+        svc.db.audit("web", "conversation:delete", cid)
+        return {"deleted": cid, "conversations": svc.admin.list_conversations()}
+
 
     # ------------------------------------------------------------ 消息
     @r.get("/admin/chat/admins", dependencies=auth_deps)

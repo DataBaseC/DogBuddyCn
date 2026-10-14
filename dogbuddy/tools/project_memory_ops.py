@@ -72,7 +72,13 @@ class ProjectMemoryReadTool:
         },
     }
     permission = "read"
-    required_scope = "project"
+    # 读级作用域：**项目成员**即可读（员工只读），不要求管理权。
+    # 初版写的是 "project"，而员工的 Scope 是 none/rank=0 → `check_scope` 在
+    # `rank == 0` 处直接拒绝，连目标项目都不解析 → "员工只读"这个中间态根本
+    # 不存在，这个工具只是白名单里的一个死工具（审查报告 P1-4）。
+    # 注意不能简单降成 ""：`project_id` 是模型自报的，降成空等于任何工位都能读
+    # **任何项目**的记忆。所以单开一个 project_read 级：要求目标 ∈ 你的可读项目集。
+    required_scope = "project_read"
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         pid = _project_id(ctx, args)

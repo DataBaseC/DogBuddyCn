@@ -288,3 +288,87 @@ def test_清空某个对话_不影响别的(tmp_path, monkeypatch):
         left = client.get("/api/admin/chat/messages",
                           params={"conversation": kid}).json()["messages"]
         assert any("保留内容" in m["content"] for m in left), "别的对话不能被连带清空"
+
+
+# ------------------------------------------------------- P0-3 数据丢失回归
+def test_删对话不能误删同名真实工位的消息(tmp_path, monkeypatch):
+    """审查报告 P0-3（不可逆数据丢失）。
+
+    `delete_conversation` 初版用 `window_id IN (?,?)` 传 `(f"admin:{conv_id}", conv_id)`，
+    而 `conv_id` 零校验 → `DELETE /api/admin/chat/conversations/<真实工位id>`
+    会抹掉该工位的全部历史（工位仍在、历史空白、无法恢复）。
+
+    注意：**必须让 `<id>` 作为真实工位存在**才测得到这个洞。原有测试只往
+    `admin:<id>` 写消息，第二个占位符从不被触碰——这正是该 bug 能在
+    375 条全绿测试下存活的原因。
+    """
+    from dogbuddy.db import Window, new_id
+
+    app, _client = _app(tmp_path, monkeypatch)
+    db = app.db
+    wid = new_id()
+    db.insert_window(Window(id=wid, name="真实工位", role="worker_programmer",
+                            workspace_path="", model="", mode="BUILD"))
+    for content in ("工位历史1", "工位历史2", "工位历史3"):
+        db.add_message(wid, "user", content)
+    assert len(db.list_messages(wid, 10)) == 3
+
+    # 制造"该 id 也是一个对话行"的前置条件——初版只要 conv 行存在就放行
+    db.insert_conversation(wid, "冒名对话")
+
+    app.admin.delete_conversation(wid)
+
+    assert len(db.list_messages(wid, 10)) == 3, "真实工位的消息绝不能被对话删除连带清掉"
+    assert db.get_window(wid) is not None, "工位本身也不该受影响"
+
+
+def test_删真实对话仍然会清掉它自己的消息(tmp_path, monkeypatch):
+    """反向保证：修 P0-3 不能把"删对话就该清消息"这个正常能力也修没了。"""
+    app, _client = _app(tmp_path, monkeypatch)
+    db = app.db
+    app.admin.ensure_default_conversation()
+    conv = app.admin.create_conversation("要删的")
+    cid = conv["id"]
+    db.add_message(f"admin:{cid}", "user", "这条该被删")
+
+    app.admin.delete_conversation(cid)
+
+    assert db.list_messages(f"admin:{cid}", 10) == []
+    # 未被真实工位兜底误伤
+    assert db.get_conversation(cid) is None
+
+
+def test_对话_id_白名单拒非法值(tmp_path, monkeypatch):
+    """审查报告 P0-3：初版 `_conv_id` 只做 strip()，对话 id 可以为任意字符串。"""
+    app, client = _app(tmp_path, monkeypatch)
+    with client:
+        bad = ["a b", "a/b", "../x", "x" * 65, "a:b", "a$b", "a.b", "对话"]
+        for cid in bad:
+            r = client.get("/api/admin/chat/messages", params={"conversation": cid})
+            assert r.status_code == 400, f"非法对话 id 应 400: {cid!r} → {r.status_code}"
+        # 合法值放行；空字符串按既有兜底 = 默认对话（不是错误）
+        assert client.get("/api/admin/chat/messages",
+                          params={"conversation": "ok-id_1"}).status_code == 200
+        assert client.get("/api/admin/chat/messages",
+                          params={"conversation": ""}).json()["conversation"] == "default"
+
+
+def test_system_是保留频道不可被对话接口操作(tmp_path, monkeypatch):
+    """`admin:system` 是员工提问/危险命令确认/逐级上报的落点，不是用户对话。
+
+    初版 `POST /api/admin/chat/reset {"conversation":"system"}` 会把它清空，
+    而那些消息不依赖 conversations 行（`reset` 走 `session_for()`）。
+    """
+    app, client = _app(tmp_path, monkeypatch)
+    with client:
+        app.db.add_message("admin:system", "user", "员工提问：要删库吗")
+        assert client.get("/api/admin/chat/messages",
+                          params={"conversation": "system"}).status_code == 400
+        assert client.post("/api/admin/chat/reset",
+                           json={"conversation": "system"}).status_code == 400
+        assert client.delete("/api/admin/chat/conversations/system").status_code == 400
+        assert client.patch("/api/admin/chat/conversations/system",
+                            json={"title": "x"}).status_code == 400
+        # 消息必须原封不动
+        assert len(app.db.list_messages("admin:system", 10)) == 1
+

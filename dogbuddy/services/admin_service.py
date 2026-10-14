@@ -15,6 +15,7 @@ from typing import Any, Callable
 from ..agents.admin.tools import AdminServices, build_admin_tools
 from ..agents.core.loop import AgentLoop
 from ..agents.core.roles import get_role
+from ..agents.core.scope import Scope
 from ..db import _now_iso
 from ..ports import Window
 from ..tools.registry import ToolContext, ToolRegistry
@@ -276,14 +277,20 @@ class AdminService:
                 self._touch_conversation(sender, text)
             except Exception:  # noqa: BLE001 — 元数据失败不能挡住对话本身
                 logger.warning("conversation touch failed", exc_info=True)
+        # T9.1：管理员工位是 system 作用域。`_AdminGate` 本来就不做作用域裁决
+        # （全权），但作用域必须在 ctx 里声明——否则一旦有人把 gate 换成
+        # PermissionGate，这条路径上的所有管理工具都会被 fail-closed 拒掉
+        # （审查报告 P1-5：作用域只在 window_manager 一条路径注入）。
         ctx = ToolContext(window_id=session.window.id, workspace=".", mode="AUTO",
                           actor=f"admin:{sender}", todo_repo=self.db, db=self.db,
                           llm_factory=self.llm_factory,
+                          scope=Scope(level="system", actor=f"admin:{sender}",
+                                      source="role:admin"),
                           memory_service=self.memory, extra={"manual": True,
                                                              "conversation": sender})
         loop = AgentLoop(
             llm=self.llm_factory(), registry=self.registry, session=session,
-            builder=self.builder, tool_names=role_spec.tool_names if role_spec else None,
+            builder=self.builder, tool_names=role_spec.tool_names if role_spec else [],
             max_iterations=self.max_iterations)
         # 多对话时不要把发送者前缀塞进提示词（v2 只有一个管理员，前缀只会干扰）
         prompt = text if sender == self.DEFAULT_CONVERSATION else (text or "")
@@ -315,8 +322,19 @@ class AdminService:
 
 
 class _AdminGate:
-    """Admin runs with full power; dangerous commands still surface for confirmation."""
+    """管理员控制台全权放行——**作用域对它不适用**。
 
-    def check(self, tool_name: str, permission: str, args: dict[str, Any], ctx: ToolContext):
+    管理员是 system 作用域（覆盖全部项目），所以任何 `required_scope` 都不会
+    让它越权；这里显式接受该参数并放行，是**有意为之**，不是漏洞
+    （审查报告第五节第 6 条同样如此判定）。
+
+    但参数必须存在：`required_scope` 是 `PermissionGate` 端口契约的一部分，
+    初版只收 4 参 → 注册表每次都走 `except TypeError` 回退（审查报告实测 3/3）。
+    回退分支现已删除，实现方必须满足契约。
+    """
+
+    def check(self, tool_name: str, permission: str, args: dict[str, Any],
+              ctx: ToolContext, required_scope: str = ""):
         from ..tools.registry import GateDecision
         return GateDecision(True)
+

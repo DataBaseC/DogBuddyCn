@@ -30,10 +30,21 @@ LEVELS = {"none": 0, "project": 1, "system": 2}
 
 @dataclass(frozen=True)
 class Scope:
-    """一次调用的作用域快照。不可变，便于安全地传下去。"""
+    """一次调用的作用域快照。不可变，便于安全地传下去。
+
+    两个集合是**刻意分开**的（审查报告 P1-4）：
+
+    * `project_ids` —— 我能**管理**的项目（主管）。`required_scope="project"` 查它。
+    * `read_project_ids` —— 我能**只读**的项目（员工读自己所属项目的项目记忆）。
+      `required_scope="project_read"` 查它。
+
+    ROLES.md 的权限矩阵里"员工 ✅ 本工位 / 项目记忆只读"这一格，靠后者表达；
+    只用一个 `level` 是表达不了"员工：不能管、但能读"这个中间态的。
+    """
 
     level: str = "none"                     # none | project | system
     project_ids: frozenset[str] = field(default_factory=frozenset)
+    read_project_ids: frozenset[str] = field(default_factory=frozenset)
     actor: str = ""                         # 谁（工位 id / admin:<user>）
     source: str = ""                        # 推导来源，便于审计与排查
 
@@ -50,13 +61,23 @@ class Scope:
         return self.rank == 0
 
     def allows_project(self, project_id: str) -> bool:
-        """能不能管这个项目。system 覆盖一切；project 只认自己的集合。"""
+        """能不能**管**这个项目。system 覆盖一切；project 只认自己的集合。"""
         if self.is_system:
             return True
         if self.rank == 0:
             return False
         pid = str(project_id or "")
         return bool(pid) and pid in self.project_ids
+
+    def allows_read(self, project_id: str) -> bool:
+        """能不能**读**这个项目的共享记忆（不含管理权）。"""
+        if self.is_system:
+            return True
+        pid = str(project_id or "")
+        if not pid:
+            return False
+        return pid in self.project_ids or pid in self.read_project_ids
+
 
     def covers(self, other: "Scope") -> bool:
         """自己是否覆盖对方（用于"能否管理该资源的属主"判断）。"""
@@ -70,8 +91,12 @@ class Scope:
         if self.is_system:
             return "system(全部)"
         if self.rank == 0:
+            if self.read_project_ids:
+                return (f"none(无管理权；只读 "
+                        f"{','.join(sorted(self.read_project_ids))})")
             return "none(无管理权)"
         return f"project({','.join(sorted(self.project_ids)) or '空'})"
+
 
 
 SYSTEM = Scope(level="system", source="system")
@@ -95,13 +120,21 @@ class ScopeResolver:
             return NONE
         wid = getattr(window, "id", "") or ""
         role_name = role or getattr(window, "role", "") or ""
+        own = getattr(window, "project_id", "") or ""
+        own_set = frozenset({own}) if own else frozenset()
         if role_name == "admin":
             return Scope(level="system", actor=wid, source="role:admin")
         if role_name != "supervisor":
-            return Scope(level="none", actor=wid, source=f"role:{role_name or 'unknown'}")
+            # 员工：**不能管**任何项目，但**自己所属项目**的项目记忆可读（只读）。
+            # 这是 ROLES.md 权限矩阵里"项目记忆 员工只读"那一格的落地
+            # （审查报告 P1-4：原来员工的 rank==0 会让读也被拒，"只读"不存在）。
+            return Scope(level="none", read_project_ids=own_set, actor=wid,
+                         source=f"role:{role_name or 'unknown'}")
         pids = self.supervised_projects(wid)
-        return Scope(level="project", project_ids=frozenset(pids), actor=wid,
-                     source=f"supervisor:{len(pids)} 个项目")
+        return Scope(level="project", project_ids=frozenset(pids),
+                     read_project_ids=frozenset(pids) | own_set,
+                     actor=wid, source=f"supervisor:{len(pids)} 个项目")
+
 
     def supervised_projects(self, window_id: str) -> set[str]:
         """我是哪些项目的主管。

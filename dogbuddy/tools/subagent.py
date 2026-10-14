@@ -50,6 +50,9 @@ class ExploreSubagentTool:
             window_id=ctx.window_id, workspace=ctx.workspace, mode="PLAN",
             actor="explore", todo_repo=ctx.todo_repo, db=ctx.db, panel=None,
             checkpoint_root=ctx.checkpoint_root, extra=dict(ctx.extra),
+            # 子代理**继承调用者的作用域**——不得比父级更宽（审查报告 P1-5：
+            # 这条路径原来 scope=None，虽然 fail-closed 安全，但语义上应继承）
+            scope=ctx.scope,
         )
         registry = build_registry(include=READONLY_TOOLS)
         schemas = registry.schemas()

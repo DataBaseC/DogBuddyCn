@@ -49,8 +49,13 @@ DANGEROUS_PATTERNS: list[tuple[str, str]] = [
 ]
 
 # Writes to the AegisServerPanel installation/config are forbidden (DEV_PROMPT 禁止事项).
+# 2026-10（审查报告 P0-1）：模式原来只认 `dogbuddy[-_]?server[-_]?panel`，
+# 而产品实际叫 **AegisServerPanel**——`/opt/aegis-server-panel/...` 根本匹配不到。
+# 两种命名都收进来。
 PANEL_PATH_PATTERN = re.compile(
-    r"(dogbuddy[-_]?server[-_]?panel|/etc/dogbuddy-panel|panel/config\.|panel_data)", re.IGNORECASE)
+    r"(dogbuddy|aegis)[-_]?(server)?[-_]?panel|/etc/dogbuddy-panel|panel/config\.|panel_data",
+    re.IGNORECASE)
+
 
 _COMPILED = [(re.compile(p, re.IGNORECASE), why) for p, why in DANGEROUS_PATTERNS]
 
@@ -167,6 +172,22 @@ class PermissionGate:
             return GateDecision(
                 False, f"越权：{tool_name} 需要 system 作用域（仅管理员），"
                        f"当前 {scope.describe()}")
+        if required == "project_read":
+            # 读级：项目成员即可（员工只读自己的项目）。比 "project" 弱，但**不是**空检查
+            # —— `project_id` 是模型自报的，必须校验目标 ∈ 你的可读项目集
+            # （审查报告 P1-4：降成 "" 会让任何工位读任何项目的记忆）。
+            if scope.is_system:
+                return None
+            target_pid, how = self.resolve_target_project(args, ctx)
+            if not target_pid:
+                return GateDecision(
+                    False, f"越权：无法判定 {tool_name} 的目标项目（{how}）；"
+                           f"作用域校验失败即拒绝（fail-closed）。")
+            if not scope.allows_read(target_pid):
+                return GateDecision(
+                    False, f"越权：目标项目 {target_pid} 不在你的可读范围 "
+                           f"{scope.describe()} 内（只能读自己所属项目的共享记忆）")
+            return None
         if required == "project":
             if scope.is_system:
                 return None
@@ -224,6 +245,12 @@ class PermissionGate:
         command = str(args.get("command", ""))
         if not command:
             return GateDecision(True)
+        # AegisServerPanel 的安装/配置**任何权限下都不得触碰**（DEV_PROMPT 禁止事项）。
+        # 初版只在 permission=="write" 时查 path 参数，于是 `shell`/`server_exec`
+        # 以 shell 权限执行 `echo x > /etc/dogbuddy-panel/config.json` 直接放行
+        # （审查报告 P0-1 附带发现）。这里补在 shell 通道上，且优先于危险命令判定。
+        if PANEL_PATH_PATTERN.search(command):
+            return GateDecision(False, "modifying AegisServerPanel files is forbidden")
         reason = is_dangerous_command(command)
         irreversible = is_irreversible_command(command)
         # T4.3: the irreversible check is WIDER than the dangerous list —

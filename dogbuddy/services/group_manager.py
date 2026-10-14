@@ -118,16 +118,25 @@ class GroupManager:
 
     # -------------------------------------------------------------- runs
     def _strict_tools(self, member_ids: list[str]) -> list[str] | None:
-        """权限取最严: the tool intersection of every member's role."""
+        """权限取最严：所有成员角色白名单的**交集**。
+
+        返回 `[]` = **一个工具都不给**（交集为空，或有成员角色未知）。
+        注意 `AgentLoop` 里 `[]` 是"空白名单"，而 `None` 才是"不过滤"——
+        初版把 `[]` 当成不过滤，于是交集为空时**全量放行**（审查报告 P1-7）。
+        返回 `None` 只用于"拿不到成员列表"，调用方会退回各自角色白名单。
+        """
+        if not member_ids:
+            return None
         sets: list[set[str]] = []
         for wid in member_ids:
             w = self.db.get_window(wid)
-            spec = get_role(w.role) if w else None
-            sets.append(set(spec.tool_names) if spec and spec.tool_names else set())
-        if not sets:
-            return None
-        common = set.intersection(*sets) if sets else None
-        return sorted(common) if common is not None else None
+            spec = get_role(w.role) if w is not None else None
+            if spec is None or not spec.tool_names:
+                # 判不出这个成员能给什么 → 交集必然为空；不猜，直接不给工具
+                return []
+            sets.append(set(spec.tool_names))
+        return sorted(set.intersection(*sets))
+
 
     def _channel_recap(self, gid: str, limit: int = 30) -> str:
         msgs = self.db.list_group_messages(gid, limit)
@@ -184,8 +193,11 @@ class GroupManager:
                    "不要重复别人已说的内容。")
             )
             role_spec = get_role(w.role)
+            # `_strict_tools` 返回 `[]`（交集为空）时**必须一个工具都不给**；
+            # 返回 None（算不出来）才退回该角色自己的白名单。初版 `[]` 会被
+            # `schemas(only=...)` 当成"不过滤"→ 全量放行（审查报告 P1-7）。
             member_tools = tools if tools is not None else (
-                role_spec.tool_names if role_spec else None)
+                role_spec.tool_names if role_spec else [])
             loop = AgentLoop(
                 llm=self.windows._llm(w.llm_profile or None, w.model or None),
                 registry=rt.registry, session=rt.session,
@@ -204,7 +216,13 @@ class GroupManager:
                 llm_factory=(lambda p=None: self.windows._llm(
                     p or w.llm_profile or None, w.model or None)),
                 ask_user_fn=self.windows._make_ask_user(w.id),
-                checkpoint_root=self.windows.checkpoints_dir)
+                checkpoint_root=self.windows.checkpoints_dir,
+                memory_service=getattr(self.windows, "memory", None),
+                # T9.1：作用域由角色推导后注入（初版漏了这条路径 → 主管在群组里
+                # 用不了管理工具，fail-closed 变成"干不了活"，审查报告 P1-5）
+                scope=self.windows.scope_resolver.for_window(w),
+                extra={"trust": (w.params or {}).get("trust", "normal"),
+                       "project_id": getattr(w, "project_id", "") or ""})
             try:
                 result = await loop.run(step_prompt, ctx)
                 steps.append({"window_id": wid, "window_name": w.name,

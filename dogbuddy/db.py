@@ -287,9 +287,20 @@ _MIGRATIONS: dict[int, Any] = {
 }
 
 
+class SchemaTooNewError(RuntimeError):
+    """库的 schema 比当前代码更新 —— 拒绝以降级代码打开（审查报告 P2-1）。
+
+    初版只把版本号写进 `schema_version`，注释声称"老二进制能据此检测出不匹配"，
+    但**没有任何地方做这个检测**：用旧代码打开一个未来库不报错、不告警，
+    照常写入 —— 结果是对不存在的列读字段静默丢失、随机 `OperationalError`。
+    现在在打开时就 fail-fast：宁可起不来（触发自更新回滚），也不能带着错版本写数据。
+    """
+
+
 def _current_schema_version(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
     return int(row[0]) if row and row[0] is not None else 0
+
 
 
 def _migrate(conn: sqlite3.Connection, target: int = SCHEMA_VERSION) -> list[int]:
@@ -323,7 +334,18 @@ class Database:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+            # P2-1: 未来库必须 fail-fast，不能"静默降级运行"
+            found = _current_schema_version(self._conn)
+            if found > SCHEMA_VERSION:
+                self._conn.close()
+                raise SchemaTooNewError(
+                    f"数据库 schema_version={found} 比当前代码的 "
+                    f"SCHEMA_VERSION={SCHEMA_VERSION} 更新：拒绝以降级代码打开"
+                    f"（会静默丢失字段、写入随机失败）。"
+                    f"请升级代码，或从备份恢复一个匹配的库。"
+                    f"库文件：{self.path}")
             _migrate(self._conn)
+
 
     @property
     def schema_version(self) -> int:
@@ -1167,15 +1189,25 @@ class Database:
         return self.get_conversation(conv_id)
 
     def delete_conversation(self, conv_id: str, drop_messages: bool = True) -> bool:
-        """删对话：连它的消息一起删（对话是用户可见的完整单位）。"""
+        """删对话：连它的消息一起删（对话是用户可见的完整单位）。
+
+        审查报告 P0-3：初版是 `window_id IN (?,?)` 传 `(f"admin:{conv_id}", conv_id)`，
+        而 `conv_id` **零校验**——`DELETE /api/admin/chat/conversations/<真实工位id>`
+        会把那个工位的 messages 全部删光（工位还在、历史空白、不可恢复）。
+        现在裸 `<id>` 只在「它确实不是一个真实工位」时才连带删。
+        """
+        cid = str(conv_id or "")
         with self._lock:
-            if drop_messages:
-                # 消息落在合成窗口 `admin:<id>` 下；老的 IM 会话可能直接用 <id>
-                self._conn.execute("DELETE FROM messages WHERE window_id IN (?,?)",
-                                   (f"admin:{conv_id}", conv_id))
-            cur = self._conn.execute("DELETE FROM conversations WHERE id=?", (conv_id,))
+            if drop_messages and cid:
+                # 对话消息落在合成窗口 `admin:<id>` 下
+                self._conn.execute("DELETE FROM messages WHERE window_id=?", (f"admin:{cid}",))
+                # 兼容更老的形态（裸 `<id>` 当窗口），但绝不误伤真实工位
+                if self.get_window(cid) is None:
+                    self._conn.execute("DELETE FROM messages WHERE window_id=?", (cid,))
+            cur = self._conn.execute("DELETE FROM conversations WHERE id=?", (cid,))
             self._conn.commit()
         return bool(cur.rowcount)
+
 
     def legacy_admin_windows(self) -> list[tuple[str, int]]:
         """老版本留下的管理员会话窗口（`admin:<key>` + 消息数，按消息多寡降序）。

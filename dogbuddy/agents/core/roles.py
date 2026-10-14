@@ -136,6 +136,9 @@ WORKER_PROGRAMMER_TOOLS = [
     "report_iteration",
     # Batch 9 · T9.5：项目记忆——员工**只读**（防一个员工改掉全项目规矩）
     "project_memory_read",
+    # 工位记忆（ROLES.md 权限矩阵「员工 ✅ 本工位」）。只认 ctx.window_id，
+    # 模型没有参数可以指向别的工位——所以不需要作用域裁决（审查报告 P1-4）。
+    "window_memory_read", "window_memory_write",
 ]
 
 

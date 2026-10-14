@@ -208,6 +208,157 @@ def test_extract_bundle_rejects_path_traversal(tmp_path):
     assert not (tmp_path / "evil.txt").exists()
 
 
+# ------------------------------------------------------------------ P0-4 解包逃逸
+def test_extract_bundle_拒绝同前缀兄弟目录逃逸(tmp_path):
+    """审查报告 P0-4：`startswith` 是字符串前缀判断，会放过同前缀的兄弟目录。
+
+    成员名 `../unpacked-escape/pwned.txt` 解析后是 `.../unpacked-escape/pwned.txt`，
+    前缀确实是 `.../unpacked` → 初版守卫通过 → 文件落到解包目录之外。
+    """
+    import io
+
+    m = _manage()
+    bad = tmp_path / "bad.tar.gz"
+    with tarfile.open(bad, "w:gz") as t:
+        info = tarfile.TarInfo("../unpacked-escape/pwned.txt")
+        payload = b"pwned"
+        info.size = len(payload)
+        t.addfile(info, io.BytesIO(payload))
+
+    with pytest.raises(RuntimeError):
+        m._extract_bundle(bad, tmp_path / "unpacked")
+    assert not (tmp_path / "unpacked-escape" / "pwned.txt").exists(), "文件逃出了解包目录"
+
+
+def test_extract_bundle_不提取符号链接成员(tmp_path):
+    """名字合法但链接目标逃逸——按成员名判断的守卫看不见，所以直接不提取。"""
+    m = _manage()
+    src = tmp_path / "src" / "DogBuddyCn"
+    (src / "dogbuddy").mkdir(parents=True)
+    (src / "dogbuddy" / "__init__.py").write_text("__version__='1.0'\n", encoding="utf-8")
+
+    tgz = tmp_path / "sym.tar.gz"
+    with tarfile.open(tgz, "w:gz") as t:
+        t.add(src, arcname="DogBuddyCn")
+        link = tarfile.TarInfo("DogBuddyCn/evil")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/passwd"
+        t.addfile(link)
+
+    root = m._extract_bundle(tgz, tmp_path / "out")
+    assert (root / "dogbuddy" / "__init__.py").exists()
+    assert not (root / "evil").exists(), "符号链接成员不得被提取出来"
+
+
+def test_extract_bundle_拒绝绝对路径成员(tmp_path):
+    import io
+
+    m = _manage()
+    bad = tmp_path / "abs.tar.gz"
+    with tarfile.open(bad, "w:gz") as t:
+        info = tarfile.TarInfo("/tmp/abs-escape.txt")
+        payload = b"x"
+        info.size = len(payload)
+        t.addfile(info, io.BytesIO(payload))
+    with pytest.raises(RuntimeError):
+        m._extract_bundle(bad, tmp_path / "out")
+
+
+# ------------------------------------------------------------------ P2-1 未来库
+def test_未来库被拒绝打开(tmp_path):
+    """审查报告 P2-1：旧代码打开新库不报错、不告警，照常写入。
+
+    结果是读字段静默丢失、写随机 `OperationalError`。现在必须 fail-fast——
+    起不来 → 自更新回滚，而不是带着错版本继续写数据。
+    """
+    from dogbuddy.db import SchemaTooNewError
+
+    p = tmp_path / "future.db"
+    db = Database(p)
+    db._conn.execute("INSERT OR REPLACE INTO schema_version(version, applied_at) VALUES(?,?)",
+                     (SCHEMA_VERSION + 90, "2026-10-14T00:00:00"))
+    db._conn.commit()
+    db.close()
+
+    with pytest.raises(SchemaTooNewError) as ei:
+        Database(p)
+    msg = str(ei.value)
+    assert str(SCHEMA_VERSION) in msg and str(SCHEMA_VERSION + 90) in msg
+
+
+def test_同版本库正常打开(tmp_path):
+    db = Database(tmp_path / "ok.db")
+    db.close()
+    db2 = Database(tmp_path / "ok.db")
+    assert db2.schema_version == SCHEMA_VERSION
+    db2.close()
+
+
+def test_升级拒绝降级到更旧的_schema(tmp_path, monkeypatch):
+    """ROADMAP 声称 `manage.py update` 缺迁移会拒绝前进——初版无任何版本检查。"""
+    m = _manage()
+    data = tmp_path / "data"
+    data.mkdir()
+    db = Database(data / "dogbuddy.db")
+    db._conn.execute("INSERT OR REPLACE INTO schema_version(version, applied_at) VALUES(?,?)",
+                     (SCHEMA_VERSION, "2026-10-14T00:00:00"))
+    db._conn.commit()
+    db.close()
+
+    monkeypatch.setattr(m, "_data_dir", lambda cfg: data)
+    args = argparse.Namespace(config=str(tmp_path / "c.yaml"))
+
+    code = tmp_path / "code"
+    (code / "dogbuddy").mkdir(parents=True)
+    (code / "dogbuddy" / "db.py").write_text(
+        f"SCHEMA_VERSION = {SCHEMA_VERSION - 1}\n", encoding="utf-8")
+    with pytest.raises(RuntimeError) as ei:
+        m._assert_no_schema_downgrade(code, args)
+    assert "低于现有库" in str(ei.value)
+
+    # 同版本 / 更高版本放行
+    (code / "dogbuddy" / "db.py").write_text(
+        f"SCHEMA_VERSION = {SCHEMA_VERSION}\n", encoding="utf-8")
+    m._assert_no_schema_downgrade(code, args)
+    (code / "dogbuddy" / "db.py").write_text(
+        f"SCHEMA_VERSION = {SCHEMA_VERSION + 1}\n", encoding="utf-8")
+    m._assert_no_schema_downgrade(code, args)
+
+
+# ------------------------------------------------------------------ P2-4 PID 校验
+def test_alive_校验进程命令行(tmp_path, monkeypatch):
+    """审查报告 P2-4：/tmp/dogbuddy.pid 可写 + PID 复用 → stop 可能误杀无关进程。"""
+    m = _manage()
+    if m.IS_WINDOWS:
+        pytest.skip("cmdline 校验只在 POSIX 生效（Windows 走 tasklist 精确匹配 pid）")
+
+    monkeypatch.setattr(m, "_proc_cmdline", lambda pid: "nginx: worker process")
+    assert m._looks_like_dogbuddy(4321) is False
+
+    monkeypatch.setattr(m, "_proc_cmdline",
+                        lambda pid: "/usr/bin/python3 -m dogbuddy.main")
+    assert m._looks_like_dogbuddy(4321) is True
+
+    monkeypatch.setattr(m, "_proc_cmdline", lambda pid: None)
+    assert m._looks_like_dogbuddy(4321) is None, "读不到 → 无法判定"
+
+    monkeypatch.setattr(m, "_proc_cmdline", lambda pid: "")
+    assert m._looks_like_dogbuddy(4321) is False, "僵尸进程"
+
+
+def test_alive_无法判定时保守认为活着(monkeypatch):
+    """误判为活只会拒绝启动（安全）；误判为死会导致重复启动（不安全）。"""
+    m = _manage()
+    if m.IS_WINDOWS:
+        pytest.skip("仅 POSIX 路径")
+    monkeypatch.setattr(m, "_proc_cmdline", lambda pid: None)
+    assert m._alive(os.getpid()) is True
+
+    monkeypatch.setattr(m, "_proc_cmdline", lambda pid: "nginx")
+    assert m._alive(os.getpid()) is False, "不是 dogbuddy → 绝不能当成自己的进程去 kill"
+
+
+
 def test_update_lock_is_exclusive_and_releases(tmp_path):
     m = _manage()
     with m._update_lock(tmp_path):

@@ -32,7 +32,9 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -100,6 +102,32 @@ def _read_pid() -> int | None:
         return None
 
 
+def _proc_cmdline(pid: int) -> str | None:
+    """读 `/proc/<pid>/cmdline`；读不到返回 None（= 无法判定，不是"不存在"）。"""
+    if IS_WINDOWS:
+        return None
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return " ".join(p.decode("utf-8", "replace") for p in raw.split(b"\0") if p)
+
+
+def _looks_like_dogbuddy(pid: int) -> bool | None:
+    """这个 pid 是不是我们的进程。None = 无法判定。
+
+    审查报告 P2-4：`/tmp/dogbuddy.pid` 在多用户机器上可写，PID 也会被复用，
+    而初版 `_alive` 只做 `os.kill(pid, 0)`——于是 `stop` 可能 TERM 掉一个
+    恰好复用了该 pid 的无关进程。
+    """
+    text = _proc_cmdline(pid)
+    if text is None:
+        return None
+    if not text.strip():
+        return False  # 僵尸进程
+    return ("dogbuddy" in text) or (str(APP_DIR) in text)
+
+
 def _alive(pid: int | None) -> bool:
     if not pid:
         return False
@@ -109,9 +137,13 @@ def _alive(pid: int | None) -> bool:
         return str(pid) in out
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    verdict = _looks_like_dogbuddy(pid)
+    # 无法判定时保守认为"还活着"：误判为活只会拒绝启动（安全），
+    # 误判为死会导致重复启动 + 端口冲突（不安全）。
+    return True if verdict is None else verdict
+
 
 
 # --------------------------------------------------------------------------- process
@@ -559,29 +591,110 @@ def _find_code_root(base: Path) -> Path | None:
     return None
 
 
+def _safe_member_target(dest: Path, name: str, root_resolved: Path) -> Path:
+    """解包前校验成员落在解包目录内（成员名是攻击者可控的）。
+
+    审查报告 P0-4：初版用 `str(target).startswith(str(dest.resolve()))`。
+    `startswith` 是**字符串前缀**判断，会放过同前缀的兄弟目录——
+    成员名 `../unpacked-escape/pwned.txt` 解析成 `.../unpacked-escape/pwned.txt`，
+    前缀确实是 `.../unpacked`，于是守卫通过、文件写到解包目录之外。
+    这里改用 `Path.is_relative_to`（`tools/file_ops.py` 早就用对了）。
+    """
+    if not name or name.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", name):
+        raise RuntimeError(f"bundle 含非法绝对路径成员: {name}")
+    try:
+        target = (dest / name).resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError(f"bundle 含无法解析的成员: {name}") from exc
+    if target != root_resolved and not target.is_relative_to(root_resolved):
+        raise RuntimeError(f"bundle 含越界路径: {name}")
+    return target
+
+
+def _assert_no_schema_downgrade(code_root: Path, args: argparse.Namespace) -> None:
+    """升级前拦截"新代码的 schema 比现有库更旧"（审查报告 P2-1）。
+
+    ROADMAP 与 `db.py` 的注释都声称 `manage.py update` 会在缺迁移时拒绝前进，
+    但 manage.py 里从来没有过任何版本检查。这里补上：宁可中止升级，
+    也不能让降级代码去写一个更高版本的库。
+    """
+    new_schema = _bundle_schema_version(code_root)
+    cur = _db_schema_version(_data_dir(args.config))
+    if new_schema is None or cur is None:
+        return
+    if new_schema < cur:
+        raise RuntimeError(
+            f"新代码的 SCHEMA_VERSION={new_schema} 低于现有库的 schema_version={cur}："
+            f"降级会导致字段静默丢失与写入失败，已中止升级。"
+            f"若确要回退，请先从备份恢复一个 ≤{new_schema} 的库。")
+    if new_schema > cur:
+        print(f"    现有库 schema_version={cur}，新代码 {new_schema}：启动时将自动迁移")
+
+
 def _extract_bundle(path: Path, dest: Path) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
+    root_resolved = dest.resolve()
     if path.suffix == ".zip":
         with zipfile.ZipFile(path) as z:
             for member in z.namelist():
                 # path-traversal guard (zip entry names are attacker-controlled)
-                target = (dest / member).resolve()
-                if not str(target).startswith(str(dest.resolve())):
-                    raise RuntimeError(f"bundle 含越界路径: {member}")
+                if member.endswith("/"):
+                    continue
+                _safe_member_target(dest, member, root_resolved)
             z.extractall(dest)
     else:
         with tarfile.open(path) as t:
             for member in t.getmembers():
-                target = (dest / member.name).resolve()
-                if not str(target).startswith(str(dest.resolve())):
-                    raise RuntimeError(f"bundle 含越界路径: {member.name}")
+                _safe_member_target(dest, member.name, root_resolved)
                 if member.issym() or member.islnk() or member.isdev():
+                    # 名字可能合法，但**链接目标**能逃逸，而按名字判断的守卫看不见；
+                    # 且 extractall 仍会把链接建出来。直接不提取这个成员。
+                    print(f"    跳过链接/设备成员（不提取）: {member.name}", file=sys.stderr)
                     continue
-            t.extractall(dest)
+                try:
+                    # filter="data"（3.12+）会清掉 setuid/setgid、拒绝绝对路径与链接；
+                    # 也是 3.14 的默认行为，显式传入以免将来行为突变。
+                    t.extract(member, dest, set_attrs=False, filter="data")
+                except TypeError:  # 更老的 Python 没有 filter 参数
+                    t.extract(member, dest, set_attrs=False)
+
     root = _find_code_root(dest)
     if root is None:
         raise RuntimeError("bundle 里找不到 dogbuddy/__init__.py，不是有效的 DogBuddyCn 包")
     return root
+
+
+def _bundle_schema_version(code_root: Path) -> int | None:
+    """读即将安装的代码里的 SCHEMA_VERSION（不 import，直接读源码）。
+
+    用于升级前拦截"新代码的 schema 比现有库旧"这种降级（审查报告 P2-1：
+    ROADMAP 声称 `manage.py update` 缺迁移会拒绝前进，但 manage.py 里
+    从来没有过任何版本检查）。
+    """
+    f = code_root / "dogbuddy" / "db.py"
+    try:
+        text = f.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r"^SCHEMA_VERSION\s*=\s*(\d+)", text, re.MULTILINE)
+    return int(m.group(1)) if m else None
+
+
+def _db_schema_version(data_dir: Path) -> int | None:
+    """现有库的 schema_version；库不存在/读不到返回 None（不阻断升级）。"""
+    dbf = Path(data_dir) / "dogbuddy.db"
+    if not dbf.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{dbf}?mode=ro", uri=True)
+        try:
+            row = con.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+
 
 
 def _download(url: str, dest: Path) -> Path:
@@ -644,6 +757,14 @@ def _update_git(args: argparse.Namespace, app_dir: Path, stamp: str) -> int:
         print(f"错误: git checkout 失败: {checkout.stderr.strip()}", file=sys.stderr)
         return 1
 
+    try:
+        _assert_no_schema_downgrade(app_dir, args)
+    except RuntimeError as e:
+        _git(app_dir, "checkout", current_sha)
+        print(f"错误: {e}", file=sys.stderr)
+        print("    已回退代码（服务未重启，仍运行旧版本）", file=sys.stderr)
+        return 1
+
     print("==> 安装依赖")
     if _pip_install(app_dir) != 0:
         _git(app_dir, "checkout", current_sha)
@@ -668,6 +789,7 @@ def _update_bundle(args: argparse.Namespace, app_dir: Path, stamp: str) -> int:
         print(f"==> 解包 {src.name}")
         code_root = _extract_bundle(src, work / "unpacked")
         print(f"    代码根目录: {code_root}")
+        _assert_no_schema_downgrade(code_root, args)
 
         print("==> 备份当前代码（用于回滚）")
         _snapshot_code(app_dir, rollback_dir)

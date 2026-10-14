@@ -451,6 +451,8 @@ class WindowManager:
             llm_factory=llm_factory,
             ask_user_fn=self._make_ask_user(w.id),
             checkpoint_root=self.checkpoints_dir,
+            # 工位记忆（window_memory_read/write）要能拿到自己的记忆文件
+            memory_service=self.memory,
             # T9.1：作用域由角色推导后注入（模型无法在参数里自报身份）
             scope=self.scope_resolver.for_window(w),
             extra={"scheduled": bool(task.job_id), "manual": not task.job_id,
@@ -476,7 +478,10 @@ class WindowManager:
             window=w, session=rt.session, registry=rt.registry,
             llm_factory=llm_factory,
             builder=self.builder, compactor=self._compactor_for(w),
-            ctx=ctx, tool_names=role.tool_names if role else None,
+            ctx=ctx,
+            # 角色白名单。**未知角色（老库残留）不能退化成 None**：`schemas(only=None)`
+            # 是"不过滤"，等于把注册表全量交给模型（审查报告 P1-7 的同类入口）。
+            tool_names=role.tool_names if role else [],
             max_iterations=p.get("max_iterations", self.max_iterations),
             on_delta=_on_delta)
 

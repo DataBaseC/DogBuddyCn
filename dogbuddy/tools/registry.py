@@ -88,16 +88,32 @@ class GateDecision:
 
 @runtime_checkable
 class PermissionGate(Protocol):
-    """Implemented in L3 (agents/core/permissions.py), injected into the registry."""
+    """Implemented in L3 (agents/core/permissions.py), injected into the registry.
 
-    def check(self, tool_name: str, permission: str, args: dict[str, Any], ctx: ToolContext) -> GateDecision: ...
+    `required_scope` 是工具声明的**作用域元数据**（"" | "project" | "system"）；
+    gate 必须据此裁决。这个参数是端口契约的一部分——实现方不得忽略它。
+    """
+
+    def check(self, tool_name: str, permission: str, args: dict[str, Any],
+              ctx: ToolContext, required_scope: str = "") -> GateDecision: ...
 
 
 class AllowAllGate:
-    """Default gate for tests / admin windows."""
+    """Default gate when none is injected (tests / fully-trusted paths).
 
-    def check(self, tool_name: str, permission: str, args: dict[str, Any], ctx: ToolContext) -> GateDecision:
+    审查报告 P2-9：`ToolRegistry(gate=None)` 会退化为本类，**装配漏传即失守**。
+    现在它不再无条件放行：声明了 `required_scope` 的工具**一律拒绝**——
+    本类没有能力做作用域裁决，与其默认放行（fail-open），不如拒绝（fail-closed）。
+    """
+
+    def check(self, tool_name: str, permission: str, args: dict[str, Any],
+              ctx: ToolContext, required_scope: str = "") -> GateDecision:
+        if required_scope:
+            return GateDecision(
+                False, f"{tool_name} 需要 {required_scope} 作用域，但当前 gate 不做作用域"
+                       f"裁决（拒绝；这是 fail-closed，请注入 PermissionGate）")
         return GateDecision(True)
+
 
 
 class ToolRegistry:
@@ -118,10 +134,20 @@ class ToolRegistry:
         return sorted(self._tools)
 
     def schemas(self, only: list[str] | None = None) -> list[dict[str, Any]]:
+        """`only` 的语义（审查报告 P1-7）：
+
+        - `None`  → 不过滤（调用方明确表示"要全部"）
+        - `[]`    → **一个都不给**（空白名单 = 没有可用工具，不是"不过滤"）
+        - `[...]` → 只给名单里的
+
+        初版写成 `if only and name not in only`，于是 `[]` 与 `None` 都是"不过滤"
+        ——`group_manager._strict_tools` 在交集为空时返回 `[]`，结果是**全量放行**。
+        """
         out = []
         for name, tool in sorted(self._tools.items()):
-            if only and name not in only:
+            if only is not None and name not in only:
                 continue
+
             out.append({
                 "type": "function",
                 "function": {
@@ -145,12 +171,14 @@ class ToolRegistry:
         if approved:
             ctx.extra["confirmed"] = True  # human-approved replay (T4.1)
         required = getattr(tool, "required_scope", "") or ""
-        try:
-            decision = self.gate.check(name, tool.permission, args, ctx,
-                                       required_scope=required)
-        except TypeError:
-            # 兼容只接受 4 参数的旧 gate/测试替身
-            decision = self.gate.check(name, tool.permission, args, ctx)
+        # 作用域一并交给 gate。**不做 TypeError 回退**（审查报告 P0-2）：
+        # 初版 `except TypeError: gate.check(...)` 有两个问题——
+        # ① 如果 TypeError 来自 gate **内部**（真 bug），回退那次不传 required_scope，
+        #    作用域检查被静默跳过 → fail-open；
+        # ② 异常被降级成"重试一次"，掩盖真 bug。
+        # 现在 `required_scope` 是端口契约的一部分，所有实现都必须接受它。
+        decision = self.gate.check(name, tool.permission, args, ctx,
+                                   required_scope=required)
         if not decision.allowed:
             if decision.needs_confirm:
                 self._audit(ctx, name, f"needs_confirm: {decision.reason}", args)
@@ -229,6 +257,7 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
     from . import automation_ops as _auto
     from . import checkpoint as _ckpt
     from . import file_ops as _file
+    from . import memory_ops as _mem
     from . import project_memory_ops as _pmem
     from . import search_ops as _search
     from . import server_exec as _srv
@@ -241,7 +270,7 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
         *_file.all_tools(), *_shell.all_tools(), *_search.all_tools(),
         *_todo.all_tools(), *_ckpt.all_tools(), *_sub.all_tools(),
         *_auto.all_tools(jobs=jobs, runner=run_job_now),
-        *_pmem.all_tools(),
+        *_pmem.all_tools(), *_mem.all_tools(),
         _ask.AskUserTool(), _srv.ServerExecTool(),
     ]
     for t in tools:
