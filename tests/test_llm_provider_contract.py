@@ -252,3 +252,96 @@ def _empty_registry():
 def _ctx():
     from dogbuddy.tools.registry import ToolContext
     return ToolContext(window_id="w1", workspace="/tmp", mode="BUILD")
+
+
+# ------------------------------------------------------------------ P0 回归（2026-10-14）
+def test_真实provider的_stream_chat_不_await_异步生成器(monkeypatch):
+    """★ 线上实测发现的 P0：`stream_chat` 把**异步生成器**当协程 await 了。
+
+    原先写的是：
+        chunks = await self._stream_request(payload)   # _stream_request 内部有 yield
+    于是每次调用立刻抛
+        TypeError: object async_generator can't be used in 'await' expression
+
+    影响面极不对称，所以躲过了所有测试：
+      * 管理员对话**不带** on_delta → 走 `llm.chat()`（非流式）→ 正常；
+      * 所有**工位 / 定时任务**带 on_delta → 走 `stream_chat()` → 全部秒失败。
+    即"控制台好好的，员工一件活都干不成"。
+
+    这一条直接打**真实 provider**（不是 FakeLLM）——原来的流式测试只覆盖了假对象。
+    """
+    from dogbuddy.llm.openai_compat import OpenAICompatProvider
+    from dogbuddy.llm.provider import StreamChunk
+
+    provider = OpenAICompatProvider(
+        base_url="http://example.invalid/v1", api_key="k", model="m")
+
+    async def fake_stream_request(payload):          # 异步生成器，与真实的一致
+        yield StreamChunk(delta="你")
+        yield StreamChunk(delta="好")
+        yield StreamChunk(done=True, finish_reason="stop")
+
+    monkeypatch.setattr(provider, "_stream_request", fake_stream_request)
+
+    async def collect():
+        return [c async for c in provider.stream_chat([{"role": "user", "content": "x"}])]
+
+    chunks = _run(collect())
+    assert [c.delta for c in chunks if c.delta] == ["你", "好"]
+    assert chunks[-1].done is True
+
+
+def test_带_on_delta的工位路径真的能跑通(monkeypatch):
+    """端到端：AgentLoop + 真实 provider 的流式路径（工位/定时任务走的这条）。"""
+    from dogbuddy.agents.core.loop import AgentLoop
+    from dogbuddy.llm.openai_compat import OpenAICompatProvider
+    from dogbuddy.llm.provider import StreamChunk
+    from dogbuddy.tools.registry import ToolContext, ToolRegistry, build_registry
+    from dogbuddy.windows.session import WindowSession
+
+    provider = OpenAICompatProvider(
+        base_url="http://example.invalid/v1", api_key="k", model="m")
+
+    async def fake_stream_request(payload):
+        yield StreamChunk(delta="做")
+        yield StreamChunk(delta="完了")
+        yield StreamChunk(done=True, finish_reason="stop")
+
+    monkeypatch.setattr(provider, "_stream_request", fake_stream_request)
+
+    class _Repo:
+        """够用的仓储替身：列表类返回空，其余返回 None。"""
+
+        def add_message(self, *a, **k):
+            return 1
+
+        def __getattr__(self, name):
+            if name.startswith("list_"):
+                return lambda *a, **k: []
+            return lambda *a, **k: None
+
+    class _W:
+        id = "w1"
+        name = "w1"
+        role = "worker_programmer"
+        mode = "BUILD"
+        workspace_path = "."
+        model = ""
+        status = "idle"
+        project_id = ""
+        params: dict = {}
+
+        def __getattr__(self, name):   # 缺什么给个空串，别再一个个补
+            return ""
+
+    session = WindowSession(_W(), _Repo(), _Repo(), _Repo())
+    loop = AgentLoop(llm=provider, registry=build_registry(),
+                     session=session, tool_names=["read_file"])
+    deltas: list[str] = []
+    ctx = ToolContext(window_id="w1", workspace=".", mode="BUILD")
+
+    result = _run(loop.run("干活", ctx, on_delta=deltas.append))
+
+    assert result.stop_reason == "done", f"工位路径不该失败：{result.content}"
+    assert result.content == "做完了"
+    assert "".join(deltas) == "做完了", "打字机回调要收到分片"

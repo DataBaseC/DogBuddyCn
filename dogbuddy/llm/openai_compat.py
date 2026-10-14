@@ -102,8 +102,16 @@ class OpenAICompatProvider(Provider):
             payload["tools"] = tools
             payload["tool_choice"] = kwargs.get("tool_choice", "auto")
 
-        chunks = await self._stream_request(payload)
-        async for chunk in chunks:
+        # P0：`_stream_request` 是**异步生成器**（内部有 yield），不能 await。
+        # 这里原先写成 `chunks = await self._stream_request(payload)` —— 每次调用都
+        # 立刻抛 `TypeError: object async_generator can't be used in 'await' expression`。
+        #
+        # 影响面很不对称，所以很难被发现：
+        #   * 管理员对话**不带** on_delta → 走 `llm.chat()`（非流式）→ 一切正常；
+        #   * 所有**工位 / 定时任务**带 on_delta → 走 `stream_chat()` → **0.1 秒内全部失败**。
+        # 也就是说：控制台看起来好好的，"员工"却一件事都干不成。
+        # 2026-10-14 线上跑长时任务时实测发现（定时任务连续两次 status=failed）。
+        async for chunk in self._stream_request(payload):
             yield chunk
 
     async def _stream_request(self, payload: dict[str, Any]):
