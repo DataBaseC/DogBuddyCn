@@ -1,7 +1,7 @@
 # DogBuddyCn 开发路线图 / 外包交接文档
 
 > 面向接手本项目的开发 Agent。本文档 = **决策定稿** + **批次任务卡** + 已确认缺陷（带代码位置）+ 验收标准。
-> 最后更新：2026-10-14，对应版本 `0.4.0`，状态：**Batch 1-5 全部完成**（工位参数/能力清单/SSE/待决队列/账本/流式/共享频道群组/审批托管/MCP 桥，187 测试全绿）。
+> 最后更新：2026-10-14，对应版本 `0.5.0`，状态：**Batch 1-6 已完成**（Batch 1-5：工位参数/能力清单/SSE/待决队列/账本/流式/共享频道群组/审批托管/MCP 桥；Batch 6：错误分类体系 + C1-C5 纠错加固）。**217 测试全绿**。
 > 设计方案与选项对比见 `docs/PROPOSALS.md`（决策依据，已全部拍板）。
 
 ---
@@ -231,7 +231,22 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 **T5.3 能力上架**：MCP 工具自动进 T1.2 能力清单。
 - 验收：接一个真实 MCP server（如 filesystem）工具可用；权限按配置拦截有效；能力清单自动出现。
 
-### Batch 6｜纠错与架构加固（约 3 天，范围待拍板）
+### Batch 6｜纠错与架构加固（✅ 已完成，按方案 A 全做）
+
+> **完成情况（2026-10-14，v0.5.0）**：A1 + C1~C5 全部落地，新增 23 个专项测试，全量 217 绿、零回归。
+>
+> | 项 | 落地位置 | 说明 |
+> |---|---|---|
+> | **A1 错误分类** | `dogbuddy/errors.py`（新） | 四类 `Transient/Permanent/PolicyDenied/ToolFailure` × 四处置 `RETRY/STOP/ASK/FEEDBACK`；`classify()` 永不自爆；`unwrap()` 把 `RetryExhausted` 剥到根因；`llm.retry.is_retryable()` 改为委托，**"什么算可重试"只剩一个定义** |
+> | **C1 瞬态续跑** | `agents/core/loop.py: _chat_with_continuation` | 瞬态错误最多续跑 `transient_retries`（默认 3）× `transient_delay`（默认 10s）；**永久错误（认证/4xx）立即停**；provider 内部重试与 loop 层续跑是两层，各自有界 |
+> | **C2 死循环熔断** | `agents/core/loop.py: _run_tool` + `_signature` | 同签名（工具名+参数 sha256）连续失败达阈值（默认 3）即拒执行，注入"换一种做法"提示；成功即清零；**参数不同不合并计数** |
+> | **C3 坏参数容错** | `tools/registry.py: _validate_args` | 不是对象 / 缺必填 / 未知参数 → 回传"错在哪 + 正确 schema"，让模型自改；工具内部崩溃也变 `ToolResult.failure`（带分类与处置建议），不再抛 |
+> | **C4 上限降级** | `agents/core/loop.py: _degradation_summary` | 到 `max_iterations` 产出"做到哪了 / 最近调了哪些工具 / 卡在哪 / 下次怎么接"，落进会话与任务记录（`summary`） |
+> | **C5 孤儿清扫** | `db.py: sweep_orphan_runs` + `main.py: start()` | 启动时把卡 `running` 的 `job_runs` 标 failed+原因、`windows` 复位 idle；幂等、不误伤已结束记录 |
+>
+> **未做（有意）**：全库剩余裸 `except Exception` 集中在"绝不能打断主流程"的边界（审计、压缩、MCP 启动、SSE 扇出、审批留痕），这些是**刻意的防御性吞异常**，各自位置已写明理由；把它们改成分类处理只会增加打断主流程的风险，故保留。已收敛的是两条热路径（LLM 调用、工具执行）。
+
+#### 原始任务卡（保留，供核对）
 
 > 2026-10-14 立项。现状：纠错是"回传式"（工具失败文本给 LLM 看）+ LLM 层 RetryPolicy，缺兜底层。
 > **范围待用户拍板**：A = 全做（A1+C1~C5）/ B = 只做 A1+C1+C2 / C = 自定。先做 A1（其余的地基）。

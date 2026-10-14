@@ -475,6 +475,25 @@ class Database:
                 (_now_iso(), status, summary, log_path, run_id))
             self._conn.commit()
 
+    def sweep_orphan_runs(self, reason: str = "服务重启，任务中断（孤儿清扫）") -> dict[str, int]:
+        """启动时收尸（Batch 6 · C5）。
+
+        进程崩溃/被重启时会有 `job_runs` 卡在 `running`（finished_at 为空），
+        以及 `windows` 卡在 `running`。如果不处理，这些任务永远没有结论、
+        面板上也一直显示"运行中"。启动时统一标失败并写明原因。
+        """
+        with self._lock:
+            runs = self._conn.execute(
+                "UPDATE job_runs SET status='failed', finished_at=?, "
+                "summary=CASE WHEN COALESCE(summary,'')='' THEN ? ELSE summary END "
+                "WHERE status='running' AND finished_at IS NULL",
+                (_now_iso(), reason)).rowcount
+            windows = self._conn.execute(
+                "UPDATE windows SET status='idle', updated_at=? WHERE status='running'",
+                (_now_iso(),)).rowcount
+            self._conn.commit()
+        return {"runs": int(runs or 0), "windows": int(windows or 0)}
+
     def list_runs(self, job_id: str | None = None, limit: int = 50) -> list[JobRun]:
         q = "SELECT * FROM job_runs"
         args: tuple = ()

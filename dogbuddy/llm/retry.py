@@ -14,15 +14,12 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable, TypeVar
 
-import httpx
-
+from ..errors import RETRYABLE_STATUS, classify, is_retryable as _is_retryable  # noqa: F401
 from .provider import LLMResponse  # noqa: F401  (re-export convenience)
 
 logger = logging.getLogger("dogbuddy.llm.retry")
 
 T = TypeVar("T")
-
-RETRYABLE_STATUS = {429, 500, 502, 503, 529}
 
 
 class RateLimitWaiting(RuntimeError):
@@ -45,13 +42,11 @@ class RetryExhausted(RuntimeError):
 
 
 def is_retryable(exc: BaseException) -> bool:
-    if isinstance(exc, (httpx.TimeoutException, TimeoutError, ConnectionError)):
-        return True
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in RETRYABLE_STATUS
-    if isinstance(exc, httpx.TransportError):
-        return True
-    return False
+    """Batch 6 · A1：判定收敛到 `errors.classify` —— "什么算可重试"只有一个定义。
+
+    语义 = 分类为瞬态（超时 / 连接错误 / 429 / 5xx / 522·524）。
+    """
+    return _is_retryable(exc)
 
 
 class RetryPolicy:

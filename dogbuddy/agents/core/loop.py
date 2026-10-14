@@ -4,19 +4,32 @@
 
 Platform-agnostic — the same loop serves IM chat, scheduled runs and panel
 dispatch. All capabilities (LLM, tools, session, compactor) are injected.
+
+Batch 6 加固（原来这里是"LLM 一次失败就 break"）：
+  C1 瞬态续跑   — 超时/5xx/连接错误不再直接结束这一轮，按 N 次续跑；永久错误才停
+  C2 死循环熔断 — 同一调用（name+args）连续失败 3 次就拒执行并注入"换策略"提示
+  C4 上限降级   — 到 max_iterations 不再只是一句 "(stopped)"，而是产出
+                  "做到哪了 / 卡在哪" 的总结，落进任务记录
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ...tools.registry import ToolContext, ToolRegistry
+from ... import errors
+from ...errors import Disposition, ErrorClass
+from ...tools.registry import ToolContext, ToolRegistry, ToolResult
 from ...windows.context import ContextBuilder
 from ...windows.session import WindowSession
 
 logger = logging.getLogger("dogbuddy.agents.loop")
+
+# 同一调用连续失败达到该次数 → 熔断（C2）
+DEFAULT_GUARD_THRESHOLD = 3
 
 
 @dataclass
@@ -27,6 +40,8 @@ class AgentResult:
     tool_calls: int = 0
     pending_confirms: list[str] = field(default_factory=list)
     pending_questions: list[str] = field(default_factory=list)
+    transient_retries: int = 0   # C1：本轮的瞬态续跑次数
+    loop_guards: int = 0         # C2：本轮的熔断次数
 
 
 class AgentLoop:
@@ -39,6 +54,9 @@ class AgentLoop:
         compactor: Any = None,
         tool_names: list[str] | None = None,
         max_iterations: int = 25,
+        transient_retries: int = 3,
+        transient_delay: float = 10.0,
+        guard_threshold: int = DEFAULT_GUARD_THRESHOLD,
     ):
         self.llm = llm
         self.registry = registry
@@ -47,6 +65,11 @@ class AgentLoop:
         self.compactor = compactor
         self.tool_names = tool_names
         self.max_iterations = max_iterations
+        self.transient_retries = max(0, int(transient_retries))
+        self.transient_delay = max(0.0, float(transient_delay))
+        self.guard_threshold = max(1, int(guard_threshold))
+        # 调用签名 → 连续失败次数（C2）
+        self._fail_streak: dict[str, int] = {}
 
     # ------------------------------------------------------------------ run
     async def run(self, user_input: str, ctx: ToolContext,
@@ -62,15 +85,15 @@ class AgentLoop:
             result.iterations = step
             messages = self.session.build_context(self.builder)
             try:
-                if on_delta is not None:
-                    resp = await self._stream_turn(messages, schemas, on_delta)
-                else:
-                    resp = await self.llm.chat(messages, tools=schemas or None)
-            except Exception as e:  # noqa: BLE001 — record and stop; retry policy already ran
-                logger.exception("LLM chat failed")
-                self.session.append("system", f"[LLM error] {e}")
+                # C1: transient failures get continuation attempts instead of
+                # killing the whole run on the first timeout.
+                resp = await self._chat_with_continuation(messages, schemas, on_delta, result)
+            except Exception as e:  # noqa: BLE001 — classified below, never swallowed
+                cls = errors.classify(e)
+                logger.exception("LLM chat failed (%s)", cls.value)
+                self.session.append("system", f"[LLM error/{cls.value}] {errors.describe(e)}")
                 result.stop_reason = "error"
-                result.content = f"LLM call failed: {e}"
+                result.content = f"LLM call failed ({cls.value}): {e}. {errors.action_hint(e)}"
                 break
 
             if not resp.tool_calls:
@@ -89,7 +112,7 @@ class AgentLoop:
                                 meta={"tool_calls": llm_tool_calls})
             for tc in resp.tool_calls:
                 result.tool_calls += 1
-                tool_result = await self.registry.execute(tc.name, tc.arguments, ctx)
+                tool_result = await self._run_tool(tc, ctx, result)
                 if tool_result.needs_confirm:
                     tool_result = await self._approval_flow(tc, tool_result, ctx)
                 self.session.append(
@@ -102,8 +125,10 @@ class AgentLoop:
                     if q:
                         result.pending_questions.append(q)
         else:
+            # C4: hitting the ceiling must produce a usable hand-off summary
             result.stop_reason = "max_iterations"
-            result.content = result.content or "(stopped: max iterations reached)"
+            result.content = self._degradation_summary(result)
+            self.session.append("system", f"[轮次上限] {result.content}")
 
         # post-run compaction (anti-loss); never breaks the run
         if self.compactor is not None:
@@ -112,6 +137,113 @@ class AgentLoop:
             except Exception:  # noqa: BLE001
                 logger.warning("compaction failed", exc_info=True)
         return result
+
+    # ------------------------------------------------------- C1 瞬态续跑
+    async def _chat(self, messages: list, schemas: list,
+                    on_delta: Callable[[str], None] | None) -> Any:
+        if on_delta is not None:
+            return await self._stream_turn(messages, schemas, on_delta)
+        return await self.llm.chat(messages, tools=schemas or None)
+
+    async def _chat_with_continuation(self, messages: list, schemas: list,
+                                      on_delta: Callable[[str], None] | None,
+                                      result: AgentResult) -> Any:
+        """LLM 调用的瞬态失败续跑（C1）。
+
+        永久错误 / 策略拒绝立即抛出（外层停止）；瞬态错误最多续跑
+        `transient_retries` 次，每次退避 `transient_delay` 秒。用尽后抛最后一个异常。
+        """
+        attempts = self.transient_retries + 1
+        last: BaseException | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._chat(messages, schemas, on_delta)
+            except Exception as e:  # noqa: BLE001 — classified immediately
+                cls = errors.classify(e)
+                if cls is not ErrorClass.TRANSIENT:
+                    raise
+                last = e
+                if attempt >= attempts:
+                    break
+                result.transient_retries += 1
+                logger.warning("LLM 瞬态失败（%s），第 %d/%d 次续跑，%.0fs 后重试",
+                               errors.describe(e), attempt, self.transient_retries, self.transient_delay)
+                self.session.append(
+                    "system",
+                    f"[LLM 瞬态失败 {attempt}/{self.transient_retries}，继续重试] {errors.describe(e)}")
+                if self.transient_delay > 0:
+                    await asyncio.sleep(self.transient_delay)
+        assert last is not None
+        raise last
+
+    # ------------------------------------------------------- C2 死循环熔断
+    @staticmethod
+    def _signature(name: str, args: Any) -> str:
+        try:
+            payload = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+        except Exception:  # noqa: BLE001 — 不可序列化也要能算出稳定签名
+            payload = repr(args)
+        digest = hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:12]
+        return f"{name}#{digest}"
+
+    async def _run_tool(self, tc: Any, ctx: ToolContext, result: AgentResult) -> ToolResult:
+        """执行一次工具调用，带熔断（C2）。
+
+        同一签名（工具名 + 参数）连续失败达到阈值后拒执行，改为把"该路径已失败，
+        换策略"注入会话——防止一路烧 token 到 max_iterations。
+        """
+        sig = self._signature(tc.name, tc.arguments)
+        streak = self._fail_streak.get(sig, 0)
+        if streak >= self.guard_threshold:
+            result.loop_guards += 1
+            msg = (f"[LOOP-GUARD] {tc.name} 的同一调用已连续失败 {streak} 次，本次拒绝执行。"
+                   f"请换一种做法（改参数、先检查前置条件，或换工具）；"
+                   f"重复同样的调用不会有不同结果。")
+            logger.warning("loop guard tripped: %s (streak=%d)", tc.name, streak)
+            return ToolResult.failure(msg, loop_guard=True, tool_name=tc.name,
+                                      fail_streak=streak)
+
+        tool_result = await self.registry.execute(tc.name, tc.arguments, ctx)
+        if tool_result.ok:
+            self._fail_streak.pop(sig, None)
+        else:
+            self._fail_streak[sig] = streak + 1
+        return tool_result
+
+    # ------------------------------------------------------- C4 上限降级总结
+    def _degradation_summary(self, result: AgentResult) -> str:
+        """到轮次上限时产出的交接摘要：做到哪了 / 卡在哪 / 下一步怎么接。"""
+        msgs = self.session.recent(80)
+        tool_names: list[str] = []
+        for m in msgs:
+            if m.role == "tool":
+                tool_names.append(str((m.meta or {}).get("tool_name") or "tool"))
+        last_text = ""
+        for m in reversed(msgs):
+            if m.role == "assistant" and (m.content or "").strip():
+                last_text = m.content.strip()
+                break
+
+        stuck = []
+        for sig, count in self._fail_streak.items():
+            if count >= 2:
+                stuck.append(f"{sig.split('#', 1)[0]}×{count}")
+
+        lines = [f"(stopped: max iterations reached — {result.iterations} 轮 / "
+                 f"{result.tool_calls} 次工具调用)"]
+        if last_text:
+            lines.append(f"最后一轮模型输出：{last_text[:300]}")
+        if tool_names:
+            recent = " → ".join(tool_names[-8:])
+            lines.append(f"最近调用的工具：{recent}")
+        if stuck:
+            lines.append(f"反复失败的调用：{', '.join(stuck)}（建议换策略或人工介入）")
+        if result.loop_guards:
+            lines.append(f"熔断次数：{result.loop_guards}")
+        if result.transient_retries:
+            lines.append(f"LLM 瞬态续跑次数：{result.transient_retries}")
+        lines.append("下次继续时：先读上面的进展，不要再走已经失败的路径。")
+        return "\n".join(lines)
 
     async def _stream_turn(self, messages: list, schemas: list,
                            on_delta: Callable[[str], None]) -> Any:
