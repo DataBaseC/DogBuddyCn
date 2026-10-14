@@ -273,6 +273,18 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 
 ### Batch 7｜工作区划分重构：项目层（约 1 周，2026-10-14 拍板 A+D1+D2）
 
+> **进度：T7.4 已完成（2026-10-14，v0.5.1）**；T7.1/T7.2/T7.3/T7.5/T7.6 待做。
+>
+> **T7.4 D1 补 shell 逃逸缝（✅ 已完成）**：新增 `dogbuddy/tools/shell_guard.py`，
+> `shell` 执行前先分析越界（`cd` 出工作区 / 重定向与写命令的绝对路径出界 /
+> 写命令用 `..` 爬出），默认拒绝并给可行动提示；工位信任级
+> `params.trust = "elevated"` 时放行，**但无论放行还是拒绝都写审计 `shell:boundary`**。
+> 刻意**不拦工作区外的读**（`uname`/`df`/`which`/`cat /etc/os-release`）——那归
+> PermissionGate 的危险命令黑名单管，一刀切禁读会废掉正常运维。
+> 边界取 `ctx.workspace`，因此 Batch 7 把 workspace 改成项目根后无需返工。
+> 新增 `tests/test_shell_guard.py`(11) + `tests/test_t74_trust_switch.py`(4)，
+> 其中一条专门验证"放行开关真的可达"（否则拦住却放不开=死锁）。
+
 > 拍板结论：采用**项目层**方案（A）。现状"工位=目录"一对一硬隔离的三个缺口：
 > ①群组无共享工作区（协作靠消息抄）②无"项目"概念（多工位干同一活被迫割裂）
 > ③shell 有逃逸缝（文件工具锁死，但 shell `cd /` 就绕过）。

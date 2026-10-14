@@ -132,6 +132,28 @@ class ShellTool:
             background = _to_bool(args.get("background"), False)
             cwd = str(ctx.workspace)
 
+            # T7.4：shell 是绕过文件边界的缝——越界必须走 ELEVATED + 留痕
+            from .shell_guard import analyze_command, is_elevated, refusal_message
+            risks = analyze_command(command, cwd)
+            if risks:
+                audit = getattr(ctx, "db", None)
+                elevated = is_elevated(ctx)
+                actor = getattr(ctx, "actor", "worker")
+                detail = (f"elevated={elevated} trust={((ctx.extra or {}).get('trust') or '')} "
+                          f"cmd={command[:200]} risks="
+                          f"{[r['reason'] for r in risks]}")
+                if audit is not None:
+                    try:
+                        audit.audit(actor, "shell:boundary", detail)
+                    except Exception:  # noqa: BLE001 — 留痕失败不能反过来挡住判断
+                        logger.warning("boundary audit failed", exc_info=True)
+                if not elevated:
+                    logger.warning("shell boundary refused: %s", [r["reason"] for r in risks])
+                    return ToolResult.failure(refusal_message(risks, cwd),
+                                              boundary=True, risks=risks)
+                logger.info("shell boundary allowed (elevated): %s",
+                            [r["reason"] for r in risks])
+
             if background:
                 proc = await asyncio.create_subprocess_shell(
                     command,
