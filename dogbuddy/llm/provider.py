@@ -35,6 +35,21 @@ class LLMResponse:
     raw: Any = None
 
 
+@dataclass
+class StreamChunk:
+    """One streaming increment (ROADMAP T2.5 打字机效果).
+
+    Text deltas stream in `delta`; tool calls arrive assembled in the final
+    chunk (`tool_calls`) — OpenAI streams call arguments as fragments, so the
+    provider collects them and hands them over complete.
+    """
+    delta: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    finish_reason: str = ""
+    usage: dict[str, int] = field(default_factory=dict)
+    done: bool = False
+
+
 def parse_tool_arguments(raw: Any) -> dict[str, Any]:
     """Model arguments arrive as a JSON string; tolerate dicts and malformed input."""
     if isinstance(raw, dict):
@@ -85,6 +100,24 @@ class AbstractProvider(abc.ABC):
         test doubles defined `chat`, which is why this never surfaced in CI.
         """
         return await self.text_chat(messages, tools=tools, **kwargs)
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ):
+        """Yield :class:`StreamChunk`s for one turn.
+
+        Default fallback: run the non-streaming turn and emit it as a single
+        final chunk — providers without native streaming (Ollama, test doubles)
+        stay usable everywhere streaming is optional. Consumers therefore never
+        need to ask "is this provider streamable".
+        """
+        resp = await self.text_chat(messages, tools=tools, **kwargs)
+        yield StreamChunk(delta=resp.content or "", tool_calls=list(resp.tool_calls),
+                          finish_reason=resp.finish_reason, usage=dict(resp.usage),
+                          done=True)
 
 
 class Provider(AbstractProvider):

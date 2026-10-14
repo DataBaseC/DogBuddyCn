@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DogBuddyCn · 控制台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z' fill='%234f8cff'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/assets/css/base.css">
-<link rel="stylesheet" href="/assets/css/views.css">
+<link rel="stylesheet" href="/assets/css/base.css?v=4d2d49ea4b">
+<link rel="stylesheet" href="/assets/css/views.css?v=6470783edd">
 </head>
 <body>
 
@@ -96,6 +96,9 @@
 <button class="nav-item" data-view="chat"><svg class="ic"><use href="#ic-chat"/></svg><span>对话</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="windows"><svg class="ic"><use href="#ic-monitor"/></svg><span>工位</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="jobs"><svg class="ic"><use href="#ic-clock"/></svg><span>任务</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="groups"><svg class="ic"><use href="#ic-layers"/></svg><span>群组</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="capabilities"><svg class="ic"><use href="#ic-zap"/></svg><span>能力</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="ledger"><svg class="ic"><use href="#ic-activity"/></svg><span>账本</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="files"><svg class="ic"><use href="#ic-folder"/></svg><span>文件管理器</span><i class="nav-ind"></i></button>
       <div class="nav-group-label">运维</div>
       <button class="nav-item" data-view="logs"><svg class="ic"><use href="#ic-doc"/></svg><span>日志审计</span><i class="nav-ind"></i></button>
@@ -120,6 +123,7 @@
       <button class="icon-btn only-narrow" id="btn-sidebar-toggle" title="导航"><svg class="ic"><use href="#ic-menu"/></svg></button>
       <div class="crumbs"><span class="crumb-root">控制台</span><svg class="ic crumb-sep"><use href="#ic-chevron-r"/></svg><strong id="page-title">总览</strong></div>
       <div class="top-actions">
+        <span class="badge badge-amber hidden" id="top-rate">限速等待中</span>
         <div class="searchbox">
           <svg class="ic"><use href="#ic-search"/></svg>
           <input id="global-search" placeholder="搜索工位 / 任务…" autocomplete="off">
@@ -215,6 +219,19 @@
         </div>
       </section>
 
+      <!-- 群组（共享工作频道） -->
+      <section class="view" id="view-groups">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">群组</h2>
+            <p class="card-sub">共享工作频道 · 多工位协同干活 · 任务派发</p>
+          </div>
+          <button class="btn btn-primary" id="grp-new-btn"><svg class="ic"><use href="#ic-plus"/></svg>新建群组</button>
+        </div>
+        <div id="grp-list"></div>
+        <div id="grp-detail"></div>
+      </section>
+
       <!-- 文件管理器 -->
       <section class="view" id="view-files">
         <div class="toolbar">
@@ -269,6 +286,60 @@
           <div class="chat-input">
             <textarea id="chat-text" rows="2" placeholder="例如：每天早上 8 点推进 XX 项目的待办，完成后简要汇报。（Enter 发送，Shift+Enter 换行）"></textarea>
             <button class="btn btn-primary" id="chat-send"><svg class="ic"><use href="#ic-send"/></svg>发送</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 待决事项 -->
+      <section class="view" id="view-decisions">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">待决事项</h2>
+            <p class="card-sub">员工向你提问 · 点建议选项或直接写回答（股东模式：决定，而不是盯着看）</p>
+          </div>
+          <div class="toolbar-actions">
+            <span class="badge badge-grey" id="dec-meta">待决 0 · 历史 0</span>
+            <button class="btn btn-soft btn-sm" id="dec-refresh"><svg class="ic"><use href="#ic-refresh"/></svg>刷新</button>
+          </div>
+        </div>
+        <div id="dec-list"></div>
+        <div class="dec-history" id="dec-history"></div>
+      </section>
+
+      <!-- 用量账本 -->
+      <section class="view" id="view-ledger">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">用量账本</h2>
+            <p class="card-sub">token 用量 · 成本估算 · 数据只收集不汇报</p>
+          </div>
+          <div class="toolbar-actions">
+            <div class="seg" id="led-days">
+              <button class="seg-btn" data-days="7">7 天</button>
+              <button class="seg-btn active" data-days="30">30 天</button>
+              <button class="seg-btn" data-days="90">90 天</button>
+            </div>
+          </div>
+        </div>
+        <div class="grid stat-grid" id="led-summary"></div>
+        <div class="grid cols-2">
+          <div class="card">
+            <div class="card-head">
+              <div><h2 class="card-title">按工位用量</h2><p class="card-sub">tokens 条形对比</p></div>
+            </div>
+            <div class="card-body" id="led-by-window"></div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <div><h2 class="card-title">按天用量</h2><p class="card-sub">每日 tokens 柱状</p></div>
+            </div>
+            <div class="card-body" id="led-by-day"></div>
+          </div>
+          <div class="card span-2">
+            <div class="card-head">
+              <div><h2 class="card-title">单价设置</h2><p class="card-sub">每 1M tokens 价格 · 0=只显示用量</p></div>
+            </div>
+            <div class="card-body" id="led-price"></div>
           </div>
         </div>
       </section>
@@ -332,14 +403,7 @@
 <div id="wizard-root"></div>
 <div id="toast-root" class="toast-root"></div>
 
-<script src="/assets/js/ui.js"></script>
-<script src="/assets/js/api.js"></script>
-<script src="/assets/js/views-main.js"></script>
-<script src="/assets/js/views-chat.js"></script>
-<script src="/assets/js/views-ops.js"></script>
-<script src="/assets/js/views-settings.js"></script>
-<script src="/assets/js/views-profiles.js"></script>
-<script src="/assets/js/filemanager.js"></script>
-<script src="/assets/js/app.js"></script>
+<!-- 页面只加载 bundle：源文件顺序见 tools/bundle-order.json，由 tools/rebuild-bundles.py 拼接 -->
+<script src="/assets/js/index.bundle.js?v=997203c418"></script>
 </body>
 </html>

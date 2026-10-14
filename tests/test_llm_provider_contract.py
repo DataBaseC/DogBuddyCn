@@ -152,3 +152,103 @@ def test_registry_invalidate_clears_model_variants():
     c = reg.provider_for(None, "kept")
     reg.invalidate("cheap")
     assert reg.provider_for(None, "kept") is c
+
+
+# --------------------------------------------------------------- streaming (T2.5)
+def test_fake_llm_stream_contract():
+    """FakeLLM.stream_chat must mirror the real provider chunk protocol."""
+    from dogbuddy.llm.provider import StreamChunk
+    from tests.helpers import FakeLLM
+    llm = FakeLLM()
+    llm.push(content="hello world")
+    chunks = _run(_collect(llm.stream_chat([{"role": "user", "content": "hi"}])))
+    assert all(isinstance(c, StreamChunk) for c in chunks)
+    assert "".join(c.delta for c in chunks) == "hello world"
+    finals = [c for c in chunks if c.done]
+    assert len(finals) == 1 and not finals[0].delta
+    assert not chunks[0].done  # deltas stream before the terminal chunk
+
+
+def test_provider_base_stream_fallback():
+    """Providers without native streaming still expose stream_chat (one-shot)."""
+    from dogbuddy.llm.provider import AbstractProvider, StreamChunk
+
+    class LegacyProvider(AbstractProvider):
+        async def text_chat(self, messages, tools=None, **kw):
+            from dogbuddy.llm.provider import LLMResponse
+            return LLMResponse(content="legacy reply")
+
+    chunks = _run(_collect(LegacyProvider().stream_chat([])))
+    assert len(chunks) == 1 and chunks[0].done
+    assert chunks[0].delta == "legacy reply"
+    assert isinstance(chunks[0], StreamChunk)
+
+
+def test_loop_on_delta_fires_for_streaming():
+    """AgentLoop delivers fragments through on_delta and stores the whole."""
+    from dogbuddy.agents.core.loop import AgentLoop
+    from dogbuddy.windows.session import WindowSession
+    from dogbuddy.windows.context import ContextBuilder
+    from tests.helpers import FakeLLM
+    import tempfile
+    from dogbuddy.db import Database
+    from dogbuddy.ports import Window
+
+    tmp = tempfile.mkdtemp()
+    db = Database(f"{tmp}/t.db")
+    w = Window(id="w1", name="w", role="worker_programmer", workspace_path=tmp,
+               model="", mode="BUILD")
+    db.insert_window(w)
+    session = WindowSession(w, db, db, db)
+    llm = FakeLLM()
+    llm.push(content="streamed answer")
+    loop = AgentLoop(llm=llm, registry=_empty_registry(), session=session,
+                     builder=ContextBuilder(), max_iterations=2)
+    got: list[str] = []
+    result = _run(loop.run("hi", _ctx(), on_delta=got.append))
+    assert "".join(got) == "streamed answer"
+    assert result.content == "streamed answer"
+    assert result.stop_reason == "done"
+
+
+def test_loop_stream_without_stream_chat_degrades():
+    """A third-party llm lacking stream_chat must not crash the run."""
+    from dogbuddy.agents.core.loop import AgentLoop
+    from dogbuddy.windows.session import WindowSession
+    from dogbuddy.windows.context import ContextBuilder
+    from tests.helpers import FakeLLM
+    import tempfile
+    from dogbuddy.db import Database
+    from dogbuddy.ports import Window
+
+    class BareLLM:  # only chat(), like a minimal third-party integration
+        async def chat(self, messages, tools=None, **kw):
+            from dogbuddy.llm.provider import LLMResponse
+            return LLMResponse(content="bare reply")
+
+    tmp = tempfile.mkdtemp()
+    db = Database(f"{tmp}/t.db")
+    w = Window(id="w1", name="w", role="worker_programmer", workspace_path=tmp,
+               model="", mode="BUILD")
+    db.insert_window(w)
+    session = WindowSession(w, db, db, db)
+    loop = AgentLoop(llm=BareLLM(), registry=_empty_registry(), session=session,
+                     builder=ContextBuilder(), max_iterations=2)
+    got: list[str] = []
+    result = _run(loop.run("hi", _ctx(), on_delta=got.append))
+    assert result.content == "bare reply"
+    assert "".join(got) == "bare reply"
+
+
+async def _collect(aiter):
+    return [c async for c in aiter]
+
+
+def _empty_registry():
+    from dogbuddy.tools.registry import ToolRegistry
+    return ToolRegistry()
+
+
+def _ctx():
+    from dogbuddy.tools.registry import ToolContext
+    return ToolContext(window_id="w1", workspace="/tmp", mode="BUILD")

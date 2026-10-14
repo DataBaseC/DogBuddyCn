@@ -34,6 +34,13 @@
     if (key === 'error' || key === 'failed' || key === 'fail') return '<span class="badge badge-red">失败</span>';
     return '<span class="badge badge-grey">' + U.esc(st || '—') + '</span>';
   }
+  /* 信任级徽标：params.trust == "elevated" → 金色 ELEVATED，否则「常规」 */
+  function trustBadge(w) {
+    var trust = w && w.params && w.params.trust;
+    return trust === 'elevated'
+      ? '<span class="badge badge-gold" title="信任级 elevated：可执行高危命令（仍需审批）">ELEVATED</span>'
+      : '<span class="badge badge-grey" title="信任级：常规">常规</span>';
+  }
 
   /* ============================================================
      总览
@@ -115,6 +122,7 @@
           '<div class="win-card-badges">' +
           '<span class="badge badge-blue">' + U.esc(w.role || 'worker') + '</span>' +
           '<span class="badge badge-violet">' + U.esc(w.mode || 'BUILD') + '</span>' +
+          trustBadge(w) +
           (w.model ? '<span class="badge badge-grey mono">' + U.esc(w.model) + '</span>' : '') +
           '</div>' +
           '<div class="win-card-task"><b>当前</b>' + U.esc(w.current_task || '空闲待命') + '</div>' +
@@ -239,6 +247,7 @@
           (w.model ? '' : '（继承）') + '</div>' +
           '</div>' +
           (key === 'running' || key === 'busy' ? '<span class="badge badge-blue">运行</span>' : '') +
+          trustBadge(w) +
           '</div>';
       }).join('');
       U.$$('.win-item', host).forEach(function (item) {
@@ -291,12 +300,30 @@
       return out.join('');
     },
 
-    renderToolCard: function (content) {
-      var name = 'tool', args = '', result = String(content || '');
+    /**
+     * 工具消息展示名：优先 DTO.tool_name（meta 带出）→ content JSON 里的
+     * tool/name/function/action → 'tool' 兜底。
+     * @param {Object} m 消息 DTO（role=tool，含 tool_name / meta）
+     * @returns {string} 工具名
+     */
+    toolName: function (m) {
+      var n = String((m && m.tool_name) || ((m && m.meta) || {}).tool_name || '');
+      if (n) return n;
+      try {
+        var obj = JSON.parse(m && m.content);
+        if (obj && typeof obj === 'object') {
+          n = obj.tool || obj.name || obj.function || obj.action || '';
+        }
+      } catch (e) { /* 非 JSON：走兜底 */ }
+      return String(n || 'tool');
+    },
+
+    renderToolCard: function (content, toolName) {
+      var name = String(toolName || ''), args = '', result = String(content || '');
       try {
         var obj = JSON.parse(content);
         if (obj && typeof obj === 'object') {
-          name = obj.tool || obj.name || obj.function || obj.action || name;
+          if (!name) name = obj.tool || obj.name || obj.function || obj.action || '';
           var a = obj.args || obj.arguments || obj.params || obj.input || null;
           if (a !== null && a !== undefined) {
             args = typeof a === 'string' ? a : JSON.stringify(a);
@@ -314,11 +341,61 @@
       } catch (e) { /* 非 JSON：原样展示 */ }
       return '<div class="tool-card">' +
         '<div class="tool-head">' + U.icon('chevron-r', 'ic-chevron') +
-        '<span class="tool-name">' + U.esc(name) + '</span>' +
+        '<span class="badge badge-blue tool-badge mono">' + U.esc(name || 'tool') + '</span>' +
         '<span class="tool-args">' + U.esc(args || '（无参数）') + '</span>' +
         '</div>' +
         '<div class="tool-body">' + U.esc(result) + '</div>' +
         '</div>';
+    },
+
+    /* ---------- 消息渲染：tool 分组（同轮多工具折叠）+ tool_name 徽标 ---------- */
+
+    /**
+     * 单条非 tool 消息 HTML（气泡 + 头像 + 时间/tokens 元信息）。
+     * @param {Object} m 消息 DTO
+     * @param {string} role 角色（小写）
+     * @returns {string} 消息 HTML
+     */
+    renderMsg: function (m, role) {
+      var avatar = role === 'user' ? '我' : (role === 'system' ? 'S' : 'AI');
+      return '<div class="msg ' + U.esc(role) + '">' +
+        '<div class="msg-avatar">' + avatar + '</div>' +
+        '<div style="min-width:0">' +
+        '<div class="msg-bubble">' + Windows.renderContent(m.content) + '</div>' +
+        '<div class="msg-meta"><span>' + U.esc(U.fmtClock(m.created_at)) + '</span>' +
+        (m.tokens ? '<span class="num">' + U.esc(m.tokens) + ' tok</span>' : '') +
+        '</div></div></div>';
+    },
+
+    /**
+     * 连续 role=tool 消息组的 HTML：单条直接渲染；多条折叠成
+     * 「调用了 N 个工具」（可展开），每张卡带 tool_name 徽标。
+     * @param {Array<Object>} group 连续的 tool 消息（按时间升序）
+     * @returns {string} 消息 HTML
+     */
+    renderToolGroup: function (group) {
+      var cards = group.map(function (m) {
+        return Windows.renderToolCard(m.content, Windows.toolName(m));
+      }).join('');
+      var time = U.fmtClock(group[0].created_at);
+      var bubble;
+      if (group.length === 1) {
+        bubble = '<div class="msg-bubble">工具调用' + cards + '</div>';
+      } else {
+        var badges = group.map(function (m) {
+          return '<span class="badge badge-blue tool-badge mono">' +
+            U.esc(Windows.toolName(m)) + '</span>';
+        }).join('');
+        bubble = '<div class="msg-bubble"><div class="tool-group">' +
+          '<div class="tool-group-head">' + U.icon('chevron-r', 'ic-chevron') +
+          '<span>调用了 ' + group.length + ' 个工具</span>' + badges + '</div>' +
+          '<div class="tool-group-body">' + cards + '</div>' +
+          '</div></div>';
+      }
+      return '<div class="msg tool">' +
+        '<div class="msg-avatar">T</div>' +
+        '<div style="min-width:0">' + bubble +
+        '<div class="msg-meta"><span>' + U.esc(time) + '</span></div></div></div>';
     },
 
     renderMessages: function () {
@@ -331,31 +408,32 @@
           desc: '在下方输入框给这位员工派第一个活，Enter 发送。'
         });
       }
+      var out = [];
       var lastDay = '';
-      return msgs.map(function (m) {
+      var i = 0;
+      while (i < msgs.length) {
+        var m = msgs[i];
         var d = U.parseTime(m.created_at);
         var day = d ? U.fmtDate(d) : '未知日期';
-        var head = '';
         if (day !== lastDay) {
           lastDay = day;
-          head = '<div class="chat-day"><span>' + U.esc(day) + '</span></div>';
+          out.push('<div class="chat-day"><span>' + U.esc(day) + '</span></div>');
         }
         var role = String(m.role || 'assistant').toLowerCase();
-        var avatar = role === 'user' ? '我' : (role === 'tool' ? 'T' : (role === 'system' ? 'S' : 'AI'));
-        var bubble;
         if (role === 'tool') {
-          bubble = '<div class="msg-bubble">工具调用' + Windows.renderToolCard(m.content) + '</div>';
+          var group = [];
+          while (i < msgs.length &&
+                 String(msgs[i].role || 'assistant').toLowerCase() === 'tool') {
+            group.push(msgs[i]);
+            i++;
+          }
+          out.push(Windows.renderToolGroup(group));
         } else {
-          bubble = '<div class="msg-bubble">' + Windows.renderContent(m.content) + '</div>';
+          out.push(Windows.renderMsg(m, role));
+          i++;
         }
-        return head +
-          '<div class="msg ' + U.esc(role) + '">' +
-          '<div class="msg-avatar">' + avatar + '</div>' +
-          '<div style="min-width:0">' + bubble +
-          '<div class="msg-meta"><span>' + U.esc(U.fmtClock(m.created_at)) + '</span>' +
-          (m.tokens ? '<span class="num">' + U.esc(m.tokens) + ' tok</span>' : '') +
-          '</div></div></div>';
-      }).join('');
+      }
+      return out.join('');
     },
 
     renderTodos: function (todos) {
@@ -380,12 +458,14 @@
       host.innerHTML =
         '<div class="win-detail-head">' +
         '<div><div class="win-detail-title">' + statusDot(w.status) + U.esc(w.name) +
-        '<span class="badge ' + (isPaused ? 'badge-violet' : 'badge-green') + '">' +
-        U.esc(statusLabel(w.status)) + '</span></div>' +
+        '<span class="badge ' + (isPaused ? 'badge-violet' : 'badge-green') +
+        '" id="win-status-badge">' +
+        U.esc(statusLabel(w.status)) + '</span>' + trustBadge(w) + '</div>' +
         '<div class="card-sub" style="margin-top:4px">' + U.esc(w.workspace_path || '') + '</div></div>' +
         '<div class="win-detail-actions">' +
         '<button class="btn btn-soft btn-sm" data-act="rename">' + U.icon('edit', 'sm') + '改名</button>' +
         '<button class="btn btn-soft btn-sm" data-act="model">' + U.icon('cpu', 'sm') + '模型 / 模式</button>' +
+        '<button class="btn btn-soft btn-sm" data-act="params">' + U.icon('slider', 'sm') + '参数</button>' +
         (isPaused
           ? '<button class="btn btn-primary btn-sm" data-act="resume">' + U.icon('play', 'sm') + '恢复</button>'
           : '<button class="btn btn-soft btn-sm" data-act="pause">' + U.icon('pause', 'sm') + '暂停</button>') +
@@ -408,6 +488,8 @@
         (w.current_task ? '<span class="meta-pill">' + U.icon('play', 'sm') + U.esc(w.current_task) + '</span>' : '') +
         '</div>' +
 
+        '<div class="ctx-usage" id="win-usage" data-win-id="' + U.esc(w.id) + '"></div>' +
+
         Windows.renderTodos(w.todos) +
 
         '<div class="chat" id="win-chat">' + Windows.renderMessages() + '</div>' +
@@ -417,12 +499,13 @@
         '<button class="btn btn-primary" id="win-send">' + U.icon('send', 'sm') + '派活</button>' +
         '</div>';
 
-      /* 滚动到底部 */
+      /* 恢复流式半截气泡（若有），再滚动到底部 */
+      Windows.renderStream();
       var chat = document.getElementById('win-chat');
       if (chat) chat.scrollTop = chat.scrollHeight;
 
-      /* 工具卡折叠 */
-      U.$$('.tool-head', host).forEach(function (h) {
+      /* 工具卡折叠 / 多工具组折叠 */
+      U.$$('.tool-head, .tool-group-head', host).forEach(function (h) {
         h.addEventListener('click', function () {
           h.parentNode.classList.toggle('open');
         });
@@ -452,10 +535,221 @@
           }
         });
       }
+      /* 上下文用量条（30s 定时刷新由 Params 模块维护） */
+      var paramsMod = (global.DogBuddyViews || {}).Params;
+      if (paramsMod) paramsMod.mountUsage(Windows.selectedId);
+    },
+
+    /* ---------- 打字机流式输出（SSE window.stream，多窗口隔离） ---------- */
+
+    /** @type {Object.<string, {text: string}>} window_id → 流式缓冲（各窗口互不串屏） */
+    streams: {},
+    /** @type {number|null} 完成检测轮询定时器 */
+    streamTimer: null,
+    /** @type {string} 正在观察流式完成的窗口 id */
+    streamWin: '',
+    /** @type {number} 轮询截止时间戳（超时兜底） */
+    streamDeadline: 0,
+    /** @type {Object.<string, number>} dispatch 前已存在的消息 id 集合（判定新 assistant 消息） */
+    streamKnown: {},
+
+    /**
+     * SSE window.stream：把 delta 拼进对应窗口的缓冲并刷新「正在输入…」气泡。
+     * SSE 不可用时直接忽略（退回原轮询模式，不留半截气泡）。
+     * @param {Object} payload {window_id, delta}
+     * @returns {void}
+     */
+    onStream: function (payload) {
+      payload = payload || {};
+      var wid = String(payload.window_id || '');
+      var delta = payload.delta;
+      if (!wid || delta === undefined || delta === null) return;
+      if (!global.SSE || !global.SSE.state || !global.SSE.state.connected) return;
+      var st = Windows.streams[wid];
+      if (!st) {
+        st = { text: '' };
+        Windows.streams[wid] = st;
+      }
+      st.text += String(delta);
+      if (wid === String(Windows.selectedId)) Windows.renderStream();
+    },
+
+    /**
+     * 渲染 / 更新 / 移除当前窗口的「正在输入…」流式气泡（追加在对话流末尾）。
+     * @returns {void}
+     */
+    renderStream: function () {
+      var chat = document.getElementById('win-chat');
+      if (!chat) return;
+      var st = Windows.streams[String(Windows.selectedId)];
+      var node = document.getElementById('win-stream-bubble');
+      if (!st || !st.text) {
+        if (node && node.parentNode) node.parentNode.removeChild(node);
+        return;
+      }
+      var html = '<div class="msg assistant stream-msg" id="win-stream-bubble">' +
+        '<div class="msg-avatar">AI</div>' +
+        '<div style="min-width:0">' +
+        '<div class="msg-bubble"><span class="stream-tag">正在输入…</span>' +
+        Windows.renderContent(st.text) + '<span class="stream-caret"></span></div>' +
+        '</div></div>';
+      if (node) node.outerHTML = html;
+      else chat.insertAdjacentHTML('beforeend', html);
+      chat.scrollTop = chat.scrollHeight;
+    },
+
+    /**
+     * 只重渲染对话流区域（不动输入框 / 详情头部），末尾恢复流气泡。
+     * @returns {void}
+     */
+    renderChatOnly: function () {
+      var chat = document.getElementById('win-chat');
+      if (!chat) return;
+      chat.innerHTML = Windows.renderMessages();
+      Windows.renderStream();
+      chat.scrollTop = chat.scrollHeight;
+    },
+
+    /**
+     * 清理某个窗口（或全部）的流式缓冲。
+     * @param {string} [wid] 窗口 id；缺省清全部
+     * @returns {void}
+     */
+    clearStream: function (wid) {
+      if (wid) delete Windows.streams[String(wid)];
+      else Windows.streams = {};
+      Windows.renderStream();
+    },
+
+    /**
+     * dispatch 后开始观察流式完成：每 2s 轮询 messages，出现「dispatch 前
+     * 没有的 assistant 消息」即视为完整消息落库，用它替换半截气泡；
+     * 3 分钟兜底停。SSE 不可用时这就是原轮询模式本身。
+     * @param {string} id 窗口 id
+     * @returns {void}
+     */
+    watchStream: function (id) {
+      id = String(id);
+      Windows.streamWin = id;
+      Windows.streamDeadline = Date.now() + 180000;
+      Windows.streamKnown = {};
+      Windows.messages.forEach(function (m) {
+        Windows.streamKnown[String(m.id)] = 1;
+      });
+      if (Windows.streamTimer) clearInterval(Windows.streamTimer);
+      Windows.streamTimer = setInterval(function () {
+        Windows.pollMessages(id);
+      }, 2000);
+      setTimeout(function () { Windows.pollMessages(id); }, 600);
+    },
+
+    /**
+     * 轮询一次 messages：判定完整消息是否落库（见 watchStream）。
+     * @param {string} id 窗口 id
+     * @returns {void}
+     */
+    pollMessages: function (id) {
+      id = String(id);
+      if (Windows.streamWin !== id) return;
+      if (Date.now() > Windows.streamDeadline) {
+        Windows.finishStream(id, true);
+        return;
+      }
+      A.windows.messages(id, 100).then(function (res) {
+        if (Windows.streamWin !== id) return;
+        var msgs = (res && res.messages) || [];
+        var fresh = msgs.some(function (m) {
+          return String(m.role || '').toLowerCase() === 'assistant' &&
+            !Windows.streamKnown[String(m.id)];
+        });
+        if (fresh) {
+          Windows.messages = msgs;
+          Windows.finishStream(id);
+          if (String(Windows.selectedId) === id) Windows.renderChatOnly();
+        } else if (!Windows.streams[id] && String(Windows.selectedId) === id) {
+          /* 无流式气泡（SSE 不可用 / 流未开始）：保持原轮询渲染节奏 */
+          Windows.messages = msgs;
+          Windows.renderChatOnly();
+        }
+      }).catch(function () { /* 忽略 */ });
+    },
+
+    /**
+     * 结束流式观察并清掉半截气泡。
+     * @param {string} id 窗口 id
+     * @param {boolean} [timeout] 是否因超时结束（会提示）
+     * @returns {void}
+     */
+    finishStream: function (id, timeout) {
+      if (Windows.streamTimer) {
+        clearInterval(Windows.streamTimer);
+        Windows.streamTimer = null;
+      }
+      if (id) delete Windows.streams[String(id)];
+      if (Windows.streamWin === String(id)) Windows.streamWin = '';
+      Windows.streamDeadline = 0;
+      Windows.renderStream();
+      if (timeout) U.toast('warn', '流式输出等待较久，已切回轮询刷新');
+    },
+
+    /**
+     * SSE window.status：就地刷新总览工位卡 / 工位列表项 / 详情头的状态；
+     * 状态回空闲且有半截气泡时立即拉 messages 判定完成。
+     * @param {Object} payload {window_id, status, current_task?}
+     * @returns {void}
+     */
+    onWindowStatus: function (payload) {
+      payload = payload || {};
+      var wid = String(payload.window_id || '');
+      var status = String(payload.status || '');
+      if (!wid || !status) return;
+      var key = status.toLowerCase();
+      var label = statusLabel(status);
+      var paused = key.indexOf('pause') >= 0;
+      var dotCls = 'dot ' + (STATUS_DOT[key] || 'dot-idle');
+
+      /* 总览工位卡片 */
+      U.$$('#ov-win-grid .win-card').forEach(function (card) {
+        if (card.getAttribute('data-win-id') !== wid) return;
+        var dot = U.$('.dot', card);
+        if (dot) dot.className = dotCls;
+        var badge = U.$('.win-card-head .badge', card);
+        if (badge) badge.textContent = label;
+        card.classList.toggle('running',
+          key === 'running' || key === 'busy' || key === 'working');
+      });
+      /* 工位列表项 */
+      U.$$('#win-list .win-item').forEach(function (item) {
+        if (item.getAttribute('data-win-id') !== wid) return;
+        var dot = U.$('.dot', item);
+        if (dot) dot.className = dotCls;
+        var badge = U.$('.badge', item);
+        if (badge) badge.textContent = label;
+      });
+      /* 选中窗口的详情头 */
+      if (wid === String(Windows.selectedId)) {
+        var sb = document.getElementById('win-status-badge');
+        if (sb) {
+          sb.className = 'badge ' + (paused ? 'badge-violet' : 'badge-green');
+          sb.textContent = label;
+        }
+        if ((key === 'idle' || key === 'stopped') && Windows.streams[wid]) {
+          Windows.pollMessages(wid);
+        }
+      }
+    },
+
+    /**
+     * SSE 断开（sse.down）：清掉半截气泡，退回原轮询模式。
+     * @returns {void}
+     */
+    onSseDown: function () {
+      Windows.streams = {};
+      Windows.renderStream();
     },
 
     dispatch: function () {
-      var input = document.getElementById('win-composer');
+      var input = /** @type {HTMLInputElement} */ (document.getElementById('win-composer'));
       if (!input) return;
       var text = input.value.trim();
       if (!text) return;
@@ -463,14 +757,8 @@
       input.value = '';
       A.windows.dispatch(id, text).then(function (r) {
         U.toast('success', (r && r.queued) ? '已加入执行队列' : '已派发');
-        setTimeout(function () {
-          if (Windows.selectedId === id) {
-            A.windows.messages(id, 100).then(function (res) {
-              Windows.messages = (res && res.messages) || [];
-              Windows.renderDetail();
-            }).catch(function () { /* 忽略 */ });
-          }
-        }, 600);
+        /* 流式气泡实时增长，轮询 messages 等完整消息落库后替换（SSE 不可用即原轮询） */
+        Windows.watchStream(id);
       }).catch(function (e) {
         input.value = text;
         U.toast('error', '派活失败：' + e.message);
@@ -699,4 +987,11 @@
   global.DogBuddyViews._statusDot = statusDot;
   global.DogBuddyViews._statusLabel = statusLabel;
   global.DogBuddyViews._runBadge = runBadge;
+
+  /* SSE 钩子（松耦合：事件名 → 视图方法；sse.js 先于本文件加载，缺席则自动跳过） */
+  if (global.SSE) {
+    global.SSE.on('window.status', function (p) { Windows.onWindowStatus(p); });
+    global.SSE.on('window.stream', function (p) { Windows.onStream(p); });
+    global.SSE.on('sse.down', function () { Windows.onSseDown(); });
+  }
 })(window);

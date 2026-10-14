@@ -11,7 +11,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -119,6 +119,8 @@ class AppConfig(BaseModel):
     llm_profiles: dict[str, LLMConfig] = Field(
         default_factory=dict, description="named LLM config sets; `llm` is the default one")
     active_llm_profile: str = Field(default="", description="profile name for new windows; empty = llm section")
+    max_iterations: int = Field(default=25, ge=1, le=200,
+                                description="agent tool-loop rounds per run (windows may override)")
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     panel: PanelConfig = Field(default_factory=PanelConfig)
@@ -141,6 +143,56 @@ class AppConfig(BaseModel):
         the console DTOs both call it so the UI can never disagree with reality.
         """
         return model or self.llm_for(profile).model
+
+    # ---- per-window parameter resolution (Batch 1 / ROADMAP T1.1) ----
+    #: every parameter a window may override; anything else in window.params is ignored
+    #: `trust` (T4.2): "normal" | "elevated" — elevated may run allowlisted danger
+    WINDOW_PARAM_KEYS: ClassVar[tuple[str, ...]] = (
+        "max_context_tokens", "compact_threshold", "temperature",
+        "request_timeout", "max_iterations", "retry", "trust")
+
+    def effective_params(self, window: Any = None, profile: str | None = None) -> dict[str, Any]:
+        """Full parameter set a window actually runs with.
+
+        Resolution chain (same rule as effective_model):
+          **window.params override → bound profile → active profile → global defaults**
+        `retry` merges per-key so a window can raise just `max_retries` etc.
+        """
+        section = self.llm_for(profile or (getattr(window, "llm_profile", "") or None))
+        raw_retry = getattr(section, "retry", None)
+        if hasattr(raw_retry, "model_dump"):
+            retry_dump = raw_retry.model_dump()
+        elif isinstance(raw_retry, dict):
+            retry_dump = dict(raw_retry)
+        else:
+            retry_dump = self.llm.retry.model_dump()
+        params: dict[str, Any] = {
+            "max_context_tokens": getattr(section, "max_context_tokens",
+                                          self.llm.max_context_tokens),
+            "compact_threshold": getattr(section, "compact_threshold",
+                                         self.llm.compact_threshold),
+            "temperature": getattr(section, "temperature", self.llm.temperature),
+            "request_timeout": getattr(section, "request_timeout",
+                                       self.llm.request_timeout),
+            "max_iterations": self.max_iterations,
+            "retry": retry_dump,
+            "trust": "normal",
+        }
+        overrides = getattr(window, "params", None) or {}
+        for key, value in overrides.items():
+            if key not in self.WINDOW_PARAM_KEYS or value is None:
+                continue
+            if key == "retry" and isinstance(value, dict):
+                params["retry"] = {**params["retry"], **{k: v for k, v in value.items() if v is not None}}
+            else:
+                params[key] = value
+        return params
+
+    def param_sources(self, window: Any = None, profile: str | None = None) -> dict[str, str]:
+        """Where each parameter comes from — powers the console's '继承中/已覆盖' labels."""
+        overrides = getattr(window, "params", None) or {}
+        return {key: ("window" if key in overrides and overrides[key] is not None else "inherited")
+                for key in self.WINDOW_PARAM_KEYS}
 
     def profile_names(self) -> list[str]:
         return [""] + sorted(self.llm_profiles)

@@ -22,6 +22,15 @@ from .retry import RetryPolicy
 logger = logging.getLogger("dogbuddy.llm.profiles")
 
 
+def _freeze(value: Any) -> Any:
+    """Hashable snapshot of nested overrides for the provider cache key."""
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
 class LLMProfileRegistry:
     def __init__(self, app_config: Any, on_wait_hook: Callable[[str, int, float], Any] | None = None):
         """on_wait_hook(profile_name, attempt, delay) — surfaced for UI rate-limit status."""
@@ -39,12 +48,18 @@ class LLMProfileRegistry:
         """→ the LLMConfig section for this profile name."""
         return self.cfg.llm_for(profile)
 
-    def get(self, profile: str | None = None, model: str | None = None) -> Any:
-        """→ a (cached) provider instance for this profile + optional model override."""
-        key = ((profile or ""), (model or ""))
+    def get(self, profile: str | None = None, model: str | None = None,
+            overrides: dict | None = None) -> Any:
+        """→ a (cached) provider instance for this profile + optional model override.
+
+        `overrides` = per-window params (temperature/request_timeout/retries);
+        part of the cache key so two workbenches never share a mutated provider.
+        """
+        ovr = _freeze(overrides or {})
+        key = ((profile or ""), (model or ""), ovr)
         provider = self._cache.get(key)
         if provider is None:
-            provider = self._build(profile, model)
+            provider = self._build(profile, model, overrides)
             self._cache[key] = provider
         return provider
 
@@ -52,16 +67,18 @@ class LLMProfileRegistry:
         """A zero-arg factory pinned to one profile/model (for windows/tools)."""
         return lambda: self.get(profile, model)
 
-    def provider_for(self, profile: str | None = None, model: str | None = None) -> Any:
+    def provider_for(self, profile: str | None = None, model: str | None = None,
+                     overrides: dict | None = None) -> Any:
         """Callable-compatible resolver: returns a provider instance.
 
         Every consumer calls it either with no args (`AdminService`,
-        `ReportService`, `explore_subagent`), with a profile (`TaskRunner`), or
-        with profile + model override (`WindowManager`). Wiring the *unsatisfied*
-        `factory` method here was the v1.3 bug that made every real LLM call fail
+        `ReportService`, `explore_subagent`), with a profile (`TaskRunner`),
+        with profile + model override (`WindowManager`), or with per-window
+        overrides (v2 workbench params). Wiring the *unsatisfied* `factory`
+        method here was the v1.3 bug that made every real LLM call fail
         with "'function' object has no attribute 'chat'".
         """
-        return self.get(profile, model)
+        return self.get(profile, model, overrides)
 
     def invalidate(self, profile: str | None = None) -> None:
         """Drop cached provider(s) after a config edit."""
@@ -73,10 +90,12 @@ class LLMProfileRegistry:
                 self._cache.pop(key, None)
 
     # ------------------------------------------------------------- build
-    def _build(self, profile: str | None, model: str | None = None) -> Any:
+    def _build(self, profile: str | None, model: str | None = None,
+               overrides: dict | None = None) -> Any:
         section = self.cfg.llm_for(profile)
         name = profile or ""
         effective_model = self.cfg.effective_model(profile, model or "")
+        ovr = overrides or {}
 
         def on_wait(attempt: int, delay: float) -> None:
             if self.on_wait_hook:
@@ -85,12 +104,22 @@ class LLMProfileRegistry:
                 except Exception:  # noqa: BLE001 — status reporting never breaks the wait
                     pass
 
-        retry = RetryPolicy.from_config(section.retry, on_wait=on_wait)
+        retry_cfg = section.retry
+        ovr_retry = ovr.get("retry")
+        if isinstance(ovr_retry, dict) and hasattr(retry_cfg, "model_copy"):
+            try:
+                retry_cfg = retry_cfg.model_copy(
+                    update={k: v for k, v in ovr_retry.items() if v is not None})
+            except Exception:  # noqa: BLE001 — bad override values fall back to profile
+                retry_cfg = section.retry
+        retry = RetryPolicy.from_config(retry_cfg, on_wait=on_wait)
+        temperature = ovr.get("temperature", section.temperature)
+        timeout = ovr.get("request_timeout", section.request_timeout)
         if (section.provider or "").lower() == "ollama":
             return OllamaProvider(
                 base_url=section.ollama_base_url or section.base_url,
                 model=effective_model, retry=retry)
         return OpenAICompatProvider(
             base_url=section.base_url, api_key=section.api_key, model=effective_model,
-            keys=section.keys, temperature=section.temperature,
-            timeout=section.request_timeout, retry=retry)
+            keys=section.keys, temperature=temperature,
+            timeout=timeout, retry=retry)

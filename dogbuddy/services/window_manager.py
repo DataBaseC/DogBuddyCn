@@ -44,6 +44,9 @@ class WindowRuntime:
     bg_processes: list = field(default_factory=list)
     current_task_label: str = ""
     last_output: str = ""
+    # T3.4: execute / compact / reset all touch the same message stream —
+    # one lock per window, so compaction can never drop messages under a run
+    session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class WindowManager:
@@ -60,6 +63,10 @@ class WindowManager:
         max_context_tokens: int = 128000,
         runners: RunnerRegistry | None = None,
         model_resolver: Callable[[str | None, str], str] | None = None,
+        param_resolver: Callable[[Any], dict] | None = None,
+        decisions: Any = None,
+        approval_config: Callable[..., Any] | None = None,
+        mcp_bridge: Any = None,
     ):
         self.db = db
         self.llm_factory = llm_factory
@@ -67,6 +74,11 @@ class WindowManager:
         self.bus = bus
         self.panel = panel
         self.memory = memory
+        self.decisions = decisions
+        # T4.2/T4.3: approval knobs (allowlist / 托管代审) read through here
+        self.approval_config = approval_config
+        # T5.1: bridged MCP tools are registered into every window registry
+        self.mcp_bridge = mcp_bridge
         self.checkpoints_dir = str(checkpoints_dir)
         self.max_iterations = max_iterations
         self.builder = ContextBuilder(memory_service=memory)
@@ -75,6 +87,8 @@ class WindowManager:
         # injected rule for "which model will this window actually use"
         # (AppConfig.effective_model) — keeps the console from inventing its own
         self.model_resolver = model_resolver
+        # injected rule for per-window params (AppConfig.effective_params)
+        self.param_resolver = param_resolver
         self._runtime: dict[str, WindowRuntime] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self.gate = PermissionGate(confirm_available=True)
@@ -110,6 +124,11 @@ class WindowManager:
         session = WindowSession(w, self.db, self.db, self.db)
         queue = TaskQueue(w.id, on_status=lambda s: self._set_status(w.id, s))
         registry = build_worker_registry(w.role, gate=self.gate, audit=self.db)
+        if self.mcp_bridge is not None and getattr(self.mcp_bridge, "started", False):
+            try:
+                self.mcp_bridge.register_into(registry)  # T5.3: external tools on the shelf
+            except Exception:  # noqa: BLE001 — bridged tools never break a boot
+                logger.warning("mcp tool registration failed", exc_info=True)
         rt = WindowRuntime(window=w, session=session, queue=queue, registry=registry)
         self._runtime[w.id] = rt
         rt.queue.runner = self._make_default_runner(rt)
@@ -121,13 +140,19 @@ class WindowManager:
         if self.bus:
             self.bus.emit(Event(type=WINDOW_STATUS, payload={"window_id": window_id, "status": status}))
 
-    def _llm(self, profile: str | None = None, model: str | None = None) -> Any:
+    def _llm(self, profile: str | None = None, model: str | None = None,
+             overrides: dict | None = None) -> Any:
         """Resolve a provider for a profile and/or a model override.
 
-        Accepts `factory(profile, model)` (profile registry), `factory(profile)`
-        and legacy zero-arg factories (tests / simple wiring).
+        Accepts `factory(profile, model, overrides)` (v2), `factory(profile, model)`,
+        `factory(profile)` and legacy zero-arg factories (tests / simple wiring).
         """
-        if profile or model:
+        if profile or model or overrides:
+            if overrides:
+                try:
+                    return self.llm_factory(profile, model, overrides)
+                except TypeError:
+                    pass
             try:
                 return self.llm_factory(profile, model)
             except TypeError:
@@ -136,6 +161,49 @@ class WindowManager:
                 except TypeError:
                     pass
         return self.llm_factory()
+
+    def _llm_overrides(self, p: dict) -> dict:
+        return {k: p[k] for k in ("temperature", "request_timeout", "retry")
+                if k in p and p[k] is not None}
+
+    # ------------------------------------------------------------- approval (T4)
+    def _approval_allowlist(self) -> list:
+        if self.approval_config is None:
+            return []
+        try:
+            return list(self.approval_config("approval.allowlist", []) or [])
+        except Exception:  # noqa: BLE001 — config read never breaks a run
+            return []
+
+    def _approval_reviewer(self, w: Any) -> Any:
+        """T4.3 托管代审: an independent LLM reviewer when the owner delegates.
+
+        Returns None (= ask the owner) unless `approval.escalation_review` is on.
+        The reviewer gets ONLY the call and the risk — no conversation context —
+        so it cannot be talked into approving by a poisoned prompt.
+        """
+        if self.approval_config is None:
+            return None
+        try:
+            enabled = bool(self.approval_config("approval.escalation_review", False))
+        except Exception:  # noqa: BLE001
+            return None
+        if not enabled:
+            return None
+
+        async def review(name: str, args: dict, reason: str) -> bool:
+            import json as _json
+            llm = self._llm(w.llm_profile or None, w.model or None)
+            prompt = (
+                "你是独立的安全审查代理。判断下面这条即将在服务器上执行的命令是否安全。\n"
+                f"工具：{name}\n参数：{_json.dumps(args, ensure_ascii=False)[:600]}\n"
+                f"风险标注：{reason}\n\n"
+                "只回答两个词之一：「批准」或「拒绝」。拿不准一律拒绝。")
+            resp = await llm.chat([{"role": "user", "content": prompt}])
+            verdict = (getattr(resp, "content", "") or "").strip()
+            logger.info("托管代审 verdict for %s: %r", name, verdict[:20])
+            return verdict.startswith("批准") or verdict.lower().startswith("approve")
+        return review
 
     def resolved_model(self, w: Window) -> str:
         """The model this window will actually talk to (override → profile → global)."""
@@ -146,13 +214,29 @@ class WindowManager:
                 pass
         return w.model or ""
 
+    def params_for(self, w: Window) -> dict:
+        """Effective params for this window (工位覆盖→profile→全局), via AppConfig."""
+        if self.param_resolver is not None:
+            try:
+                return dict(self.param_resolver(w) or {})
+            except Exception:  # noqa: BLE001
+                pass
+        return {"max_iterations": self.max_iterations,
+                "max_context_tokens": self.max_context_tokens,
+                "compact_threshold": self.threshold}
+
     def _compactor_for(self, w: Window) -> Compactor:
-        return Compactor(self._llm(w.llm_profile or None, w.model or None), self.db, self.memory,
-                         threshold=self.threshold, max_context_tokens=self.max_context_tokens)
+        p = self.params_for(w)
+        ovr = self._llm_overrides(p)
+        return Compactor(self._llm(w.llm_profile or None, w.model or None, ovr or None),
+                         self.db, self.memory,
+                         threshold=p.get("compact_threshold", self.threshold),
+                         max_context_tokens=p.get("max_context_tokens", self.max_context_tokens))
 
     # ---------------------------------------------------------- crud facade
     def create(self, name: str, role: str = "worker_programmer", workspace_path: str = "",
-               model: str = "", mode: str = "BUILD", llm_profile: str = "") -> Window:
+               model: str = "", mode: str = "BUILD", llm_profile: str = "",
+               params: dict | None = None) -> Window:
         if self.db.get_window_by_name(name):
             raise ValueError(f"window name already used: {name}")
         from ..db import new_id
@@ -163,7 +247,8 @@ class WindowManager:
         ws.mkdir(parents=True, exist_ok=True)
         w = Window(id=new_id(), name=name, role=role, workspace_path=str(ws.resolve()),
                    model=model, mode=mode if mode in ("BUILD", "PLAN", "AUTO") else spec.default_mode,
-                   status="idle", llm_profile=llm_profile or "")
+                   status="idle", llm_profile=llm_profile or "",
+                   params=params if isinstance(params, dict) else {})
         self.db.insert_window(w)
         self._boot(w)
         self.db.audit("system", "window:create", f"{w.id} {name} role={role} profile={llm_profile or 'default'}")
@@ -187,6 +272,7 @@ class WindowManager:
         if rt is None:
             rt = self._boot(w)
         rt.window = w
+        rt.session.window = w  # fresh row (group_id etc. — sessions follow the DB)
         return rt
 
     def update(self, window_id: str, **fields: Any) -> Window:
@@ -282,21 +368,37 @@ class WindowManager:
         # per-window model override: was decorative in v1.3 (never read), so users
         # had to set the model in several places to get any effect
         model = w.model or None
+        # per-window params (T1.1): workbench overrides → profile → global
+        p = self.params_for(w)
+        ovr = self._llm_overrides(p) or None
+        llm_factory = (lambda pp=None: self._llm(pp or profile, model, ovr))
         ctx = ToolContext(
             window_id=w.id, workspace=w.workspace_path, mode=w.mode, actor="worker",
             todo_repo=self.db, db=self.db, panel=self.panel,
-            llm_factory=(lambda p=None: self._llm(p or profile, model)),
+            llm_factory=llm_factory,
             ask_user_fn=self._make_ask_user(w.id),
             checkpoint_root=self.checkpoints_dir,
             extra={"scheduled": bool(task.job_id), "manual": not task.job_id,
-                   "bg_processes": rt.bg_processes},
+                   "bg_processes": rt.bg_processes,
+                   # T4.2: trust level from workbench params + allowlist from config
+                   "trust": (w.params or {}).get("trust", "normal"),
+                   "approval_allowlist": self._approval_allowlist(),
+                   # T4.3: 托管代审 reviewer (None = ask the owner directly)
+                   "approval_reviewer": self._approval_reviewer(w)},
         )
+        # T2.5: stream text fragments to the console (SSE typewriter)
+        def _on_delta(delta: str) -> None:
+            if self.bus:
+                self.bus.emit(Event(type="window.stream",
+                                    payload={"window_id": w.id, "delta": delta}))
+
         env = TaskEnv(
             window=w, session=rt.session, registry=rt.registry,
-            llm_factory=lambda p=None: self._llm(p or profile, model),
+            llm_factory=llm_factory,
             builder=self.builder, compactor=self._compactor_for(w),
             ctx=ctx, tool_names=role.tool_names if role else None,
-            max_iterations=self.max_iterations)
+            max_iterations=p.get("max_iterations", self.max_iterations),
+            on_delta=_on_delta)
 
         runner = self.runners.get(task.kind or "prompt")
         if runner is None:
@@ -305,12 +407,27 @@ class WindowManager:
         else:
             rt.current_task_label = task.prompt[:80]
             self._set_status(w.id, "running")
+            # T2.7: every scheduled/manual job run lands in job_runs (was cron-only)
+            run_id = None
+            if task.job_id and hasattr(self.db, "start_run"):
+                try:
+                    run_id = self.db.start_run(task.job_id, w.id).id
+                except Exception:  # noqa: BLE001 — bookkeeping never breaks a run
+                    logger.warning("job run bookkeeping failed", exc_info=True)
             try:
-                result = await runner.run(task, env)
+                async with rt.session_lock:  # T3.4: compaction never runs under a task
+                    result = await runner.run(task, env)
             except Exception as e:  # noqa: BLE001 — a crashed runner must not kill the queue
                 logger.exception("window %s run failed", w.id)
                 result = _ErrorResult(str(e))
             finally:
+                if run_id is not None:
+                    try:
+                        self.db.finish_run(
+                            run_id, "ok" if getattr(result, "ok", True) else "failed",
+                            (getattr(result, "summary", "") or "")[:500])
+                    except Exception:  # noqa: BLE001
+                        logger.warning("job run finish failed", exc_info=True)
                 rt.current_task_label = ""
                 self._set_status(w.id, "idle")
         rt.last_output = result.summary
@@ -325,7 +442,20 @@ class WindowManager:
                     "window_id": w.id, "window_name": w.name, "reason": c}))
         return result
 
-    def _make_ask_user(self, window_id: str) -> Callable[..., str]:
+    def _make_ask_user(self, window_id: str) -> Callable[..., Any]:
+        """Ask the owner a question.
+
+        With a DecisionService wired (v2 T2.3) the question lands in the durable
+        `pending_decisions` queue and the agent *waits* for the answer (with a
+        timeout) — questions asked at 3am survive until morning. Without one
+        (tests / minimal wiring) it falls back to the v1.3 fire-and-forget event.
+        """
+        if getattr(self, "decisions", None) is not None:
+            async def ask(question: str, options: list[str] | None = None) -> str:
+                d = self.decisions.ask(window_id, question, options=options)
+                return await self.decisions.wait(d.id)
+            return ask
+
         def ask(question: str, options: list[str] | None = None) -> str:
             if self.bus:
                 w = self.db.get_window(window_id)
@@ -342,6 +472,10 @@ class WindowManager:
     # -------------------------------------------------------------- views
     def recent_messages(self, window_id: str, limit: int = 100) -> list[dict[str, Any]]:
         rt = self._rt(window_id)
+        # meta carries tool_name/tool_call_id (T2.6) and tool_calls for rebuild
         return [{"id": m.id, "role": m.role, "content": m.content,
-                 "created_at": m.created_at, "tokens": m.tokens}
+                 "created_at": m.created_at, "tokens": m.tokens,
+                 "tool_name": (m.meta or {}).get("tool_name", ""),
+                 "tool_call_id": (m.meta or {}).get("tool_call_id", ""),
+                 "meta": m.meta or {}}
                 for m in rt.session.recent(limit)]

@@ -55,6 +55,30 @@ PANEL_PATH_PATTERN = re.compile(
 _COMPILED = [(re.compile(p, re.IGNORECASE), why) for p, why in DANGEROUS_PATTERNS]
 
 
+# T4.3 三道保险之第一道 — 不可逆命令：无论信任级/放行清单/托管代审，永远需要
+# 用户本人批准。subset of DANGEROUS_PATTERNS that destroys data or the machine.
+IRREVERSIBLE_PATTERNS: list[tuple[str, str]] = [
+    (r"\brm\s+(-[a-zA-Z]*\s+)*-?\w*[rR]\w*f\w*", "recursive delete"),
+    (r"\bmkfs(\.\w+)?\b", "filesystem format"),
+    (r"\bdd\b[^\\n]*\bof=/dev/", "raw device write"),
+    (r">\s*/dev/sd[a-z]", "raw disk overwrite"),
+    (r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;", "fork bomb"),
+    (r"\b(shutdown|reboot|halt|poweroff)\b", "system power operation"),
+    (r"\bformat\s+[a-z]:", "disk format"),
+    (r"\bdiskpart\b", "disk partitioning"),
+    (r"\bbcdedit\b", "boot configuration edit"),
+    (r"\bmktable\b|\\bparted\b", "partition table rewrite"),
+]
+
+
+def is_irreversible_command(command: str) -> str | None:
+    """Reason string if this command is irreversible, else None."""
+    for pattern, reason in IRREVERSIBLE_PATTERNS:
+        if re.search(pattern, command):
+            return reason
+    return None
+
+
 def is_dangerous_command(command: str) -> str | None:
     """Return the reason when *command* matches the blacklist, else None."""
     for rx, why in _COMPILED:
@@ -118,13 +142,36 @@ class PermissionGate:
         if not command:
             return GateDecision(True)
         reason = is_dangerous_command(command)
-        if reason is None:
+        irreversible = is_irreversible_command(command)
+        # T4.3: the irreversible check is WIDER than the dangerous list —
+        # e.g. `rm -rf /important` kills a whole project dir without matching
+        # the "top-level path" pattern, yet is never auto-allowable.
+        if reason is None and irreversible is None:
             return GateDecision(True)
-        if confirmed:
+        if confirmed:  # an approved replay (T4.1) — the human already said yes
             return GateDecision(True)
+        reason = reason or f"irreversible operation ({irreversible})"
+        # T4.2: ELEVATED workbench + allowlisted command → auto-allow,
+        # UNLESS the command is irreversible (first of the three safeguards)
+        if not irreversible and str(ctx.extra.get("trust", "")) == "elevated":
+            for pat in (ctx.extra.get("approval_allowlist") or []):
+                pat = str(pat or "").strip()
+                if not pat:
+                    continue
+                try:
+                    matched = bool(re.search(pat, command)) or command.startswith(pat)
+                except re.error:
+                    matched = command.startswith(pat)
+                if matched:
+                    return GateDecision(True)
+        flag = bool(irreversible)
         if allow_all and ctx.extra.get("manual"):
             # AUTO on a manual session: still surface the danger, needs explicit confirm
-            return GateDecision(False, f"dangerous command ({reason}) requires user confirmation", needs_confirm=True)
+            return GateDecision(
+                False, f"dangerous command ({reason}) requires user confirmation",
+                needs_confirm=True, irreversible=flag)
         if self.confirm_available:
-            return GateDecision(False, f"dangerous command ({reason}); user IM confirmation required", needs_confirm=True)
+            return GateDecision(
+                False, f"dangerous command ({reason}); user IM confirmation required",
+                needs_confirm=True, irreversible=flag)
         return GateDecision(False, f"dangerous command blocked: {reason}")

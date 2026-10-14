@@ -8,8 +8,9 @@
   var V = global.DogBuddyViews;
 
   var TITLES = {
-    overview: '总览', chat: '对话', windows: '工位', jobs: '任务',
-    files: '文件管理器', logs: '日志审计', settings: '设置'
+    overview: '总览', chat: '对话', decisions: '待决', windows: '工位', jobs: '任务',
+    groups: '群组', capabilities: '能力', ledger: '账本', files: '文件管理器',
+    logs: '日志审计', settings: '设置'
   };
 
   var App = {
@@ -131,6 +132,12 @@
         case 'jobs':
           V.Jobs.load();
           break;
+        case 'groups':
+          if (V.Groups) V.Groups.load();
+          break;
+        case 'capabilities':
+          if (V.Capabilities) V.Capabilities.load();
+          break;
         case 'files':
           global.FileMgr.load();
           break;
@@ -169,6 +176,11 @@
           if (waiting) {
             rate.textContent = '限速等待' + (st.rate_limit.attempt ? ' · 第 ' + st.rate_limit.attempt + ' 次' : '');
           }
+        }
+        /* 顶栏限速徽标：SSE 实时置位，这里兜底清除（限速结束没有专门事件） */
+        var topRate = document.getElementById('top-rate');
+        if (topRate && !(st.rate_limit && st.rate_limit.waiting)) {
+          topRate.classList.add('hidden');
         }
         if (wins) wins.textContent = st.windows || 0;
         if (jobs) jobs.textContent = st.jobs || 0;
@@ -233,6 +245,7 @@
           var id = act.getAttribute('data-empty-action');
           if (id === 'new-window') V.Windows.openCreateModal();
           else if (id === 'new-job') V.Jobs.openForm(null);
+          else if (id === 'new-group' && V.Groups) V.Groups.openCreate();
           else if (id === 'fm-upload') {
             var input = document.getElementById('fm-upload-input');
             if (input) input.click();
@@ -247,11 +260,36 @@
           V.Windows.renderList();
         }, 150));
       }
+      /* 账本天数切换（7 / 30 / 90） */
+      var ledDays = document.getElementById('led-days');
+      if (ledDays) {
+        U.$$('.seg-btn', ledDays).forEach(function (b) {
+          b.addEventListener('click', function () {
+            if (V.Ledger) V.Ledger.switchDays(b.getAttribute('data-days'));
+          });
+        });
+      }
+
+      /* SSE：限速退避徽标（顶栏实时显示「限速等待中 第N次退避」） */
+      if (global.SSE) {
+        global.SSE.on('rate_limit.status', function (p) {
+          var topRate = document.getElementById('top-rate');
+          if (!topRate) return;
+          var attempt = Number(p && p.attempt) || 0;
+          topRate.textContent = '限速等待中 ' + (attempt ? '第' + attempt + '次退避' : '退避中');
+          topRate.classList.remove('hidden');
+        });
+      }
+
       /* 新建按钮 */
       var nw = document.getElementById('btn-new-window');
       if (nw) nw.addEventListener('click', function () { V.Windows.openCreateModal(); });
       var nj = document.getElementById('btn-new-job');
       if (nj) nj.addEventListener('click', function () { V.Jobs.openForm(null); });
+      var gn = document.getElementById('grp-new-btn');
+      if (gn) gn.addEventListener('click', function () {
+        if (V.Groups) V.Groups.openCreate();
+      });
 
       /* 任务筛选 */
       var jf = document.getElementById('job-filter-window');
@@ -284,6 +322,12 @@
         logRefresh.addEventListener('click', function () {
           V.Logs.load();
           U.toast('info', '日志已刷新');
+        });
+      }
+      var decRefresh = document.getElementById('dec-refresh');
+      if (decRefresh) {
+        decRefresh.addEventListener('click', function () {
+          if (V.Decisions) V.Decisions.load();
         });
       }
 
@@ -319,6 +363,14 @@
 
     /* ---------------- 启动 ---------------- */
     boot: function () {
+      /* SSE 实时事件接上（断线自动重连；退订/分发见 sse.js 与各视图钩子） */
+      if (global.SSE) global.SSE.start();
+      /* 待决红点初值（后续由 SSE decision.* 实时增减） */
+      if (V.Decisions) {
+        A.decisions.list('pending', 1).then(function (r) {
+          V.Decisions.updateBadge((r && r.pending_count) || 0);
+        }).catch(function () { /* 忽略 */ });
+      }
       App.refreshStatus().then(function (st) {
         if (st && st.llm_configured === false) {
           /* 首次设置：总览横幅 + 自动打开向导 */

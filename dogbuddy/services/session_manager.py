@@ -28,10 +28,18 @@ class SessionManager:
     async def compress(self, window_id: str) -> Any:
         rt = self._rt(window_id)
         compactor = self.windows._compactor_for(rt.window)
-        return await compactor.compact_now(rt.session)
+        # T3.4: wait for a running task — never drop messages under a live run
+        lock = getattr(rt, "session_lock", None)
+        if lock is None:
+            return await compactor.compact_now(rt.session)
+        async with lock:
+            return await compactor.compact_now(rt.session)
 
     def reset(self, window_id: str) -> int:
         rt = self._rt(window_id)
+        # T3.4: dropping history while a run is live corrupts its context
+        if getattr(rt, "current_task_label", ""):
+            raise ValueError(f"window {window_id} is running a task; try again when idle")
         msgs = rt.session.recent(100000)
         if not msgs:
             return 0

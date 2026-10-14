@@ -1,0 +1,25 @@
+{
+  "root": true,
+  "env": {
+    "browser": true,
+    "es2022": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "script"
+  },
+  "extends": "eslint:recommended",
+  "globals": {
+    "UI": "readonly",
+    "API": "readonly",
+    "App": "readonly",
+    "DogBuddyViews": "readonly",
+    "FileMgr": "readonly"
+  },
+  "rules": {
+    "no-undef": "error",
+    "no-unused-vars": ["error", { "args": "none", "varsIgnorePattern": "^_" }],
+    "eqeqeq": ["error", "smart"],
+    "no-redeclare": ["error", { "builtinGlobals": false }]
+  }
+}

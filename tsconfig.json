@@ -1,0 +1,25 @@
+{
+  // DogBuddyCn 前端类型检查配置（T1.4）：`npx tsc -p tsconfig.json` 当纯检查器跑。
+  // 只检查不产出（noEmit），先宽松（strict: false），JSDoc 注解逐步补。
+  // 注意：静态源码在本仓库实际位于 dogbuddy/web/static/js（对外挂载为 /assets）；
+  // public/js 是约定布局（若日后重排目录可删掉多余的一条 include）。
+  "compilerOptions": {
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "allowJs": true,
+    "target": "es2022",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "module": "esnext",
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": [
+    "public/js/**/*.js",
+    "public/js/**/*.d.ts",
+    "dogbuddy/web/static/js/**/*.js",
+    "dogbuddy/web/static/js/**/*.d.ts"
+  ],
+  // *.bundle.js 是 tools/rebuild-bundles.py 的生成物，只查源文件
+  "exclude": ["**/*.bundle.js"]
+}

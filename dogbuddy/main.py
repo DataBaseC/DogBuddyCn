@@ -17,6 +17,7 @@ from .cron.jobs import JobStore
 from .cron.scheduler import CronScheduler
 from .db import Database
 from .events.bus import CONFIRM_REQUEST, WORKER_QUESTION, Event, EventBus
+from .external.mcp_bridge import McpBridge
 from .gateway.adapters.onebot_v11 import OneBotV11Adapter
 from .gateway.router import Router
 from .llm.profile_registry import LLMProfileRegistry
@@ -27,10 +28,13 @@ from .services.config_service import ConfigService
 from .services.file_service import FileService
 from .services.job_manager import JobManager
 from .services.report_service import ReportService
+from .services.decisions import DecisionService
+from .services.group_manager import GroupManager
 from .services.session_manager import SessionManager
 from .services.window_manager import WindowManager
 from .services.workspace_manager import WorkspaceManager
 from .web.app import WebServices, create_app
+from .web.sse import SseBroker
 
 logger = logging.getLogger("dogbuddy.main")
 
@@ -53,6 +57,12 @@ class DogBuddyApp:
         # provider → every real LLM call failed with
         # "'function' object has no attribute 'chat'".
         self.llm_factory = self.profiles.provider_for
+        # durable pending-decision queue (T2.3): ask_user lands here and waits
+        self.decisions = DecisionService(self.db, bus=self.bus)
+        # SSE fan-out for the console live feed (T2.1)
+        self.sse = SseBroker(self.bus)
+        # MCP bridge (T5): external tool servers, permissions default to read
+        self.mcp = McpBridge(config_get=self._mcp_config_get)
 
         # IM adapters first (gateway notifier channels need the adapter)
         self.adapter: Any = None
@@ -66,10 +76,16 @@ class DogBuddyApp:
         self.windows = WindowManager(
             db=self.db, llm_factory=self.llm_factory, bus=self.bus, panel=self.panel,
             memory=self.memory, checkpoints_dir=config.checkpoints_dir,
+            max_iterations=config.max_iterations,
             threshold=config.llm.compact_threshold,
             max_context_tokens=config.llm.max_context_tokens,
-            model_resolver=config.effective_model)
+            model_resolver=config.effective_model,
+            param_resolver=config.effective_params,
+            decisions=self.decisions,
+            approval_config=lambda k, d=None: self.config_svc.get(k, d),
+            mcp_bridge=self.mcp)
         self.sessions = SessionManager(self.windows, self.db)
+        self.groups = GroupManager(self.db, self.windows, bus=self.bus)
         self.workspaces = WorkspaceManager(config.paths.workspaces, self.db)
         self.job_store = JobStore(self.db)
         self.jobs = JobManager(self.job_store, self.windows)
@@ -89,6 +105,7 @@ class DogBuddyApp:
         self.report = ReportService(
             bus=self.bus, notifiers=self.notifiers, llm_factory=self.llm_factory,
             default_strategy=self.config_svc.get("report.default_strategy", "brief"))
+        self.report.decisions = self.decisions
         self.scheduler = CronScheduler(
             store=self.job_store, run_job=self._run_job, bus=self.bus, tick_seconds=60)
         if self.adapter is not None:
@@ -97,6 +114,7 @@ class DogBuddyApp:
             db=self.db, windows=self.windows, jobs=self.jobs, sessions=self.sessions,
             workspaces=self.workspaces, config=self.config_svc, memory=self.memory,
             files=self.files, admin=self.admin, app_config=config,
+            decisions=self.decisions, sse=self.sse, groups=self.groups,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)
@@ -179,6 +197,13 @@ class DogBuddyApp:
             logger.exception("failed to start self-update")
             return {"started": False, "error": str(e)}
 
+    def _mcp_config_get(self, key: str, default: Any = None) -> Any:
+        """Deferred config read — config_svc is wired later in __init__."""
+        try:
+            return self.config_svc.get(key, default)
+        except AttributeError:
+            return default
+
     def _on_llm_wait(self, profile: str, attempt: int, delay: float) -> None:
         """Rate-limit backoff surfaced for the console badge (per profile)."""
         self._rate_limit = {"waiting": True, "attempt": attempt, "window_id": profile or ""}
@@ -248,9 +273,14 @@ class DogBuddyApp:
             return
         self._started = True
         self.bus.emit(Event(type="system.ready", payload={}))
+        try:
+            await self.mcp.start()  # T5: bridge before windows boot their registries
+        except Exception:  # noqa: BLE001 — MCP never blocks startup
+            logger.warning("mcp bridge start failed", exc_info=True)
         await self.windows.start()
         self._tasks.append(asyncio.get_event_loop().create_task(self.bus.start()))
         self._tasks.append(asyncio.get_event_loop().create_task(self.scheduler.run_loop()))
+        self._tasks.append(self.decisions.start_sweeper())
         if self.adapter is not None and self.router is not None:
             self._tasks.append(asyncio.get_event_loop().create_task(self.adapter.run()))
             self._tasks.append(asyncio.get_event_loop().create_task(self.router.run()))
@@ -263,6 +293,10 @@ class DogBuddyApp:
         self._started = False
         self.scheduler.stop()
         await self.windows.stop()
+        try:
+            await self.mcp.close()
+        except Exception:  # noqa: BLE001
+            logger.debug("mcp close failed", exc_info=True)
         for t in self._tasks:
             t.cancel()
         self.db.close()

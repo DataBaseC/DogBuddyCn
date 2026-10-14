@@ -16,6 +16,7 @@ class WindowIn(BaseModel):
     model: str = ""
     mode: str = "BUILD"
     llm_profile: str = ""
+    params: dict[str, Any] | None = None
 
 
 class WindowPatch(BaseModel):
@@ -23,6 +24,7 @@ class WindowPatch(BaseModel):
     model: str | None = None
     mode: str | None = None
     llm_profile: str | None = None
+    params: dict[str, Any] | None = None
 
 
 class DispatchIn(BaseModel):
@@ -33,12 +35,24 @@ class InjectIn(BaseModel):
     text: str
 
 
-def _win_dto(w: Any, todos: list | None = None, windows: Any = None) -> dict:
+def _win_dto(w: Any, todos: list | None = None, windows: Any = None,
+             cfg: Any = None) -> dict:
     d = {"id": w.id, "name": w.name, "role": w.role, "workspace_path": w.workspace_path,
          "model": w.model, "mode": w.mode, "status": w.status,
          "llm_profile": w.llm_profile,
+         "params": dict(getattr(w, "params", {}) or {}),
          "resolved_model": (windows.resolved_model(w) if windows is not None else (w.model or "")),
          "created_at": w.created_at, "updated_at": w.updated_at}
+    if windows is not None and hasattr(windows, "params_for"):
+        try:
+            d["effective_params"] = windows.params_for(w)
+        except Exception:  # noqa: BLE001 — DTO never breaks a listing
+            d["effective_params"] = {}
+    if cfg is not None and hasattr(cfg, "param_sources"):
+        try:
+            d["param_sources"] = cfg.param_sources(w)
+        except Exception:  # noqa: BLE001
+            d["param_sources"] = {}
     if todos is not None:
         d["todos"] = [{"id": t.id, "content": t.content, "done": t.done} for t in todos]
     return d
@@ -52,7 +66,7 @@ def router(svc, auth_deps) -> APIRouter:
         out = []
         for w in svc.windows.list():
             st = svc.windows.status(w.id)
-            d = _win_dto(w, windows=svc.windows)
+            d = _win_dto(w, windows=svc.windows, cfg=svc.app_config)
             d.update(current_task=st.get("current_task", ""), tokens=st.get("tokens", 0))
             out.append(d)
         return out
@@ -63,10 +77,11 @@ def router(svc, auth_deps) -> APIRouter:
             w = svc.windows.create(name=body.name, role=body.role,
                                    workspace_path=body.workspace_path,
                                    model=body.model, mode=body.mode,
-                                   llm_profile=body.llm_profile)
+                                   llm_profile=body.llm_profile,
+                                   params=body.params)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        return _win_dto(w, windows=svc.windows)
+        return _win_dto(w, windows=svc.windows, cfg=svc.app_config)
 
     @r.get("/windows/{window_id}", dependencies=auth_deps)
     def get_window(window_id: str) -> dict:
@@ -74,7 +89,7 @@ def router(svc, auth_deps) -> APIRouter:
         if w is None:
             raise HTTPException(status_code=404, detail="window not found")
         rt_todos = svc.sessions._rt(w.id).session.todo_list()
-        return _win_dto(w, todos=rt_todos, windows=svc.windows)
+        return _win_dto(w, todos=rt_todos, windows=svc.windows, cfg=svc.app_config)
 
     @r.patch("/windows/{window_id}", dependencies=auth_deps)
     def patch_window(window_id: str, body: WindowPatch) -> dict:
@@ -83,7 +98,29 @@ def router(svc, auth_deps) -> APIRouter:
             w = svc.windows.update(window_id, **fields)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        return _win_dto(w, windows=svc.windows)
+        return _win_dto(w, windows=svc.windows, cfg=svc.app_config)
+
+    @r.get("/windows/{window_id}/usage", dependencies=auth_deps)
+    def window_usage(window_id: str) -> dict:
+        """Context-usage snapshot for the console bar (T1.1)."""
+        w = svc.windows.get(window_id)
+        if w is None:
+            raise HTTPException(status_code=404, detail="window not found")
+        p = svc.windows.params_for(w)
+        st = svc.windows.status(w.id)
+        max_tokens = p.get("max_context_tokens", 0) or 0
+        used = 0
+        try:
+            used = int(svc.sessions._rt(w.id).session.token_usage())
+        except Exception:  # noqa: BLE001 — usage bar degrades to zeros, never 500s
+            pass
+        ratio = (used / max_tokens) if max_tokens else 0.0
+        return {"window_id": w.id,
+                "context_tokens": used,
+                "max_context_tokens": max_tokens,
+                "ratio": round(min(ratio, 1.0), 4),
+                "threshold": p.get("compact_threshold", 0.0),
+                "tokens": st.get("tokens", 0)}
 
     @r.delete("/windows/{window_id}", dependencies=auth_deps)
     def delete_window(window_id: str) -> dict:

@@ -1,7 +1,8 @@
 # DogBuddyCn 开发路线图 / 外包交接文档
 
-> 面向接手本项目的开发 Agent。本文档 = 现状 + 已确认缺陷（带代码位置）+ 待办优先级 + 验收标准。
-> 最后更新：2026-10-13，对应版本 `0.3.1`。
+> 面向接手本项目的开发 Agent。本文档 = **决策定稿** + **批次任务卡** + 已确认缺陷（带代码位置）+ 验收标准。
+> 最后更新：2026-10-14，对应版本 `0.4.0`，状态：**Batch 1-5 全部完成**（工位参数/能力清单/SSE/待决队列/账本/流式/共享频道群组/审批托管/MCP 桥，187 测试全绿）。
+> 设计方案与选项对比见 `docs/PROPOSALS.md`（决策依据，已全部拍板）。
 
 ---
 
@@ -9,8 +10,13 @@
 
 ### 0.1 这是什么
 
-常驻 Ubuntu 服务器的**多 Agent 数字团队**：管理员 Agent 经 QQ / Web 控制台对接用户，程序员员工 Agent 在
-持久"工位（window）"里被定时任务持续驱动干活，Web 控制台管理一切。
+常驻 Ubuntu 服务器的**个人服务器生产力系统**（多 Agent 数字团队）：管理员 Agent 经 QQ / Web 控制台对接用户，
+程序员员工 Agent 在持久"工位（window）"里被定时任务持续驱动干活，Web 控制台管理一切。
+**定位是生产用途**：可靠性 / 审计 / 成本可见 / 产出导向优先于交互花哨。
+
+产品叙事（对外）："QQ 驱动的服务器管家"；内核保持数字团队模型。
+**默认用户画像 = 股东**：长时间不在场，数据自己看（拉取为主），系统要能在无人值守下安全推进，
+只在"需要拍板"和"着火"时才触达用户。
 
 代码基线来自 `AegisAgent v1.3`（见 `docs/` 下的原始设计文档），已在 `DogBuddyCn` 下重命名并修复了一批
 阻断性缺陷。**本仓库 = 可运行的真实系统，不是原型。**
@@ -33,7 +39,7 @@ dogbuddy/            Python 包（五层架构，依赖只许向下）
 manage.py            CLI：start|stop|restart|status|logs|backup|restore|version|update
 scripts/             make_bundle.py（打包）/ deploy_bundle.py（远程部署）/ bootstrap_git.sh
 tests/               130 个用例，pytest 全绿
-docs/                设计文档（ARCHITECTURE / DESIGN / DEV_PROMPT / EXTENSIBILITY）+ 本文档
+docs/                设计文档（ARCHITECTURE / DESIGN / DEV_PROMPT / EXTENSIBILITY / PROPOSALS）+ 本文档
 ```
 
 ### 0.3 本地开发（Windows / Linux 均可）
@@ -76,7 +82,325 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 
 ---
 
-## 1. 现状：已经做完的事（不要重复修）
+## 1. 设计决策定稿（2026-10-14 用户拍板，不再讨论，直接执行）
+
+| # | 决策 | 结论 | 落地影响 |
+|---|------|------|---------|
+| 1 | 产品定位 | **个人服务器生产力**（生产用途） | 功能取舍以可靠性/审计/成本/产出为先 |
+| 2 | 前端路线 | **不用 Vue**；原生 JS + 工程化补强（tsc 类型检查、缓存指纹） | 不做框架迁移 |
+| 3 | 实时推送 | **SSE**（不做 WebSocket） | `GET /api/events` 单向事件流 |
+| 4 | 用户角色 | **股东模式**：用户长时间不在场，数据自取（拉取为主）；**不做日报/周报内容汇报** | 只保留"通知最小集"（见 1.1） |
+| 5 | 多用户 | **暂不做**多用户/多租户 | `whitelist.role` 保留字段不动 |
+| 6 | 插件生态 | **先 MCP**（bridge 接入），skills 后置等真实场景 | 工具面扩展走 ToolRegistry |
+| 7 | 高危命令审批 | **发 QQ 人工审批**；用户开启**管理员托管模式**后由管理员 agent 代审 | 三道保险见 1.2 |
+| 8 | 工位参数 | 做**全套工位级覆盖机制**（压缩阈值/上下文窗口/温度等），不做单点补丁 | 见 Batch 1 |
+| 9 | 可发现性 | 能力清单页 + 管理员主动引导（从注册表自动生成） | 见 Batch 1 |
+| 10 | 员工协作 | **共享工作频道**（不做自由多智能体会话；主从编排后置看需要） | 见 Batch 3 |
+
+### 1.1 通知最小集（"不汇报"的边界，必须遵守）
+
+砍掉的是**内容汇报**（日报/周报/进度播报）。但以下两类**必须触达**（可合并为一条通知）：
+
+- **待决事项**：审批请求、员工提问、需要用户拍板的选择 —— 合并通知如"有 3 件事等您拍板"
+- **重大异常**：任务连续失败自动暂停、服务故障、资源/额度告警
+
+原则：**内容不推、决策点和火警才推**；其余数据用户自己上面板看。
+
+### 1.2 托管代审三道保险（必须遵守）
+
+1. **保守默认**：不可逆动作（删数据/改生产配置/重启关键服务）一律拒绝或升级人工；只自动放行白名单类动作
+2. **独立审查**：代审必须用独立提示词 + 独立会话（可用 profiles 配便宜稳当的模型专司审批）；严禁干活的 agent 自查自批
+3. **留痕 + 可关闭**：每笔代审记录理由进审计；用户可复核追认；一键关闭托管模式
+
+### 1.3 MCP 权限映射原则
+
+每个接入的 MCP server 的工具权限级别（read/write/shell）**必须显式配置、默认从紧（read）**，
+不得默认放行——否则一个 MCP server 就绕过全部权限门控。
+
+---
+
+## 2. 开发批次（按序开工，合计约 6~8 周）
+
+> 每个任务卡含：目标 / 要点 / 验收。**验收不过不算完成**；改动遵守 §5 DoD。
+
+### Batch 1｜工位参数 + 可发现性（约 1~1.5 周）— 用户痛点优先
+
+**T1.1 工位级参数全套覆盖**（原 P0-2.3）
+- 目标：压缩阈值等参数工位级可调，默认继承全局。
+- 要点：
+  1. `windows` 表加 `params_json` 覆盖列（NULL=全继承），走 `_MIGRATIONS`
+  2. `AppConfig.effective_*(window)` 统一解析链：**工位覆盖 → 绑定 profile → active profile → 全局默认**
+     （扩展现有 `effective_model()`，消除"两套覆盖机制"并存的坑；`WindowManager._compactor_for()`/`_execute()` 改用解析值）
+  3. 覆盖字段：`max_context_tokens` / `compact_threshold` / `temperature` / `request_timeout` / `max_iterations` / `retry.*`
+  4. UI：工位详情加「参数」标签页，每字段显示 `继承中（当前 xxx）` / `已覆盖` + "恢复继承"按钮；默认全继承
+  5. 附带：工位上下文用量进度条 + 「立即压缩」按钮（API 已有）
+- 验收：新建工位不填参数即可用；某工位上下文窗口改 8k 后仅该工位生效；有单测覆盖解析链四级优先。
+
+**T1.2 能力清单 + 管理员引导**（原用户痛点②）
+- 目标：新用户一眼能看到系统能干什么。
+- 要点：
+  1. 后端 `GET /api/capabilities`：从 `ToolRegistry.schemas()` + `RoleSpec` 自动生成工具卡（名称/说明/权限级/所属角色）+ 角色能力矩阵 + 调度格式/回报策略/权限模式速查
+  2. 前端新增「能力」视图（卡片网格 + 角色矩阵）
+  3. 管理员会话：首条消息带能力菜单；识别"你能做什么"类问题返回能力目录（复用同一数据源）
+  4. 新增工具自动上架（禁止手写第二份清单——会漂移）
+- 验收：注册新工具后能力页自动出现；QQ 问"你能做什么"返回能力目录。
+
+**T1.3 UI"按钮不显示"复现**（原 P0-2.1，阻塞项）
+- 按原 2.1 的 6 步排查清单在浏览器复现（Console 报错 / 304 缓存 / 登录遮罩 / 逐视图截图 / script 顺序 / 响应式隐藏）。
+- 验收：修复前后截图 + Console 报错文本；`python scripts/audit_ui.py --strict` 通过。
+
+**T1.4 前端工程化补强**（决策 2 的配套，可穿插）
+- JSDoc 类型注解 + `tsc --noEmit` 检查 + ESLint；静态资源加 `?v=<__version__>` 指纹。
+- 验收：tsc 零错误；升级后无需强刷即见新 UI。
+
+**T1.5 文档一致性**（原 P2 小件，穿插）
+- `docs/ARCHITECTURE.md` 的 aiosqlite→stdlib sqlite3、版本号统一为 0.3.1+。
+
+### Batch 2｜SSE + 股东仪表盘（约 2 周）
+
+**T2.1 SSE 事件通道**（原 P0-2.4）
+- `GET /api/events`（SSE，鉴权头）：订阅进程内 EventBus，先推四类：工位状态 / 任务运行 / 限速 / 升级进度。
+- 前端 EventSource + 指数退避重连。
+- 验收：派活后 1 秒内看到 idle→running→idle，无需刷新。
+
+**T2.2 通知最小集**（决策 4）
+- 待决事项合并通知（"有 3 件事等您拍板"）+ 重大异常告警（连败暂停/服务故障/资源告警）；
+  明确**不做**日报/周报。推送通道走 notify 插件（gateway→QQ）。
+- 验收：产生 3 个待决事项只推 1 条合并通知；任务连败暂停必有告警。
+
+**T2.3 待决事项队列**（股东模式核心）
+- `pending_decisions` 表（类型：审批/提问/选择；状态：open/answered/declined/expired）+ 默认超时策略（如 24h 未答按配置默认走，不卡死任务）。
+- 面板「待决」视图 + QQ 快捷回复入口；`ask_user` 改造为写队列（原 P1-3.4 的前半）。
+- 验收：员工提问进入队列，QQ/面板答复后回填工位上下文；超时任务按默认策略继续。
+
+**T2.4 账本页（用量/成本）**（原 P1-3.2 升格）
+- `messages.tokens` 落库（`LLMResponse.usage` 已拿到）；账本视图：按工位/按天的 token 消耗、成本估算（可配单价）、任务产出、成功率。
+- 验收：账本数字与 messages.tokens 求和一致；成本估算随单价配置变动。
+
+**T2.5 流式输出**（原 P1-3.1）
+- `llm/provider.py` 加 `stream_chat()` 端口；openai_compat 实现 `stream=True`；SSE 透传对话打字机（管理员对话 + 工位会话流）。
+- 验收：控制台对话逐字出现；FakeLLM 契约测试 + 真实 provider 契约测试各一份。
+
+**T2.6 工具调用显示工具名**（原 P0-2.2）
+- messages DTO 带 `tool_name`/`tool_call_id`；`renderToolCard(name, args, result)` 显式接收；展示工具名徽章/参数/耗时/状态，可折叠。
+- 验收：会话流工具气泡显示真实工具名（`window_create`/`shell`/…）。
+
+**T2.7 run_now 落 run 记录**（原 P1-3.3）：手动触发与调度路径统一走"执行+落 job_runs"。
+**T2.8 限速状态接通**（原 P1-3.9）：`RateLimitWaiting` 按接口抛出状态事件，接 SSE 通道，替换字符串匹配。
+
+### Batch 3｜共享工作频道（群组协作）（约 2 周）— 兑现原设计承诺
+
+**T3.1 群组数据模型**
+- `groups(id, name, goal)` + `group_members(group_id, window_id, role)` + `messages` 加 `group_id`；
+  迁移走 `_MIGRATIONS`；`windows.group_id` 预留字段启用。
+
+**T3.2 群组任务流**
+- `task_create(group_id=...)` → 组员按分工/轮序在**共享上下文**接力执行 → 中间产出进群组频道 → 指定组长收尾汇总。
+- 会话组装 = 共享频道上下文 + 组员私有记忆；压缩按共享上下文整体做（阈值用 T1.1 的组级参数）。
+- **权限：取组员中最严模式**（安全优先）。
+
+**T3.3 群组 UI**
+- 群组视图：成员卡（各员工状态）+ 共享频道时间线 + 组任务 + 「汇总报告」输出区。
+
+**T3.4 并发治理**
+- `drop_messages` 竞争修复（原 P2）：组内多成员并行写共享上下文，改为按 id 游标软删除或加锁。
+
+- 验收：建组→派组任务→组员接力产出→组长汇总报告，全程控制台可演示；组任务的审批按最严模式拦截有效。
+
+### Batch 4｜审批回路 + 托管代审（约 1.5 周）
+
+**T4.1 高危命令审批流**（原 P1-3.4 后半）
+- 危险命令 → 写待决队列（T2.3）→ QQ 推送"批不批" → 批准/拒绝 → 批准入放行清单 + 审计。
+- 验收：审批闭环全程可演示；拒绝后任务安全降级（不执行该动作）。
+
+**T4.2 ELEVATED 信任级**
+- 权限模式增加 ELEVATED：经逐条批准的动作进入**工位级放行清单**（带次数/有效期），夜间定时任务可跑高危动作。
+- 验收：批准过的动作再次执行不再询问（或按次数衰减），清单面板可见可撤。
+
+**T4.3 托管代审**（决策 7，三道保险见 §1.2）
+- 托管模式开关（per 用户）；独立审查 agent（独立提示词+独立会话+可配专用 profile）；保守默认策略；升级人工通道。
+- 验收：托管下代审全程留痕可追认；不可逆动作必被拦或升级；一键关闭生效。
+
+**T4.4 审计强化**（原 P2）
+- 审计视图补 actor/action/时间过滤 + 导出 + 工位完整执行时间线；代审记录高亮。
+
+### Batch 5｜MCP 接入（约 1 周）
+
+**T5.1 MCP bridge**：按 Tool 协议适配 MCP client（stdio + SSE 传输），`registry.register()` 挂载；管理员/员工可分别配置启用。
+**T5.2 权限映射**：每个 MCP server/工具的权限级别显式配置，**默认 read 从紧**（§1.3）。
+**T5.3 能力上架**：MCP 工具自动进 T1.2 能力清单。
+- 验收：接一个真实 MCP server（如 filesystem）工具可用；权限按配置拦截有效；能力清单自动出现。
+
+### Batch 6｜纠错与架构加固（约 3 天，范围待拍板）
+
+> 2026-10-14 立项。现状：纠错是"回传式"（工具失败文本给 LLM 看）+ LLM 层 RetryPolicy，缺兜底层。
+> **范围待用户拍板**：A = 全做（A1+C1~C5）/ B = 只做 A1+C1+C2 / C = 自定。先做 A1（其余的地基）。
+
+**A1 错误分类体系（地基，1 天）**：建 `dogbuddy/errors.py` 统一异常分类
+（Transient 瞬态 / Permanent 永久 / PolicyDenied 策略拒绝 / ToolFailure 工具失败），每类映射标准处置
+（重试 / 停 / 问人 / 降级）；收敛全库 20+ 处裸 `except Exception`；`llm/retry.RetryPolicy` 复用到
+工具执行层（仅幂等工具重试）。
+- 验收：分类有测试；LLM 契约测试（tests/test_llm_provider_contract.py）不回归。
+
+**C1 LLM 瞬态失败续跑（0.5 天）**：loop 层 LLM 调用失败不再直接 `break`——瞬态错误
+（超时/5xx/连接）按 RetryPolicy 续跑 N 次，永久错误（认证/4xx）才停。
+**C2 死循环检测（0.5 天）**：同签名 tool_call（name+args 哈希）连续失败 3 次 → 拒执行并注入
+"该路径已失败 3 次，换策略"提示，防烧 token 到 max_iterations。
+**C3 坏参数容错（0.5 天）**：LLM 传的工具参数 JSON/schema 校验失败 → 错误回传让模型自改
+（与工具失败同路），不直接抛。
+**C4 max_iterations 降级（0.5 天）**：到顶不再硬截断，自动总结"做到哪了+卡在哪"存入任务记录
+（AgentResult.stop_reason 已有该分支，补总结产出）。
+**C5 孤儿任务清扫（0.5 天）**：服务启动时把 in-flight 悬挂任务（卡 running）标 failed+原因，
+防崩溃重启后无人收尸。
+- 验收（C1~C5）：每项配专项测试（LLM 瞬态 stub、重复调用注入、坏参数注入、超限触发、
+  崩溃恢复模拟）；187+ 测试全绿不回归。
+- **明确不做**：多步任务补偿回滚（sagas）——个人服务器场景副作用轻，不做。
+
+### Batch 7｜工作区划分重构：项目层（约 1 周，2026-10-14 拍板 A+D1+D2）
+
+> 拍板结论：采用**项目层**方案（A）。现状"工位=目录"一对一硬隔离的三个缺口：
+> ①群组无共享工作区（协作靠消息抄）②无"项目"概念（多工位干同一活被迫割裂）
+> ③shell 有逃逸缝（文件工具锁死，但 shell `cd /` 就绕过）。
+> 目标划分：**项目=根目录+默认参数**，工位挂载项目（可带子目录），群组挂项目。
+
+**T7.1 projects 表 + 迁移 v5**：`projects(id, name, root_path, params_json, created_at)`；
+`windows` 加 `project_id`（+ `subdir` 子目录，可空）；`groups` 加 `project_id`。
+兼容旧库：迁移时把已有 `workspace_path` 自动包一层项目（一目录一项目），数据无痛。
+**T7.2 挂载解析与参数链**：`ToolContext.workspace` = 项目根 + 工位 `subdir`；文件工具边界
+改项目根（工位带 subdir 时锁 subdir）；工位参数解析链延长为
+**项目 params → 工位 params → 绑定 profile → active profile → 全局**（`effective_params` 加项目层，
+`param_sources` 同步显示来源）。
+**T7.3 群组共享工作区**：群组任务跑群组所挂项目的根（成员共享上下文+共享文件）；接力可直接
+引用相对路径；权限仍取最严（沿用 T3.2）。
+**T7.4 D1 补 shell 逃逸缝（必做）**：shell 命令强制锁在工作区内执行（检测 `cd` 越界/绝对路径
+写出界），越界访问必须走 ELEVATED 信任级 + 审批留痕才放行。
+**T7.5 D2 文件管理器边界对齐**：Web 文件管理器浏览根改为**项目维度**（按项目/挂载展示），
+与工具侧边界口径一致（当前浏览根=全局+全部工位目录，越权可见）。
+**T7.6 项目管理 UI**：项目视图（创建项目/挂载工位/挂群组）+ 参数继承链可视化
+（项目→工位→profile，复用 T1.1 的"继承中/已覆盖"展示）。
+- 验收：两工位挂同一项目可互读文件；旧库迁移无痛（迁移测试）；shell 越界被拦且有专项测试；
+  文件管理器只见授权范围；参数继承链四级来源正确；187+ 测试全绿不回归。
+
+### Batch 8｜自动化调度与项目迭代（约 1.5 周，2026-10-14 拍板）
+
+> 拍板：迭代自动档 = **方案 c（三档预设 + 手动覆盖并存）**；追加需求——
+> **大模型限速非常慢时的智能退避**。三组能力，咬合 Batch 3（群组）/ Batch 7（项目层）。
+> 现状底座：`cron/jobs.py` 4 种排程 + 60s tick + `job_runs` + 连续失败 auto_paused；
+> `llm/retry.py` 指数退避（10s→20→…cap 300s，5 次，**不读 Retry-After、无历史记忆**）。
+
+**组一 · 任务自动化（原定 W1/W2/W4）**
+- **T8.1 Agent 自助排期（W1，1 天）**：新增员工可用的 schedule 工具（权限从紧——只能给本工位/
+  本项目排期）；对话里"这事每天做"→自动落成 job。
+- **T8.2 条件任务（W2，1 天）**：job 跑完由 Agent 判定"有事才通知 / 才动作"（条件分支），
+  砍掉无用通知。
+- **T8.3 自调度（W4，0.5 天）**：任务可返回"下次运行时间"覆盖默认 cron，Agent 自决节奏。
+
+**组二 · 能力画像与项目迭代（新增，管理员视角）**
+- **T8.4 能力画像层（1 天）**：`RoleSpec` 扩展**员工画像**（擅长域 / 工具集广度 / 能否独立交付 /
+  是否需审批）；新增**模型能力表**（速度档 / 上下文窗口 / 是否支持工具调用 / 成本档 / 擅长推理or代码），
+  内置常见模型（GPT/Claude/Qwen/DeepSeek/Ollama 本地）+ 管理员可改。
+- **T8.5 项目迭代计划（1.5 天）**：项目级配置 `{目标, 参与工位, 迭代模式(保守/标准/激进)}`；
+  系统据能力画像（T8.4）自动推**迭代速度**与**迭代次数**，**三档预设 + 手动覆盖并存**（方案 c）。
+  停止条件：达成目标 / 无进展 N 轮 / 次数上限（**预算上限预留为可选字段**）。
+- **T8.6 迭代执行器（项目调度器，1 天）**：到点把项目团队拉进**共享工作区**跑一轮协作
+  （吃 T3 群组 + T7 项目），轮次 +1、记进展；达停止条件即停并通知；每轮结束由 Agent 汇报进展
+  （复用 T8.3 自调度）。
+
+**组三 · 限速自适应退避（新增，针对"限速非常慢"）**
+- **T8.7 智能退避（1 天）**：`RetryPolicy` 升级——①优先读服务端 `Retry-After` 精确等待
+  （不再瞎猜指数）；②**AIMD 自适应**（连续限速乘性放缓 / 连续成功加性恢复）；③**每 profile 记忆**
+  "上次退避多久才成功"，下次直接从该量级起跳。重度限速允许 `max_interval`/`max_retries` 动态扩展
+  （避免 5 次×5 分钟就放弃）。
+- **T8.8 限速严重度分档 + 联动（0.5 天）**：轻（秒级）原地等 / 重（分钟级）等待 + 放慢迭代节奏 /
+  封禁级（小时级）暂停任务并通知（**区别于 fail 暂停**，沿用 `rate_limit.status` 事件通道）；
+  把"当前限速严重度"喂给 T8.5 迭代速度计算（**模型越慢 → 迭代越慢**，避免排队雪崩）。
+- 验收：限速 stub 测试（读 Retry-After、AIMD 收敛、记忆起跳）；重度限速下项目迭代自动降速；
+  187+ 测试全绿不回归。
+
+### Batch 9｜角色体系：三层指挥链（约 1.5 周，2026-10-14 拍板）
+
+> 落地 `ROLES.md`（角色职能）+ `ARCHITECTURE-v2-ROLES.md`（架构 v2）。
+> 核心：**主管 = 装了管理工具的工位（scope=项目）**；管理工具统一化；汇报逐级收敛。
+
+**T9.1 角色与作用域底座（0.5 天）**
+- `agents/core/roles.py`：新增 `supervisor` RoleSpec；RoleSpec 增 `scope_level` / `capability` 字段。
+- `agents/core/scope.py`（新）：`Scope` 值对象 + `ScopeResolver`（角色/工位 → Scope）。
+- `agents/core/permissions.py`：Gate 增**作用域维度**，**fail-closed**（未声明/越界一律拒绝）。
+
+**T9.2 管理工具统一化（0.5 天，重构）**
+- `agents/admin/tools.py` → `agents/management/tools.py`，每工具声明 `required_scope`（project|system）。
+- `admin` 角色改为「引用 management 工具集 + system 装配」——**管理员行为逐位不变**（回归保障）。
+- 验收：管理员功能零回归；主管装配出的工具集**不含** system 级工具（config/self_update/账号）。
+
+**T9.3 主管角色装配（0.5 天）**
+- `agents/supervisor/`（新）：主管工具集 = 员工工具 + scoped 管理工具（window_/task_/group_/context_ 限本项目）。
+- 主管工位 `workspace` = 项目根；管多项目时指令按 `project` 分段防止上下文串味。
+
+**T9.4 指挥链服务 supervision_service（1 天）**
+- 四向事件：`supervisor.command`（管理员→主管）/ `worker.report`（员工→主管）/
+  `supervisor.digest`（主管→管理员）/ `project.iteration.step`。
+- 寻址：`project_id → projects.owner_supervisor_id → 主管工位`；**无主管时退化直连管理员**。
+- `report_service` 改造为逐级路由（无 project_id 事件走原直连路径，行为不变）。
+
+**T9.5 数据与 API（0.5 天）**
+- 迁移：`projects` / `windows.project_id` / `groups.project_id` / `admins`（多管理员实体化）。
+- L1：`routes/projects.py`、`routes/iterations.py`；`auth` 支持多管理员账号（可选）。
+- 项目记忆 `memory/projects/<id>.md`（主管读写，员工只读）。
+
+**T9.6 对既有批次的修正（同步生效）**
+- Batch 4 审批：路由改**逐级**（员工→主管→管理员；不可逆动作升级管理员）。
+- Batch 7 项目：owner = **主管**（非管理员）。
+- Batch 8 迭代：执行者 = **主管**。
+
+- 验收：主管能派活给本项目员工并收回报；**主管改他人工位必须失败**（越权专项测试）；
+  管理员功能零回归；无主管场景退化直连正常；187+ 测试全绿不回归。
+
+### 后置 / 暂不做（明确不做，避免接手者发散）
+
+| 项 | 原因 |
+|---|---|
+| skills 技能系统（原 P1-3.5） | 决策 6：等有 3 个以上真实复用场景再定格式，不做空壳 |
+| 多用户/多租户（原 P1-3.8） | 决策 5：暂不做；`whitelist.role` 字段保留 |
+| 多模态输入（原 P1-3.10） | 后置；等 vision 模型成为刚需 |
+| 前端框架迁移 | 决策 2：不做；tsc 检查足够 |
+| 主从编排 / 自由多智能体会话 | 决策 10：共享频道先行，看效果再议 |
+| 日报/周报类内容汇报 | 决策 4：明确不做（通知最小集除外） |
+
+### 误报澄清（原缺陷清单中不成立的项）
+
+- **原 P1-3.6 "员工工具包是空壳"：误报。** `agents/worker_programmer/tools.py` 是刻意的薄装配层：
+  工具全量注册于 `tools/registry.build_registry()`，角色工具集经 `RoleSpec.tool_names` 在 AgentLoop
+  的 schema 层过滤。非缺陷；顺手把 `spec` 变量用起来或删掉未使用警告即可。
+
+---
+
+## 3. 原缺陷清单 → 批次映射（保底：不丢任何欠账）
+
+| 原编号 | 内容 | 归宿 |
+|---|---|---|
+| P0-2.1 | UI 按钮不显示 | Batch 1 · T1.3 |
+| P0-2.2 | 工具名不显示 | Batch 2 · T2.6 |
+| P0-2.3 | 工位参数调不了 | Batch 1 · T1.1 |
+| P0-2.4 | 状态不实时 | Batch 2 · T2.1 |
+| P1-3.1 | 无流式输出 | Batch 2 · T2.5 |
+| P1-3.2 | 无 token/成本统计 | Batch 2 · T2.4 |
+| P1-3.3 | run_now 不落记录 | Batch 2 · T2.7 |
+| P1-3.4 | ask_user 不闭环 | Batch 2 · T2.3（队列）+ Batch 4 · T4.1（审批） |
+| P1-3.5 | skills 空壳 | 后置 |
+| P1-3.6 | 员工工具包空壳 | 误报（见上） |
+| P1-3.7 | MCP 未实现 | Batch 5 |
+| P1-3.8 | 单用户模型 | 暂不做 |
+| P1-3.9 | RateLimitWaiting 死码 | Batch 2 · T2.8 |
+| P1-3.10 | 多模态 | 后置 |
+| P2 前端构建化 | → 决策 2 改为 tsc 补强 | Batch 1 · T1.4 |
+| P2 文档不一致 | | Batch 1 · T1.5 |
+| P2 测试可移植性 | | 各 Batch DoD 顺带 |
+| P2 drop_messages 竞争 | | Batch 3 · T3.4 |
+| P2 审计可观测 | | Batch 4 · T4.4 |
+
+---
+
+## 4. 现状：已经做完的事（不要重复修）
 
 以下缺陷在原基线里存在，**均已修复并有测试覆盖**，接手时不要"重新发现"一遍：
 
@@ -98,223 +422,28 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 
 ---
 
-## 2. P0 — 用户明确反馈的问题（优先修）
+## 5. 全局验收标准（Definition of Done，适用于所有提交）
 
-### 2.1 【UI】"按钮不显示" —— 需要视觉复现（静态样式/图标缺失已被排除）
-
-**先说结论：我没有复现出来，原因不在静态标记或 CSS。**
-
-已做的静态审计（脚本已入库，可随时重跑）：
-
-```bash
-python scripts/audit_ui.py            # 报告
-python scripts/audit_ui.py --strict   # 有发现则非零退出，可挂 CI
-```
-
-结果：
-
-```
-[CSS] 静态使用 244 个 class，其中 3 个没有定义
-    ★ .chat-time   ★ .jobs-table   ★ .modal-x
-[图标] 引用 21 个，#ic- 定义 44 个，缺失 0 个
-```
-
-那 3 个未定义的类**经人工核对都是冗余钩子，不会造成任何元素不可见**：
-
-| class | 依赖的已有样式 | 影响 |
-|---|---|---|
-| `modal-x`（`js/ui.js:124/158/192` 弹窗关闭按钮） | `.icon-btn`(`css/base.css:253` 尺寸/边框/悬停齐全) + `.modal-head`(`base.css:478` 已是 `flex` + `space-between`) | 无 |
-| `jobs-table`（`index.html:207` 任务表） | `.table`(`base.css:383`) + `.th-actions`(`base.css:399`) | 无 |
-| `chat-time`（`js/views-chat.js` 时间戳） | `.chat-meta` | 无 |
-
-图标引用 21 个、定义 44 个、**缺失 0** → 所有图标按钮都能渲染。
-
-**因此请按下面的清单在浏览器里复现并定位**（这是外包接手的第一件事）：
-
-1. 打开页面 → `F12` → **Console**：任何视图抛 JS 异常，都会导致该视图后续 DOM 不再渲染。
-   这是最可能的原因，请把报错原文记下来。
-2. **Network**：确认 `/assets/js/*.js`、`/assets/css/*.css` 返回 200 而不是 304 缓存了旧版本
-   （升级后前端文件同名，浏览器缓存很容易导致"新版后端 + 旧版前端"）。**先 Ctrl+Shift+R 强刷一次**。
-3. 确认已登录：未登录时是 `login-mask` 覆盖层，页面元素看起来像"消失"。
-4. **逐视图截图**：总览 / 对话 / 工位 / 任务 / 文件管理器 / 日志审计 / 设置 —— 记录哪几个视图正常、哪几个异常。
-5. 若某视图整体空白：检查 `js/app.js` 的 `renderView()` 里对应 `case` 分支，
-   以及 `global.DogBuddyViews.X` 是否存在（`index.html` 底部的 `<script>` 顺序错了会让 `X` 为 `undefined`，
-   新增视图模块必须排在 `app.js` **之前**）。
-6. 窄窗口下是否被 `css/views.css` 末尾的响应式规则隐藏。
-
-**验收**：修复前后各一张截图 + Console 报错文本；`python scripts/audit_ui.py --strict` 通过。
-
-> 顺带建议：控制台的静态资源没有版本指纹（`/assets/js/app.js` 永远是同一个 URL）。
-> 建议加 `?v=<__version__>` 或改成长缓存 + hash 文件名，从根上消除"升级后 UI 看着没变"的假象。
-
-### 2.2 【UI】工具调用不显示工具名
-
-**现象**：工位会话流里，工具调用气泡永远显示"工具调用 tool"，看不到实际调用了哪个工具。
-
-**根因（已定位）**：
-- 后端**已经存了**工具名：`dogbuddy/agents/core/loop.py:87-89` 写入 `role="tool"` 的消息，
-  `meta={"tool_call_id": tc.id, "tool_name": tc.name}`（`messages.meta_json` 字段）。
-- 前端**没有读 meta**：`dogbuddy/web/static/js/views-main.js` 的 `renderMessages()` 里
-  `Windows.renderToolCard(m.content)` 只传了 `content`（工具输出文本），
-  而 `renderToolCard` 只能用 `JSON.parse(content)` 去"猜"工具名——真实工具返回的是纯文本
-  （例如 `(todo list is empty)`、`ls` 输出），解析失败 → 永远回落到默认值 `'tool'`。
-
-**修法**：
-1. `GET /api/windows/{id}/messages`（`web/routes/windows.py`）的 DTO 增加 `tool_name` / `tool_call_id`
-   （从 `Message.meta` 读）。
-2. `renderToolCard(name, args, result)` 改为显式接收工具名与参数，不再靠 JSON 猜。
-3. 建议同时展示：工具名徽章、参数（截断）、耗时、成功/失败状态。可折叠。
-
-**验收**：会话流里每个工具气泡显示真实工具名（如 `window_create`、`shell`、`todo_add`）。
-
-### 2.3 【功能】工位级参数调不了（"工位调不了上下文"）
-
-**现状**：工位详情只有三个动作按钮——`压缩` / `注入` / `重置`
-（`views-main.js:392-394`，对应 `POST /api/windows/{id}/context/compress|inject|reset`）。
-**没有任何地方能设置这个工位自己的参数。**
-
-**缺口**：`Window` 实体（`dogbuddy/ports.py`）只有
-`id / name / role / workspace_path / model / mode / status / llm_profile / group_id`，
-而以下**全是全局配置**（`config.py: LLMConfig`），工位级无法覆盖：
-
-| 参数 | 现在的位置 | 需要的语义 |
-|---|---|---|
-| `max_context_tokens` 上下文窗口 | `config.llm.max_context_tokens` | 工位可覆盖 |
-| `compact_threshold` 压缩阈值 | `config.llm.compact_threshold` | 工位可覆盖 |
-| `temperature` | `config.llm.temperature` | 工位可覆盖 |
-| `request_timeout` | `config.llm.request_timeout` | 工位可覆盖 |
-| `max_iterations` 单轮工具调用上限 | `WindowManager(max_iterations=25)` 全局 | 工位可覆盖 |
-| 限速重试策略 `retry.*` | `config.llm.retry` | 工位/任务可覆盖（可选） |
-
-**修法（建议）**：
-1. `Window` 增加可选覆盖字段（用 `""`/`None` 表示继承，与 `model` 的语义保持一致）。
-2. 在 `AppConfig` 增加 `effective_*(window)` 系列的解析函数，**保持"单一解析规则"**
-   （参考已有的 `AppConfig.effective_model()`，不要在前端另写一套）。
-3. `WindowManager` 的 `_compactor_for()` / `_execute()` 改用解析后的值。
-4. 前端：工位详情的「模型 / 模式」弹窗扩成「工位设置」标签页，每个字段显示
-   `继承中（当前 xxx）` 或 `已覆盖`，并提供"恢复继承"按钮。**默认必须是继承**，
-   不要让用户为了跑起来而逐个填。
-5. DB 迁移：加列走 `dogbuddy/db.py` 的 `_MIGRATIONS` + `SCHEMA_VERSION`，不要手改表。
-
-**验收**：新建工位不填任何参数即可正常工作；把某个工位的上下文窗口改成 8k 并触发压缩后，
-只有该工位按 8k 生效，其它工位不受影响；有对应单测。
-
-### 2.4 【体验】控制台状态不实时
-
-**现状**：无 WebSocket / SSE。前端靠轮询（`app.js: refreshStatus`），工位运行状态、
-限速徽章、任务进度都有延迟。`window.status` 等事件只在进程内 `EventBus` 流转，不推给浏览器。
-
-**修法**：加一条 `WS /api/events`（或 SSE），把 `EventBus` 的事件推给控制台；
-先做"工位状态 + 任务运行 + 限速 + 升级进度"四类即可。
-
-**验收**：派活后控制台 1 秒内看到工位从 idle → running → idle，无需刷新。
+1. `python -m pytest -q` 全绿；新增功能必须有测试（LLM 相关必须对着真实 provider 契约测）
+2. 配置改动走 `persist_config()`；DB 改动走 `_MIGRATIONS + SCHEMA_VERSION`
+3. 自更新：`manage.py update` 服务器实跑一次，并故意做坏版本验证回滚
+4. UI 改动：手工过 **总览 / 对话 / 工位 / 任务 / 文件管理器 / 日志审计 / 设置** 七个视图（Batch 1 后加「能力」视图）
+5. 提交信息写清"改了什么+为什么"，并 bump `dogbuddy/__init__.py: __version__`
+6. LLM 相关：FakeLLM 测试与真实契约测试**成对**提交
 
 ---
 
-## 3. P1 — 核心能力缺口
+## 6. 已知坑（影响执行，开工前读完）
 
-| # | 缺口 | 位置 / 现状 | 建议 |
-|---|---|---|---|
-| 3.1 | **无流式输出** | `llm/openai_compat.py: text_chat()` 是非流式的（V1 设计如此）；`AgentLoop` 一次性拿完整回复 | 控制台聊天体验差的主因。加 `stream=True` + SSE，把 delta 推给前端；`llm/provider.py` 加 `stream_chat()` 端口 |
-| 3.2 | **无 token / 成本统计** | `messages.tokens` 字段恒为 0；`LLMResponse.usage` 拿到了但没人落库 | 把 usage 写入 `messages.tokens`，控制台加"本工位/全局消耗"面板 |
-| 3.3 | **手动 run_now 不写 job_runs** | `services/job_manager.py` 的 `run_now` 直接投递队列；只有 `cron/scheduler.py` 的调度路径写 `job_runs` | 统一走同一条"执行 + 落 run 记录"的路径，否则"任务运行记录"里看不到手动触发的执行 |
-| 3.4 | **`ask_user` 不阻塞、确认回路缺失** | `tools/ask_user.py:41` 恒返回 `answered=False`，靠人工 `context_inject` 回填 | 需要：请求 → 事件 → 用户答复 → 回填同一轮对话；含超时与拒绝语义；危险命令的 IM 确认要走同一条链路 |
-| 3.5 | **`skills/` 是空壳** | `dogbuddy/skills.py: load_skills()` 永远 `return []` | 实现目录扫描 + 加载钩子（`/var/lib/dogbuddy/skills/`） |
-| 3.6 | **员工工具包是空壳** | `agents/worker_programmer/tools.py` 只有 20 行，`spec` 变量未使用 | 真正装配程序员角色的工具集（当前只是转调 `build_registry()`） |
-| 3.7 | **MCP 未实现** | 设计文档留了接口，代码没有 | 按 `ToolRegistry` 的 Tool 协议接 MCP server；管理员/员工分别配置 |
-| 3.8 | **单用户模型** | `whitelist` 表有 `role` 字段但无实际权限分级 | 多用户 / 多角色（owner/admin/viewer）、工位归属与隔离 |
-| 3.9 | **`RateLimitWaiting` 是死码** | `llm/retry.py:28` 定义后无人抛出；前端只能靠字符串匹配 `"rate limited"` 判断限速 | 按接口设计向上抛状态事件，接 3.1 的事件通道 |
-| 3.10 | **无图片/文件多模态输入** | `MessageEvent.attachments` 字段存在但无人处理 | IM 与控制台都应能发图给模型（需 provider 侧支持 vision） |
-
----
-
-## 4. P2 — 工程与体验
-
-- **前端是零构建的原生 JS**（`web/static/js/*.js` 共 ~150KB，全局 `DogBuddyViews`/`UI`/`API` 三个命名空间）。
-  当前能跑，但状态管理、组件复用、类型安全都缺。**建议迁移到构建化前端**（Vite + 任一框架），
-  或者至少引入模块化 + 类型检查，否则 UI 类缺陷会持续出现。
-- **文档与实现不一致**：`docs/ARCHITECTURE.md` 仍写着 `aiosqlite`（实际用 stdlib `sqlite3`）、
-  版本号 v1.0，而代码是 0.3.1。请统一。
-- **测试可移植性**：已修 `tests/test_tools.py` 的 POSIX `sleep`；`pytest.ini` 建议补 `asyncio_mode`
-  并按需清理 `asyncio.get_event_loop()` 弃用告警。
-- **`windows/session.py` 的 `drop_messages` 语义**：`reset()` 依赖"删除到最后一条"，
-  在并发派活时可能与新消息竞争，建议加锁或改为软删除。
-- **审计与可观测性**：`audit_log` 有表有写，但控制台只做了基础展示；建议补
-  按 actor/action/时间过滤、导出、以及"每个工位的完整执行时间线"。
-
----
-
-## 5. 同类软件能力对照（用户反馈"差得很远"）
-
-下面是**能力维度**对照，不是具体产品的功能声明。左侧是 DogBuddyCn 现状：
-
-| 维度 | DogBuddyCn | 成熟同类（Agent 面板 / 编排平台）通常具备 |
-|---|---|---|
-| 实时输出 | ❌ 非流式、轮询 | ✅ token 级流式 + SSE/WS |
-| 工具调用可视化 | ⚠️ 有气泡但**不显示工具名**（见 2.2） | ✅ 工具名 / 参数 / 结果 / 耗时 / 折叠 / 重试 |
-| 参数可调 | ⚠️ 多数参数只有全局 | ✅ 会话级、Agent 级、模型级多层覆盖 |
-| 上下文管理 | ⚠️ 只有"压缩/注入/重置"三个按钮 | ✅ 窗口大小、阈值、摘要策略可视可调、token 用量实时显示 |
-| 成本/用量 | ❌ 无 | ✅ 按会话/按模型统计 |
-| 多 Agent 编排 | ⚠️ 固定两角色 + 单串行队列 | ✅ 自定义角色、并行、DAG/流程编排 |
-| 插件生态 | ❌ 无（MCP/skills 未实现） | ✅ MCP / 插件市场 / 自定义工具热加载 |
-| 多用户与权限 | ❌ 单用户 | ✅ 账号、角色、资源隔离 |
-| 文件与工作区 | ⚠️ 有文件管理器，功能基础 | ✅ 在线编辑、diff、预览、版本对比 |
-| 消息平台覆盖 | ⚠️ 只有 OneBot v11 | ✅ Telegram / Discord / 飞书 / 企微 / Web 多端 |
-| 可观测与审计 | ⚠️ 有表，展示弱 | ✅ 全链路 trace、日志检索、告警 |
-
-**结论**：骨架（五层架构、工位会话模型、抗损压缩、权限三模式、限速退避、自更新）是扎实的，
-差距集中在 **实时交互层（流式 + 事件推送）** 和 **产品化层（参数可视化、用量、插件、多用户）**。
-
----
-
-## 6. 验收标准（Definition of Done）
-
-任何提交必须满足：
-
-1. `python -m pytest -q` 全绿；新增功能必须有测试（**LLM 相关必须对着真实 provider 契约测，不要只测 FakeLLM**）。
-2. 涉及配置/DB 的改动：改配置走 `persist_config()`；改表走 `_MIGRATIONS` + `SCHEMA_VERSION`。
-3. 涉及自更新的改动：`manage.py update` 在服务器上实跑一次，确认「升级成功 → `/healthz` 版本正确」，
-   并用一个**故意做坏的版本**验证自动回滚。
-4. UI 改动：至少手工过一遍 `总览 / 对话 / 工位 / 任务 / 文件管理器 / 日志审计 / 设置` 七个视图，
-   确认没有"元素存在但不可见/无样式"的情况（可用本文 2.1 的 class 差集脚本自查）。
-5. 提交信息写清"改了什么 + 为什么"，并且 **bump `dogbuddy/__init__.py: __version__`**
-   （自更新靠它断言版本）。
-
----
-
-## 7. 已知坑（踩过的）
-
-1. **`FakeLLM` 与真实 provider 契约不一致** → 三个致命 bug 曾长期潜伏，见第 1 节末。
-2. **PRoot 无 systemd**：不要写 systemd-only 的部署逻辑；进程重启依赖面板托管或 `DOGBUDDY_RESTART_CMD`。
-3. **面板的 `/api/panel/apps/{id}/restart` 只认会话 Cookie，不认 Agent 令牌**（会 401）。
-   这也是 `manage.py` 里"终止被托管进程等守护拉起"这条路径存在的原因。
-4. **离线 wheels 陷阱**：`wheels/` 存在时 pip 会走 `--no-index`；依赖升级后必须重新打包，
-   或依赖 `_pip_install` 的联网回退（已实现）。
-5. **升级期间进程会重启**：任何长任务（派活、LLM 调用）都可能被打断，设计时要有幂等与恢复。
-6. **`save_config` 不会把 env 注入的密钥写回文件**（有意设计）；如果发现"设了 key 但文件里没有"，
-   检查是不是 `DOGBUDDY_*` 环境变量在起作用。
-7. **`Window.model` 与 `Window.llm_profile` 是两套覆盖机制**，解析顺序见
-   `AppConfig.effective_model()`，不要在前端另写一套判断。
-8. **GitHub 的匿名 HTTPS 在本机链路上不可靠**：实测 `git fetch https://github.com/...` 会被
-   `GnuTLS recv error (-110)` 中断（GitHub API / 网页有时又通），而 **SSH（deploy key，22 端口）稳定**。
-   所以线上 `origin` 配的是 SSH，`manage.py update` 里也对 fetch 做了一次重试。
-   如果外包环境能稳定访问 GitHub，可改回 HTTPS。
-9. **升级后的前端缓存**：静态资源 URL 没有版本指纹，浏览器可能继续用旧 JS/CSS，
-   表现为"代码升了但界面没变"。排查 UI 问题前先 Ctrl+Shift+R（详见 2.1）。
-10. **新增工具必须同步角色白名单**（本项目最容易漏的一步）：把工具注册进 `ToolRegistry` **不代表模型能用**——
-    `AgentLoop` 用 `tool_names=role_spec.tool_names` 过滤，所以还必须加进
-   `agents/core/roles.py` 的 `ADMIN_TOOLS` 或 `WORKER_PROGRAMMER_TOOLS`。
-   实例：`self_version` / `self_update` 就漏了这一步，结果是要求管理员"升级你自己"时，
-   它看不到升级工具，只好把任务派给员工工位（员工既没有部署上下文、也无法重启服务）。
-   现在有不变量测试守着：`tests/test_self_upgrade_tool.py::test_admin_role_exposes_every_registered_tool`，
-   **新增工具后跑一次，不一致会直接失败**。
-
----
-
-## 8. 建议的迭代顺序
-
-1. **P0 全部**（2.1 样式缺失 → 2.2 工具名 → 2.3 工位参数 → 2.4 事件推送）
-2. **P1 的 3.1 流式 + 3.2 用量统计 + 3.3 run 记录**（这三项直接决定"好不好用"）
-3. **P1 的 3.4 阻塞式问答/确认回路**（决定"能不能放心无人值守"）
-4. **前端构建化重构**（建议在 1~3 之后做，避免边改边重构）
-5. **P1 的 3.5/3.6/3.7 扩展生态**、**3.8 多用户**（产品化阶段）
+| 坑 | 说明 |
+|---|---|
+| FakeLLM 与真实契约不一致 | 曾致 3 个致命 bug 漏测；见 §4 教训 |
+| PRoot 无 systemd | 面板 restart 只认 Cookie 不认 Agent 令牌（401）；进程由面板常驻应用托管 |
+| 离线 wheels 陷阱 | 目标机无 PyPI 通路，`wheels/` 必须随包 |
+| 升级期间进程重启 | 长任务需幂等；自更新走独立进程（45s 延迟） |
+| `save_config` 不写 env 密钥 | 有意设计（密钥不落盘），改配置时别"修复"它 |
+| `Window.model` 与 `llm_profile` 双机制 | Batch 1 的 T1.1 必须统一进 `effective_*` 解析链，别再加第三套 |
+| GitHub 匿名 HTTPS 不可靠 | 用 SSH deploy key（GnuTLS recv error (-110)） |
+| 升级后前端缓存 | T1.4 的 `?v=` 指纹解决；未解决前 Ctrl+Shift+R |
+| 新增工具必须同步角色白名单 | `ADMIN_TOOLS` / `WORKER_PROGRAMMER_TOOLS`，有不变量测试 `test_self_upgrade_tool.py` 守着 |
+| 本仓库公开 | 凭据绝不入库；面板地址/密码/令牌由 owner 私下提供 |

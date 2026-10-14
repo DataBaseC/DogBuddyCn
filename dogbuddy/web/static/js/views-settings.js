@@ -39,7 +39,12 @@
     load: function () {
       var host = document.getElementById('settings-cards');
       if (host) host.innerHTML = U.skeleton('cards') + U.skeleton('cards');
-      return Promise.all([A.settings.get(), A.whitelist.list()]).then(function (res) {
+      var Approval = (global.DogBuddyViews || {}).Approval;
+      return Promise.all([
+        A.settings.get(),
+        A.whitelist.list(),
+        Approval ? Approval.load() : Promise.resolve()
+      ]).then(function (res) {
         Settings.data = res[0] || {};
         Settings.whitelist = res[1] || [];
         Settings.render();
@@ -54,6 +59,7 @@
       var d = Settings.data || {};
       var llm = d.llm || {}, panel = d.panel || {}, gw = d.gateway || {}, rep = d.report || {};
       var Profiles = (global.DogBuddyViews || {}).Profiles;
+      var Approval = (global.DogBuddyViews || {}).Approval;
       host.innerHTML =
         Settings.cardLLM(llm) +
         (Profiles ? Profiles.cardHTML() : '') +
@@ -62,9 +68,11 @@
         Settings.cardGateway(gw, rep) +
         Settings.cardNotify(d.notify || {}) +
         Settings.cardWhitelist() +
+        (Approval ? Approval.cardHTML() : '') +
         Settings.cardSecurity();
       Settings.bind();
       if (Profiles) Profiles.bind();
+      if (Approval) Approval.bind();
     },
 
     /* ---------- 卡片模板 ---------- */

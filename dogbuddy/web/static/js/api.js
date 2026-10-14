@@ -116,6 +116,8 @@
       create: function (body) { return request('POST', '/api/windows', body); },
       get: function (id) { return request('GET', '/api/windows/' + enc(id)); },
       update: function (id, body) { return request('PATCH', '/api/windows/' + enc(id), body); },
+      /* GET /api/windows/{id}/usage → {context_tokens, max_context_tokens, ratio, threshold, tokens} */
+      usage: function (id) { return request('GET', '/api/windows/' + enc(id) + '/usage'); },
       remove: function (id) { return request('DELETE', '/api/windows/' + enc(id)); },
       pause: function (id) { return request('POST', '/api/windows/' + enc(id) + '/pause'); },
       resume: function (id) { return request('POST', '/api/windows/' + enc(id) + '/resume'); },
@@ -142,6 +144,51 @@
       resume: function (id) { return request('POST', '/api/jobs/' + enc(id) + '/resume'); },
       runNow: function (id) { return request('POST', '/api/jobs/' + enc(id) + '/run_now'); },
       runs: function (id) { return request('GET', '/api/jobs/' + enc(id) + '/runs'); }
+    },
+
+    /* ---------------- 群组（共享工作频道） ---------------- */
+    groups: {
+      /* GET /api/groups → {groups:[{id,name,description,lead_window_id,created_at,
+         updated_at,members:[{window_id,window_name,role,joined_at,exists}]}]} */
+      list: function () { return request('GET', '/api/groups'); },
+      /* POST /api/groups {name,description,lead_window_id} → 群组 DTO */
+      create: function (body) { return request('POST', '/api/groups', body); },
+      /* GET /api/groups/{ref}（ref = 组 id 或组名）→ 群组 DTO */
+      get: function (ref) { return request('GET', '/api/groups/' + enc(ref)); },
+      /* PATCH /api/groups/{ref} {name?,description?,lead_window_id?} */
+      update: function (ref, body) { return request('PATCH', '/api/groups/' + enc(ref), body); },
+      /* DELETE /api/groups/{ref} → {deleted:true} */
+      remove: function (ref) { return request('DELETE', '/api/groups/' + enc(ref)); },
+      /* POST /api/groups/{ref}/members {window,role:"member|lead"} → 群组 DTO */
+      addMember: function (ref, window, role) {
+        return request('POST', '/api/groups/' + enc(ref) + '/members',
+          { window: window, role: role || 'member' });
+      },
+      /* DELETE /api/groups/{ref}/members/{window} → {removed:true} */
+      removeMember: function (ref, window) {
+        return request('DELETE', '/api/groups/' + enc(ref) + '/members/' + enc(window));
+      },
+      /* GET /api/groups/{ref}/channel?limit=100 →
+         {messages:[{id,window_id,window_name,role,content,created_at}]} */
+      channel: function (ref, limit) {
+        return request('GET', '/api/groups/' + enc(ref) + '/channel' + qs({ limit: limit || 100 }));
+      },
+      /* POST /api/groups/{ref}/run {prompt} → {group_id,group_name,
+         steps:[{window_id,window_name,is_lead,ok,summary}],summary}
+         同步等待整组跑完、可能耗时：请求层不设短超时，UI 端置 loading 即可 */
+      run: function (ref, prompt) {
+        return request('POST', '/api/groups/' + enc(ref) + '/run', { prompt: prompt });
+      }
+    },
+
+    /* ---------------- 运行时配置（kv）：approval.* 等 ---------------- */
+    /* 与后端约定：GET /api/config → 配置键值对象（兼容 {config:{...}} 包装）；
+       POST /api/config {key, value} 写单个键（对应后端 ConfigService.set(key,value)） */
+    config: {
+      get: function () { return request('GET', '/api/config'); },
+      set: function (key, value) {
+        return request('POST', '/api/config', { key: key, value: value });
+      }
     },
 
     /* ---------------- 设置 ---------------- */
@@ -237,6 +284,103 @@
       runs: function (limit, windowId) {
         return request('GET', '/api/logs/runs' + qs({ limit: limit || 100, window_id: windowId }));
       }
+    },
+
+    /* ---------------- 待决事项（股东模式） ---------------- */
+    decisions: {
+      /* GET /api/decisions?status=pending|answered|timeout|cancelled|<空=全部>&limit=100
+         注意：status 空串 = 全部，必须显式传 ?status=（后端缺省值是 pending） */
+      list: function (status, limit) {
+        var s = status === undefined || status === null ? 'pending' : status;
+        return request('GET', '/api/decisions?status=' + encodeURIComponent(s) +
+          '&limit=' + (Number(limit) > 0 ? Number(limit) : 100));
+      },
+      /* POST /api/decisions/{id}/answer {"answer": "..."} */
+      answer: function (id, answer) {
+        return request('POST', '/api/decisions/' + enc(id) + '/answer', { answer: answer });
+      },
+      /* POST /api/decisions/{id}/cancel */
+      cancel: function (id) {
+        return request('POST', '/api/decisions/' + enc(id) + '/cancel');
+      },
+      /* POST /api/decisions/sweep → {"expired": [...]} 把过期待决翻成 timeout */
+      sweep: function () {
+        return request('POST', '/api/decisions/sweep');
+      }
+    },
+
+    /* ---------------- 账本（token 用量 / 成本） ---------------- */
+    ledger: {
+      /* GET /api/ledger?days=30 → {since, by_window[], by_day[], total_tokens,
+         total_messages, price_per_1m, total_cost} */
+      get: function (days) {
+        return request('GET', '/api/ledger' + qs({ days: days || 30 }));
+      },
+      /* GET /api/ledger/price → {"price_per_1m": 数字} */
+      price: function () { return request('GET', '/api/ledger/price'); },
+      /* POST /api/ledger/price {"price_per_1m": 数字}（0=只显示 tokens 不算钱） */
+      setPrice: function (pricePer1m) {
+        return request('POST', '/api/ledger/price', { price_per_1m: Number(pricePer1m) || 0 });
+      }
+    },
+
+    /* ---------------- SSE 实时事件（GET /api/events?token=…） ---------------- */
+    /**
+     * 连接 SSE 实时事件流。EventSource 无法带请求头，token 走 query
+     * （与 X-Auth-Token 同值，无鉴权部署留空）。断线（onerror）后指数退避
+     * 重建连接；坏帧（非 JSON / 非对象）静默忽略；回调抛错不影响连接。
+     * @param {(frame: Object) => void} onEvent 每帧 JSON 对象 {type, payload, created_at} 的回调
+     * @returns {{close: () => void}} 连接句柄（close 后不再重连）
+     */
+    events: function (onEvent) {
+      var closed = false;
+      var es = null;
+      var attempt = 0;
+      var timer = null;
+
+      function schedule() {
+        if (closed || timer) return;
+        attempt += 1;
+        var delay = Math.min(30000, 1000 * Math.pow(2, attempt - 1));
+        timer = setTimeout(function () { timer = null; connect(); }, delay);
+      }
+
+      function connect() {
+        if (closed) return;
+        var url = '/api/events' + qs({ token: getToken() });
+        try {
+          es = new EventSource(url);
+        } catch (e) {
+          schedule();
+          return;
+        }
+        es.onopen = function () { attempt = 0; };
+        es.onmessage = function (ev) {
+          if (closed || !ev || typeof ev.data !== 'string') return;
+          var frame = null;
+          try { frame = JSON.parse(ev.data); } catch (e) { return; } /* 坏帧忽略 */
+          if (!frame || typeof frame !== 'object') return;
+          try { onEvent(frame); } catch (e) { /* 回调异常不断连 */ }
+        };
+        es.onerror = function () {
+          if (closed) return;
+          try { es.close(); } catch (e) { /* 忽略 */ }
+          es = null;
+          schedule();
+        };
+      }
+
+      connect();
+      return {
+        close: function () {
+          closed = true;
+          if (timer) { clearTimeout(timer); timer = null; }
+          if (es) {
+            try { es.close(); } catch (e) { /* 忽略 */ }
+            es = null;
+          }
+        }
+      };
     }
   };
 

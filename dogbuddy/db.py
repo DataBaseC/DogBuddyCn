@@ -13,11 +13,12 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .ports import AuditEntry, Compaction, Job, JobRun, Message, Todo, Window
+from .ports import (AuditEntry, Compaction, Group, GroupMember, Job, JobRun,
+                    Message, PendingDecision, Todo, Window)
 
 
 def _now_iso() -> str:
@@ -28,11 +29,12 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS windows(
   id TEXT PRIMARY KEY, name TEXT, role TEXT, workspace_path TEXT, model TEXT,
   mode TEXT DEFAULT 'BUILD', status TEXT DEFAULT 'idle', group_id TEXT,
-  llm_profile TEXT DEFAULT '',
+  llm_profile TEXT DEFAULT '', params_json TEXT DEFAULT '{}',
   created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY AUTOINCREMENT, window_id TEXT, role TEXT, content TEXT,
-  tokens INTEGER DEFAULT 0, created_at TEXT, meta_json TEXT DEFAULT '{}');
+  tokens INTEGER DEFAULT 0, created_at TEXT, meta_json TEXT DEFAULT '{}',
+  group_id TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_messages_window ON messages(window_id, id);
 CREATE TABLE IF NOT EXISTS compactions(
   id INTEGER PRIMARY KEY AUTOINCREMENT, window_id TEXT, summary_json TEXT,
@@ -52,6 +54,19 @@ CREATE TABLE IF NOT EXISTS job_runs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT, window_id TEXT,
   started_at TEXT, finished_at TEXT, status TEXT, summary TEXT, log_path TEXT);
 CREATE INDEX IF NOT EXISTS idx_runs_job ON job_runs(job_id, id);
+CREATE TABLE IF NOT EXISTS pending_decisions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, window_id TEXT, question TEXT,
+  options_json TEXT DEFAULT '[]', answer TEXT DEFAULT '',
+  status TEXT DEFAULT 'pending', source TEXT DEFAULT 'ask_user',
+  created_at TEXT, answered_at TEXT, expires_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_decisions(status, id);
+CREATE TABLE IF NOT EXISTS groups(
+  id TEXT PRIMARY KEY, name TEXT UNIQUE, description TEXT DEFAULT '',
+  lead_window_id TEXT DEFAULT '', created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS group_members(
+  group_id TEXT, window_id TEXT, role TEXT DEFAULT 'member',
+  joined_at TEXT, PRIMARY KEY(group_id, window_id));
+CREATE INDEX IF NOT EXISTS idx_group_members ON group_members(group_id);
 CREATE TABLE IF NOT EXISTS config(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS whitelist(qq_id TEXT PRIMARY KEY, name TEXT,
   role TEXT DEFAULT 'admin');
@@ -66,7 +81,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -86,11 +101,53 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    """Per-window parameter overrides (ROADMAP T1.1): windows.params_json."""
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(windows)").fetchall()}
+    if "params_json" not in existing:
+        conn.execute("ALTER TABLE windows ADD COLUMN params_json TEXT DEFAULT '{}'")
+    conn.commit()
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    """Pending-decision queue (ROADMAP T2.3): the durable ask_user inbox."""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS pending_decisions(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, window_id TEXT, question TEXT,
+      options_json TEXT DEFAULT '[]', answer TEXT DEFAULT '',
+      status TEXT DEFAULT 'pending', source TEXT DEFAULT 'ask_user',
+      created_at TEXT, answered_at TEXT, expires_at TEXT);
+    CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_decisions(status, id);
+    """)
+    conn.commit()
+
+
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    """Shared-work-channel groups (ROADMAP T3.1): groups + members + messages.group_id."""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS groups(
+      id TEXT PRIMARY KEY, name TEXT UNIQUE, description TEXT DEFAULT '',
+      lead_window_id TEXT DEFAULT '', created_at TEXT, updated_at TEXT);
+    CREATE TABLE IF NOT EXISTS group_members(
+      group_id TEXT, window_id TEXT, role TEXT DEFAULT 'member',
+      joined_at TEXT, PRIMARY KEY(group_id, window_id));
+    CREATE INDEX IF NOT EXISTS idx_group_members ON group_members(group_id);
+    """)
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
+    if "group_id" not in existing:
+        conn.execute("ALTER TABLE messages ADD COLUMN group_id TEXT DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, id)")
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
 _MIGRATIONS: dict[int, Any] = {
     1: _ensure_columns,
+    2: _migrate_v2,
+    3: _migrate_v3,
+    4: _migrate_v4,
 }
 
 
@@ -147,10 +204,11 @@ class Database:
         w.updated_at = _now_iso()
         with self._lock:
             self._conn.execute(
-                "INSERT INTO windows(id,name,role,workspace_path,model,mode,status,group_id,llm_profile,created_at,updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO windows(id,name,role,workspace_path,model,mode,status,group_id,llm_profile,params_json,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (w.id, w.name, w.role, w.workspace_path, w.model, w.mode, w.status,
-                 w.group_id, w.llm_profile, w.created_at, w.updated_at))
+                 w.group_id, w.llm_profile, json.dumps(w.params or {}, ensure_ascii=False),
+                 w.created_at, w.updated_at))
             self._conn.commit()
         return w
 
@@ -170,10 +228,13 @@ class Database:
         return [self._to_window(r) for r in rows]
 
     def update_window(self, window_id: str, **fields: Any) -> Window | None:
-        allowed = {"name", "role", "workspace_path", "model", "mode", "status", "group_id", "llm_profile"}
+        allowed = {"name", "role", "workspace_path", "model", "mode", "status", "group_id",
+                   "llm_profile", "params"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return self.get_window(window_id)
+        if "params" in fields:
+            fields["params_json"] = json.dumps(fields.pop("params") or {}, ensure_ascii=False)
         fields["updated_at"] = _now_iso()
         sets = ", ".join(f"{k}=?" for k in fields)
         with self._lock:
@@ -192,25 +253,33 @@ class Database:
 
     @staticmethod
     def _to_window(r: sqlite3.Row) -> Window:
+        keys = r.keys()
+        try:
+            params = json.loads(r["params_json"] or "{}") if "params_json" in keys else {}
+        except (json.JSONDecodeError, TypeError):
+            params = {}
         return Window(id=r["id"], name=r["name"], role=r["role"],
                       workspace_path=r["workspace_path"], model=r["model"],
                       mode=r["mode"], status=r["status"], group_id=r["group_id"],
-                      llm_profile=r["llm_profile"] if "llm_profile" in r.keys() else "",
+                      llm_profile=r["llm_profile"] if "llm_profile" in keys else "",
+                      params=params if isinstance(params, dict) else {},
                       created_at=r["created_at"], updated_at=r["updated_at"])
 
     # ------------------------------------------------------------ messages
     def add_message(self, window_id: str, role: str, content: str, tokens: int = 0,
-                    meta: dict[str, Any] | None = None) -> Message:
+                    meta: dict[str, Any] | None = None, group_id: str = "") -> Message:
         ts = _now_iso()
         meta = meta or {}
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO messages(window_id,role,content,tokens,created_at,meta_json) VALUES(?,?,?,?,?,?)",
-                (window_id, role, content, tokens, ts, json.dumps(meta, ensure_ascii=False)))
+                "INSERT INTO messages(window_id,role,content,tokens,created_at,meta_json,group_id)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (window_id, role, content, tokens, ts, json.dumps(meta, ensure_ascii=False),
+                 group_id or ""))
             self._conn.commit()
             mid = cur.lastrowid
         return Message(id=mid, window_id=window_id, role=role, content=content,
-                       tokens=tokens, created_at=ts, meta=meta)
+                       tokens=tokens, created_at=ts, meta=meta, group_id=group_id or "")
 
     def list_messages(self, window_id: str, limit: int = 200) -> list[Message]:
         with self._lock:
@@ -223,9 +292,11 @@ class Database:
                 meta = json.loads(r["meta_json"] or "{}")
             except (json.JSONDecodeError, TypeError):
                 meta = {}
+            keys = r.keys()
             out.append(Message(id=r["id"], window_id=r["window_id"], role=r["role"],
                                content=r["content"], tokens=r["tokens"],
-                               created_at=r["created_at"], meta=meta))
+                               created_at=r["created_at"], meta=meta,
+                               group_id=r["group_id"] if "group_id" in keys else ""))
         return out
 
     def sum_tokens(self, window_id: str) -> int:
@@ -234,6 +305,28 @@ class Database:
                 "SELECT COALESCE(SUM(tokens),0) AS s FROM messages WHERE window_id=?",
                 (window_id,)).fetchone()
         return int(row["s"])
+
+    def ledger_summary(self, days: int = 30) -> dict[str, Any]:
+        """Token usage grouped by window and by day (ROADMAP T2.4, 账本页)."""
+        since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+        with self._lock:
+            by_window = self._conn.execute(
+                "SELECT window_id, COUNT(*) AS messages, COALESCE(SUM(tokens),0) AS tokens "
+                "FROM messages WHERE created_at >= ? GROUP BY window_id "
+                "ORDER BY tokens DESC", (since,)).fetchall()
+            by_day = self._conn.execute(
+                "SELECT substr(created_at,1,10) AS day, COUNT(*) AS messages, "
+                "COALESCE(SUM(tokens),0) AS tokens FROM messages "
+                "WHERE created_at >= ? GROUP BY day ORDER BY day", (since,)).fetchall()
+        return {
+            "since": since,
+            "by_window": [{"window_id": r["window_id"], "messages": r["messages"],
+                           "tokens": r["tokens"]} for r in by_window],
+            "by_day": [{"day": r["day"], "messages": r["messages"],
+                        "tokens": r["tokens"]} for r in by_day],
+            "total_tokens": sum(r["tokens"] for r in by_window),
+            "total_messages": sum(r["messages"] for r in by_window),
+        }
 
     def delete_messages(self, window_id: str, before_id: int) -> int:
         with self._lock:
@@ -395,6 +488,188 @@ class Database:
                        started_at=r["started_at"], finished_at=r["finished_at"],
                        status=r["status"], summary=r["summary"], log_path=r["log_path"])
                 for r in rows]
+
+    # ------------------------------------------------- pending_decisions (T2.3)
+    @staticmethod
+    def _to_decision(r: sqlite3.Row) -> PendingDecision:
+        try:
+            options = json.loads(r["options_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            options = []
+        return PendingDecision(
+            id=r["id"], window_id=r["window_id"], question=r["question"],
+            options=options if isinstance(options, list) else [],
+            answer=r["answer"] or "", status=r["status"], source=r["source"],
+            created_at=r["created_at"], answered_at=r["answered_at"],
+            expires_at=r["expires_at"])
+
+    def add_pending_decision(self, window_id: str, question: str,
+                             options: list | None = None,
+                             source: str = "ask_user",
+                             expires_at: str | None = None) -> PendingDecision:
+        ts = _now_iso()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO pending_decisions(window_id,question,options_json,"
+                "status,source,created_at,expires_at) VALUES(?,?,?,?,?,?,?)",
+                (window_id, question, json.dumps(options or [], ensure_ascii=False),
+                 "pending", source, ts, expires_at))
+            self._conn.commit()
+            rid = cur.lastrowid
+        return PendingDecision(id=rid, window_id=window_id, question=question,
+                               options=options or [], status="pending",
+                               source=source, created_at=ts, expires_at=expires_at)
+
+    def answer_pending_decision(self, decision_id: int, answer: str,
+                                status: str = "answered") -> PendingDecision | None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE pending_decisions SET answer=?, status=?, answered_at=? WHERE id=?",
+                (answer, status, _now_iso(), decision_id))
+            self._conn.commit()
+        return self.get_pending_decision(decision_id)
+
+    def cancel_pending_decisions(self, window_id: str) -> int:
+        """A fresh ask_user supersedes open ones from the same window."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE pending_decisions SET status='cancelled', answered_at=? "
+                "WHERE window_id=? AND status='pending'", (_now_iso(), window_id))
+            self._conn.commit()
+            return cur.rowcount
+
+    def get_pending_decision(self, decision_id: int) -> PendingDecision | None:
+        with self._lock:
+            r = self._conn.execute("SELECT * FROM pending_decisions WHERE id=?",
+                                   (decision_id,)).fetchone()
+        return self._to_decision(r) if r is not None else None
+
+    def list_pending_decisions(self, status: str | None = None,
+                               limit: int = 100) -> list[PendingDecision]:
+        q = "SELECT * FROM pending_decisions"
+        args: tuple = ()
+        if status:
+            q += " WHERE status=?"
+            args = (status,)
+        q += " ORDER BY id DESC LIMIT ?"
+        with self._lock:
+            rows = self._conn.execute(q, (*args, limit)).fetchall()
+        return [self._to_decision(r) for r in rows]
+
+    def expire_pending_decisions(self, now: str | None = None) -> list[PendingDecision]:
+        """Mark overdue pending decisions as timeout; returns what expired.
+
+        Called by the sweep task — the timeout policy lives in the service layer.
+        """
+        now = now or _now_iso()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM pending_decisions WHERE status='pending' "
+                "AND expires_at IS NOT NULL AND expires_at < ?", (now,)).fetchall()
+            expired = [self._to_decision(r) for r in rows]
+            if expired:
+                self._conn.execute(
+                    "UPDATE pending_decisions SET status='timeout', answered_at=? "
+                    "WHERE status='pending' AND expires_at IS NOT NULL AND expires_at < ?",
+                    (now, now))
+                self._conn.commit()
+        return expired
+
+    # ----------------------------------------------------- groups (T3.1)
+    @staticmethod
+    def _to_group(r: sqlite3.Row) -> Group:
+        return Group(id=r["id"], name=r["name"],
+                     description=r["description"] or "",
+                     lead_window_id=r["lead_window_id"] or "",
+                     created_at=r["created_at"], updated_at=r["updated_at"])
+
+    def insert_group(self, g: Group) -> Group:
+        g.created_at = g.created_at or _now_iso()
+        g.updated_at = _now_iso()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO groups(id,name,description,lead_window_id,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (g.id, g.name, g.description, g.lead_window_id,
+                 g.created_at, g.updated_at))
+            self._conn.commit()
+        return g
+
+    def get_group(self, group_id: str) -> Group | None:
+        with self._lock:
+            r = self._conn.execute("SELECT * FROM groups WHERE id=? OR name=?",
+                                   (group_id, group_id)).fetchone()
+        return self._to_group(r) if r is not None else None
+
+    def list_groups(self) -> list[Group]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM groups ORDER BY name").fetchall()
+        return [self._to_group(r) for r in rows]
+
+    def update_group(self, group_id: str, **fields: Any) -> Group | None:
+        allowed = {"name", "description", "lead_window_id"}
+        fields = {k: v for k, v in fields.items() if k in allowed}
+        if fields:
+            fields["updated_at"] = _now_iso()
+            sets = ", ".join(f"{k}=?" for k in fields)
+            with self._lock:
+                self._conn.execute(f"UPDATE groups SET {sets} WHERE id=?",
+                                   (*fields.values(), group_id))
+                self._conn.commit()
+        return self.get_group(group_id)
+
+    def delete_group(self, group_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM groups WHERE id=?", (group_id,))
+            self._conn.execute("DELETE FROM group_members WHERE group_id=?", (group_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def group_add_member(self, group_id: str, window_id: str,
+                         role: str = "member") -> GroupMember:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO group_members(group_id,window_id,role,joined_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(group_id,window_id) DO UPDATE SET role=excluded.role",
+                (group_id, window_id, role or "member", _now_iso()))
+            self._conn.commit()
+        return GroupMember(group_id=group_id, window_id=window_id, role=role)
+
+    def group_remove_member(self, group_id: str, window_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM group_members WHERE group_id=? AND window_id=?",
+                (group_id, window_id))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def list_group_members(self, group_id: str) -> list[GroupMember]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM group_members WHERE group_id=? ORDER BY joined_at",
+                (group_id,)).fetchall()
+        return [GroupMember(group_id=r["group_id"], window_id=r["window_id"],
+                            role=r["role"], joined_at=r["joined_at"] or "")
+                for r in rows]
+
+    def list_group_messages(self, group_id: str, limit: int = 100) -> list[Message]:
+        """共享频道的最新消息（跨所有成员窗口）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM messages WHERE group_id=? ORDER BY id DESC LIMIT ?",
+                (group_id, limit)).fetchall()
+        out = []
+        for r in reversed(rows):
+            try:
+                meta = json.loads(r["meta_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+            keys = r.keys()
+            out.append(Message(id=r["id"], window_id=r["window_id"], role=r["role"],
+                               content=r["content"], tokens=r["tokens"],
+                               created_at=r["created_at"], meta=meta,
+                               group_id=r["group_id"] if "group_id" in keys else ""))
+        return out
 
     # -------------------------------------------------------------- config
     def get_config(self, key: str, default: Any = None) -> Any:

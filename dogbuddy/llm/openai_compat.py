@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from .provider import LLMResponse, Provider, ToolCall, parse_tool_arguments
+from .provider import LLMResponse, Provider, StreamChunk, ToolCall, parse_tool_arguments
 from .retry import RetryPolicy
 
 logger = logging.getLogger("dogbuddy.llm.openai")
@@ -77,6 +77,110 @@ class OpenAICompatProvider(Provider):
             return self._parse(resp.json())
 
         return await self.retry.call(_call)
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ):
+        """Native SSE streaming (ROADMAP T2.5): text deltas as they arrive.
+
+        Tool-call arguments arrive as fragments across chunks keyed by index;
+        we assemble them and deliver complete ToolCalls in the final chunk.
+        On any stream-level failure this degrades to the non-streaming turn so
+        the run never dies mid-typing.
+        """
+        payload: dict[str, Any] = {
+            "model": self.model_name,
+            "messages": messages,
+            "temperature": kwargs.get("temperature", self.temperature),
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = kwargs.get("tool_choice", "auto")
+
+        chunks = await self._stream_request(payload)
+        async for chunk in chunks:
+            yield chunk
+
+    async def _stream_request(self, payload: dict[str, Any]):
+        import json as _json
+
+        acc: dict[int, dict[str, Any]] = {}
+        finish_reason = ""
+        usage: dict[str, Any] = {}
+
+        async def _run():
+            nonlocal finish_reason, usage
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream(
+                        "POST", f"{self.base_url}/chat/completions",
+                        json=payload, headers=self._headers()) as resp:
+                    if resp.status_code == 401:
+                        raise ValueError(
+                            f"LLM auth failed (401) at {self.base_url} — check api_key")
+                    if resp.status_code in (429, 529) or resp.status_code >= 500:
+                        resp.raise_for_status()
+                    if resp.status_code >= 400:
+                        body = (await resp.aread()).decode("utf-8", "replace")
+                        raise RuntimeError(f"LLM error {resp.status_code}: {body[:500]}")
+                    async for line in resp.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            return
+                        try:
+                            obj = _json.loads(data)
+                        except (_json.JSONDecodeError, ValueError):
+                            continue
+                        usage.update(obj.get("usage") or {})
+                        for choice in obj.get("choices") or []:
+                            delta = choice.get("delta") or {}
+                            if delta.get("content"):
+                                yield StreamChunk(delta=delta["content"])
+                            for tc in delta.get("tool_calls") or []:
+                                idx = tc.get("index", 0)
+                                slot = acc.setdefault(
+                                    idx, {"id": "", "name": "", "arguments": ""})
+                                if tc.get("id"):
+                                    slot["id"] = tc["id"]
+                                fn = tc.get("function") or {}
+                                if fn.get("name"):
+                                    slot["name"] += fn["name"] if not slot["name"] else ""
+                                    slot["name"] = fn["name"] or slot["name"]
+                                if fn.get("arguments"):
+                                    slot["arguments"] += fn["arguments"]
+                            if choice.get("finish_reason"):
+                                finish_reason = choice["finish_reason"]
+
+        try:
+            async for chunk in _run():
+                yield chunk
+        except (httpx.HTTPError, ValueError, RuntimeError) as e:
+            # streaming is an optimisation, never a new failure surface
+            logger.warning("stream failed mid-flight, degrading to one-shot: %s", e)
+            resp = await self.text_chat(payload["messages"],
+                                        tools=payload.get("tools"))
+            yield StreamChunk(delta=resp.content or "",
+                              tool_calls=list(resp.tool_calls),
+                              finish_reason=resp.finish_reason,
+                              usage=dict(resp.usage), done=True)
+            return
+
+        tool_calls = [
+            ToolCall(id=slot["id"] or slot["name"] or "call",
+                     name=slot["name"],
+                     arguments=parse_tool_arguments(slot["arguments"]))
+            for _, slot in sorted(acc.items())
+        ]
+        yield StreamChunk(tool_calls=tool_calls,
+                          finish_reason=finish_reason or "stop",
+                          usage=_usage_dict(usage), done=True)
 
     @staticmethod
     def _parse(data: dict[str, Any]) -> LLMResponse:

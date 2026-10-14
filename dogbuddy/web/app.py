@@ -20,8 +20,13 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..updater import read_result
 from .routes import auth as auth_routes
+from .routes import capabilities as capabilities_routes
 from .routes import chat as chat_routes
+from .routes import decisions as decisions_routes
+from .routes import events as events_routes
 from .routes import files as files_routes
+from .routes import groups as groups_routes
+from .routes import ledger as ledger_routes
 from .routes import jobs as jobs_routes
 from .routes import logs as logs_routes
 from .routes import settings as settings_routes
@@ -55,6 +60,9 @@ class WebServices:
         self.memory = kw.get("memory")
         self.files = kw.get("files")
         self.admin = kw.get("admin")
+        self.decisions = kw.get("decisions")
+        self.groups = kw.get("groups")
+        self.sse = kw.get("sse")
         self.app_config = kw.get("app_config")
         self.rate_limit_status = kw.get("rate_limit_status", lambda: {"waiting": False, "attempt": 0})
         self.on_startup = kw.get("on_startup")    # async callable (DogBuddyApp.start)
@@ -112,6 +120,8 @@ def create_app(svc: WebServices) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
+        if getattr(svc, "sse", None) is not None:
+            svc.sse.start()
         if svc.on_startup is not None:
             await svc.on_startup()
 
@@ -129,7 +139,12 @@ def create_app(svc: WebServices) -> FastAPI:
     auth_deps = [Depends(require_auth)]
 
     app.include_router(auth_routes.router(svc), prefix="/api")
+    app.include_router(capabilities_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(chat_routes.router(svc, auth_deps), prefix="/api")
+    app.include_router(decisions_routes.router(svc, auth_deps), prefix="/api")
+    app.include_router(events_routes.router(svc, auth_deps), prefix="/api")
+    app.include_router(ledger_routes.router(svc, auth_deps), prefix="/api")
+    app.include_router(groups_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(windows_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(jobs_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(files_routes.router(svc, auth_deps), prefix="/api")

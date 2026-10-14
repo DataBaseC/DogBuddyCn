@@ -57,7 +57,7 @@ def test_profile_registry_builds_and_caches(tmp_path):
     built = []
 
     class FakeReg(LLMProfileRegistry):
-        def _build(self, profile, model=None):
+        def _build(self, profile, model=None, overrides=None):
             built.append((profile or "") + ("/" + model if model else ""))
             return FakeLLM()
 

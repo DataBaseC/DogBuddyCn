@@ -34,6 +34,7 @@ class TaskEnv:
     ctx: ToolContext = None  # type: ignore[assignment]
     tool_names: list[str] | None = None
     max_iterations: int = 25
+    on_delta: Any = None  # (str) -> None — streaming text fragments (T2.5)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -64,7 +65,8 @@ class PromptRunner:
             registry=env.registry, session=env.session,
             builder=env.builder, compactor=env.compactor,
             tool_names=env.tool_names, max_iterations=env.max_iterations)
-        result: AgentResult = await loop.run(task.prompt, env.ctx)
+        result: AgentResult = await loop.run(task.prompt, env.ctx,
+                                             on_delta=env.on_delta)
         status = "failed" if result.stop_reason == "error" else "ok"
         if "rate limited" in (result.content or "").lower():
             status = "rate_limited"

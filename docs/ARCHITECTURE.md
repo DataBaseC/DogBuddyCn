@@ -1,6 +1,10 @@
 # DogBuddyCn 软件分层架构设计（详细版）
 
 > 版本 v1.0 ｜ 2026-10-12 ｜ 配套 DEV_PROMPT.md 使用，开发必须遵守本文的分层与依赖规则
+>
+> ⚠️ **v2 增量**：三层角色体系（管理员/主管/员工）的架构重构见 `ARCHITECTURE-v2-ROLES.md`
+> （角色职能定义见 `ROLES.md`）。v2 只在本文五层骨架上做增量（新增 Scope 横切、管理工具统一化、
+> 指挥链服务），未提及处仍以本文为准。
 
 ## 1. 分层总览
 
@@ -85,7 +89,7 @@
 **规则**：能力单元无状态编排；工具内部才允许触碰文件/shell/HTTP（权限门控在 registry 统一裁决：BUILD/PLAN/AUTO + 危险命令黑名单）。
 
 ### L5 基础设施层
-- `db.py`：SQLite（aiosqlite，WAL 模式）；DAO 映射 windows/messages/compactions/todos/jobs/job_runs/config/whitelist/audit_log。
+- `db.py`：SQLite（stdlib `sqlite3`，WAL 模式，同步 DAO + 可重入写锁——本地文件毫秒级，事件循环只在真正 IO 处 await）；DAO 映射 windows/messages/compactions/todos/jobs/job_runs/pending_decisions/groups/group_members/config/whitelist/audit_log；schema 变更走 `_MIGRATIONS` + `SCHEMA_VERSION`。
 - `config.py`：pydantic 校验 YAML（llm、retry、gateway、web、panel、paths 段）。
 - `storage/`：记忆文件、检查点快照（按 window+timestamp）、日志文件（轮转）。
 - `external/panel_client.py`：`exec(command, timeout)` 封装面板 `/api/terminal/exec` + X-Agent-Token。

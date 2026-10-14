@@ -1,0 +1,20 @@
+{
+  "js/index.bundle.js": [
+    "js/ui.js",
+    "js/api.js",
+    "js/sse.js",
+    "js/views-main.js",
+    "js/views-chat.js",
+    "js/views-ops.js",
+    "js/views-settings.js",
+    "js/views-profiles.js",
+    "js/views-capabilities.js",
+    "js/views-params.js",
+    "js/views-decisions.js",
+    "js/views-groups.js",
+    "js/views-approval.js",
+    "js/views-ledger.js",
+    "js/filemanager.js",
+    "js/app.js"
+  ]
+}

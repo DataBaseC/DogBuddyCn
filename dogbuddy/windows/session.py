@@ -22,7 +22,10 @@ class WindowSession:
     # ------------------------------------------------------------- messages
     def append(self, role: str, content: str, tokens: int = 0,
                meta: dict[str, Any] | None = None) -> Message:
-        return self.messages.add_message(self.window.id, role, content, tokens, meta)
+        # T3.1: a window bound to a shared channel contributes its messages there
+        group_id = getattr(self.window, "group_id", "") or ""
+        return self.messages.add_message(self.window.id, role, content, tokens, meta,
+                                         group_id=group_id)
 
     def recent(self, limit: int = 200) -> list[Message]:
         return self.messages.list_messages(self.window.id, limit)

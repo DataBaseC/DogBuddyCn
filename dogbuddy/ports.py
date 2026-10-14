@@ -29,7 +29,8 @@ class Window:
     mode: str = "BUILD"
     status: str = "idle"  # idle | running | paused | rate_limited
     llm_profile: str = ""  # named LLM config set; "" = default
-    group_id: str | None = None  # 群聊工作区预留（V1 不实现）
+    params: dict[str, Any] = field(default_factory=dict)  # 工位级参数覆盖；空 = 全继承
+    group_id: str | None = None  # 群组（共享工作频道）id
     created_at: str = ""
     updated_at: str = ""
 
@@ -43,6 +44,7 @@ class Message:
     tokens: int
     created_at: str
     meta: dict[str, Any] = field(default_factory=dict)
+    group_id: str = ""  # 共享工作频道（T3.1）：非空 = 频道可见消息
 
 
 @dataclass
@@ -98,6 +100,40 @@ class JobRun:
     status: str  # running | ok | failed | rate_limited
     summary: str
     log_path: str
+
+
+@dataclass
+class Group:
+    """共享工作频道（ROADMAP T3）：一组窗口共享上下文与任务流。"""
+    id: str
+    name: str
+    description: str = ""
+    lead_window_id: str = ""  # 组长（汇总者）
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass
+class GroupMember:
+    group_id: str
+    window_id: str
+    role: str = "member"  # member | lead
+    joined_at: str = ""
+
+
+@dataclass
+class PendingDecision:
+    """An open question from an agent awaiting the owner (ROADMAP T2.3)."""
+    id: int
+    window_id: str
+    question: str
+    options: list[Any] = field(default_factory=list)
+    answer: str = ""
+    status: str = "pending"  # pending | answered | timeout | cancelled
+    source: str = "ask_user"
+    created_at: str = ""
+    answered_at: str | None = None
+    expires_at: str | None = None
 
 
 @dataclass

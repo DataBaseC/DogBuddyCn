@@ -9,6 +9,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 
+class ConfigKVIn(BaseModel):
+    key: str
+    value: Any
+
+
 class RetryIn(BaseModel):
     base_interval: float | None = None
     max_interval: float | None = None
@@ -101,6 +106,28 @@ def router(svc, auth_deps) -> APIRouter:
             "notify": {"channels": [c.model_dump() for c in cfg.notify.channels]},
             "report": {"default_strategy": svc.config.get("report.default_strategy", "brief")},
         }
+
+    @r.get("/config", dependencies=auth_deps)
+    def get_config() -> dict:
+        """Generic kv config (approval.*, ledger.*, …) for the console."""
+        return {"config": svc.config.dump()}
+
+    @r.get("/audit", dependencies=auth_deps)
+    def get_audit(limit: int = 200, action: str = "") -> dict:
+        """审计流水（T4.4 留痕可查）：action 支持前缀过滤（如 tool: / approval:）。"""
+        rows = svc.db.list_audit(limit=max(1, min(limit, 1000)))
+        out = [{"id": e.id, "actor": e.actor, "action": e.action,
+                "detail": e.detail, "created_at": e.created_at}
+               for e in rows]
+        if action:
+            out = [r for r in out if r["action"].startswith(action)]
+        return {"entries": out, "count": len(out)}
+
+    @r.post("/config", dependencies=auth_deps)
+    def set_config(body: ConfigKVIn) -> dict:
+        svc.config.set(body.key, body.value)
+        return {"key": body.key, "value": body.value,
+                "persisted": bool(svc.persist())}
 
     @r.get("/settings", dependencies=auth_deps)
     def get_settings() -> dict:

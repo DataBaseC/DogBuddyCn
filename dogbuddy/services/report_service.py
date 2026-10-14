@@ -69,22 +69,88 @@ class ReportService:
         self.llm_factory = llm_factory
         self.default_strategy = default_strategy
         self._recent: list[str] = []  # recent pushed headlines (merge context)
+        # T2.2 notification minimum set: merged decision asks + rare alerts
+        self.decisions = None  # set below / injected (DecisionService)
+        self._ask_debounce: dict[str, Any] = {}
+        self._fail_streak: dict[str, int] = {}
+        self._ask_delay = 20.0       # merge questions arriving within this window
+        self.alert_fail_streak = 3   # consecutive failures before an alert
 
         bus.subscribe(JOB_COMPLETED, self._on_job_completed)
         bus.subscribe(JOB_FAILED, self._on_job_failed)
         bus.subscribe(WORKER_QUESTION, self._on_worker_question)
         bus.subscribe(CONFIRM_REQUEST, self._on_confirm_request)
         bus.subscribe(RATE_LIMIT_STATUS, self._on_rate_limit)
+        try:
+            from .decisions import DECISION_CREATED
+            bus.subscribe(DECISION_CREATED, self._on_decision_created)
+        except ImportError:  # pragma: no cover — standalone wiring in tests
+            pass
 
     # -------------------------------------------------------------- handlers
     async def _on_job_completed(self, event: Event) -> None:
+        wid = str(event.payload.get("window_id") or event.payload.get("job_id") or "")
+        self._fail_streak.pop(wid, None)  # success breaks the failure streak
         strategy = event.payload.get("report_strategy") or self.default_strategy
         await self._deliver(event, strategy, critical=False)
 
     async def _on_job_failed(self, event: Event) -> None:
-        critical = bool(event.payload.get("auto_paused"))
-        strategy = "detailed" if critical else self.default_strategy
-        await self._deliver(event, strategy, critical=critical)
+        wid = str(event.payload.get("window_id") or event.payload.get("job_id") or "")
+        self._fail_streak[wid] = self._fail_streak.get(wid, 0) + 1
+        streak = self._fail_streak[wid]
+        critical = bool(event.payload.get("auto_paused")) or streak >= self.alert_fail_streak
+        # T2.2: ordinary single failures stay in the UI — only real trouble pushes
+        if not critical:
+            logger.info("job failed (streak %d, no alert yet): %s", streak, event.payload)
+            return
+        self._fail_streak[wid] = 0
+        strategy = "detailed"
+        await self._deliver(event, strategy, critical=True)
+
+    async def _on_decision_created(self, event: Event) -> None:
+        """T2.2: merge rapid-fire questions from one window into one push.
+
+        An agent asking 3 questions in a row must not ring the owner's phone
+        3 times — debounce per window, then push the whole open set at once.
+        """
+        import asyncio
+        wid = str(event.payload.get("window_id") or "")
+        old = self._ask_debounce.pop(wid, None)
+        if old is not None:
+            old.cancel()
+        self._ask_debounce[wid] = asyncio.get_event_loop().create_task(
+            self._push_pending_asks(wid))
+
+    async def _push_pending_asks(self, window_id: str) -> None:
+        import asyncio
+        try:
+            await asyncio.sleep(self._ask_delay)
+        except asyncio.CancelledError:
+            return  # a newer question reset the timer
+        self._ask_debounce.pop(window_id, None)
+        items: list = []
+        if self.decisions is not None:
+            try:
+                items = [d for d in self.decisions.list(status="pending", limit=50)
+                         if d.window_id == window_id]
+            except Exception:  # noqa: BLE001 — notification never crashes a run
+                logger.exception("pending decision lookup failed")
+        if not items:
+            return
+        w_name = window_id
+        lines = [f"【需要你决策】工位有 {len(items)} 个问题待决："]
+        for i, d in enumerate(items[:5], 1):
+            lines.append(f"{i}. {d.question[:120]}")
+        if len(items) > 5:
+            lines.append(f"…共 {len(items)} 条")
+        lines.append("（打开控制台「待决事项」回答，或等超时自动继续）")
+        text = "\n".join(lines)
+        self._remember(text)
+        for notifier in self._targets(None):
+            try:
+                await notifier.send(text)
+            except Exception:  # noqa: BLE001
+                logger.exception("notifier %s failed", getattr(notifier, "name", "?"))
 
     async def _on_worker_question(self, event: Event) -> None:
         await self._deliver(event, "detailed", critical=True)

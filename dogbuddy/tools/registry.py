@@ -79,6 +79,7 @@ class GateDecision:
     allowed: bool
     reason: str = ""
     needs_confirm: bool = False
+    irreversible: bool = False  # T4.3: never auto-approved, even in托管代审
 
 
 @runtime_checkable
@@ -127,15 +128,23 @@ class ToolRegistry:
             })
         return out
 
-    async def execute(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, name: str, args: dict[str, Any], ctx: ToolContext,
+                      approved: bool = False) -> ToolResult:
+        """Run one tool through the gate. `approved=True` (T4.1) replays a
+        previously confirmed call — the gate lets the danger check pass but
+        everything else (workspace writes, PLAN mode) still applies."""
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult.failure(f"tool not found: {name}")
+        if approved:
+            ctx.extra["confirmed"] = True  # human-approved replay (T4.1)
         decision = self.gate.check(name, tool.permission, args, ctx)
         if not decision.allowed:
             if decision.needs_confirm:
                 self._audit(ctx, name, f"needs_confirm: {decision.reason}", args)
-                return ToolResult.confirm(decision.reason or "dangerous command, confirmation required")
+                return ToolResult.confirm(
+                    decision.reason or "dangerous command, confirmation required",
+                    irreversible=bool(getattr(decision, "irreversible", False)))
             self._audit(ctx, name, f"denied: {decision.reason}", args)
             return ToolResult.failure(decision.reason or f"permission denied for {name}")
         try:

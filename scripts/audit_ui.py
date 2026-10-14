@@ -32,8 +32,15 @@ def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _js_sources() -> list[Path]:
+    """前端**源**文件。`*.bundle.js` 是 tools/rebuild-bundles.py 的拼接生成物，
+    必须排除：否则同一个类名/图标会被计两次，报告也不再反映"源码里写了什么"。
+    真正的前端正确性由 `tools/rebuild-bundles.py --check` 保证（指纹与 bundle 是否最新）。"""
+    return sorted(p for p in (STATIC / "js").glob("*.js") if not p.name.endswith(".bundle.js"))
+
+
 def scan_classes() -> tuple[dict[str, int], set[str]]:
-    sources = [STATIC / "index.html", *sorted((STATIC / "js").glob("*.js"))]
+    sources = [STATIC / "index.html", *_js_sources()]
     css = "\n".join(_read(p) for p in sorted((STATIC / "css").glob("*.css")))
     defined = set(re.findall(r"\.([a-zA-Z][a-zA-Z0-9_-]*)", css))
 
@@ -54,7 +61,7 @@ def scan_icons() -> tuple[set[str], set[str]]:
     index = _read(index_path)
     defined = set(re.findall(r'<symbol id="ic-([a-z0-9-]+)"', index))
     used: set[str] = set()
-    for path in [index_path, *sorted((STATIC / "js").glob("*.js"))]:
+    for path in [index_path, *_js_sources()]:
         used |= set(re.findall(r"#ic-([a-z0-9-]+)", _read(path)))
     return used, defined
 
