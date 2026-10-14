@@ -11,12 +11,14 @@ class GroupIn(BaseModel):
     name: str
     description: str = ""
     lead_window_id: str = ""
+    project_id: str = ""   # T7.3: 挂项目 → 成员共享该项目根目录
 
 
 class GroupPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     lead_window_id: str | None = None
+    project_id: str | None = None
 
 
 class MemberIn(BaseModel):
@@ -31,7 +33,17 @@ class GroupRunIn(BaseModel):
 def _group_dto(g, groups) -> dict:
     d = {"id": g.id, "name": g.name, "description": g.description,
          "lead_window_id": g.lead_window_id,
+         "project_id": getattr(g, "project_id", "") or "",
          "created_at": g.created_at, "updated_at": g.updated_at}
+    # 群组挂的项目名（UI 要显示"共享工作区=哪个项目根"）
+    try:
+        db = getattr(groups, "db", None)
+        proj = db.get_project(d["project_id"]) if (db is not None and d["project_id"]) else None
+        d["project_name"] = getattr(proj, "name", "") if proj else ""
+        d["shared_workspace"] = getattr(proj, "root_path", "") if proj else ""
+    except Exception:  # noqa: BLE001 — DTO never breaks a listing
+        d["project_name"] = ""
+        d["shared_workspace"] = ""
     try:
         d["members"] = groups.members(g.id)
     except Exception:  # noqa: BLE001 — DTO never breaks a listing
@@ -50,7 +62,8 @@ def router(svc, auth_deps) -> APIRouter:
     def create_group(body: GroupIn) -> dict:
         try:
             g = svc.groups.create(body.name, description=body.description,
-                                  lead_window_id=body.lead_window_id)
+                                  lead_window_id=body.lead_window_id,
+                                  project_id=body.project_id)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return _group_dto(g, svc.groups)

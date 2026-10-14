@@ -38,15 +38,17 @@ class GroupManager:
 
     # ---------------------------------------------------------- lifecycle
     def create(self, name: str, description: str = "",
-               lead_window_id: str = "") -> Group:
+               lead_window_id: str = "", project_id: str = "") -> Group:
         if self.db.get_group(name):
             raise ValueError(f"group name already used: {name}")
         g = Group(id=new_id(), name=name, description=description,
-                  lead_window_id=lead_window_id or "")
+                  lead_window_id=lead_window_id or "",
+                  project_id=project_id or "")  # T7.3: 挂项目 = 成员共享工作区
         self.db.insert_group(g)
         if lead_window_id:
             self.assign(g.id, lead_window_id, role="lead")
-        self.db.audit("system", "group:create", f"{g.id} {name}")
+        self.db.audit("system", "group:create",
+                      f"{g.id} {name} project={project_id or '-'}")
         return g
 
     def get(self, group_ref: str) -> Group | None:

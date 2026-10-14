@@ -393,6 +393,50 @@ def test_T7_6_挂载不存在的项目返回400(tmp_path, monkeypatch):
         assert r.status_code == 400
 
 
+def test_T7_6_群组挂项目并可查共享工作区(tmp_path, monkeypatch):
+    """T7.3 的入口必须能从 UI/HTTP 走通：群组建/改时绑定项目，
+    DTO 要回 `project_name` + `shared_workspace`（否则用户不知道共享的是哪个目录）。"""
+    app, client = _client(tmp_path, monkeypatch)
+    with client:
+        proj = client.post("/api/projects", json={
+            "name": "共享", "root_path": str(tmp_path / "shared")}).json()["project"]
+        w = app.windows.create("组员", "worker_programmer", str(tmp_path / "gw"))
+
+        g = client.post("/api/groups", json={
+            "name": "协作组", "project_id": proj["id"]}).json()
+        assert g["project_id"] == proj["id"]
+        assert g["project_name"] == "共享"
+        assert g["shared_workspace"] == proj["root_path"]
+
+        # 成员挂上后，run 时用共享工作区（用 capture 验证 ctx.workspace）
+        client.post(f"/api/groups/{g['id']}/members", json={"window": w.id})
+
+        seen: list[str] = []
+
+        class CaptureLoop:
+            def __init__(self, *a, **k):
+                pass
+
+            async def run(self, prompt, ctx):
+                seen.append(ctx.workspace)
+                from dogbuddy.agents.core.loop import AgentResult
+                return AgentResult(content="ok", stop_reason="done")
+
+        import dogbuddy.agents.core.loop as loop_mod
+        orig = loop_mod.AgentLoop
+        loop_mod.AgentLoop = CaptureLoop
+        try:
+            r = client.post(f"/api/groups/{g['id']}/run", json={"prompt": "一起干"})
+            assert r.status_code == 200
+        finally:
+            loop_mod.AgentLoop = orig
+        assert seen == [str((tmp_path / "shared").resolve())], f"应跑共享目录，实际 {seen}"
+
+        # 解除绑定（PATCH 传空字符串）
+        patched = client.patch(f"/api/groups/{g['id']}", json={"project_id": ""}).json()
+        assert patched["project_id"] == ""
+
+
 def test_T7_6_列表含汇总与可见根(tmp_path, monkeypatch):
     app, client = _client(tmp_path, monkeypatch)
     with client:
