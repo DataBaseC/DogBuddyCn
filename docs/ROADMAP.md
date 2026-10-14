@@ -333,12 +333,26 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 - 验收：两工位挂同一项目可互读文件；旧库迁移无痛（迁移测试）；shell 越界被拦且有专项测试；
   文件管理器只见授权范围；参数继承链四级来源正确；187+ 测试全绿不回归。
 
-### Batch 8｜自动化调度与项目迭代（约 1.5 周，2026-10-14 拍板）
+### Batch 8｜自动化调度与项目迭代（进行中：组三已完成）
 
 > 拍板：迭代自动档 = **方案 c（三档预设 + 手动覆盖并存）**；追加需求——
 > **大模型限速非常慢时的智能退避**。三组能力，咬合 Batch 3（群组）/ Batch 7（项目层）。
 > 现状底座：`cron/jobs.py` 4 种排程 + 60s tick + `job_runs` + 连续失败 auto_paused；
 > `llm/retry.py` 指数退避（10s→20→…cap 300s，5 次，**不读 Retry-After、无历史记忆**）。
+
+> **组三 · 限速自适应退避（✅ 已完成，v0.7.0）**：新增 20 个专项测试，全量 284 绿、零回归。
+>
+> | 项 | 落地 | 说明 |
+> |---|---|---|
+> | **T8.7①读 Retry-After** | `llm/retry.py: parse_retry_after / retry_after_from` | 秒数与 HTTP-date 两种格式都支持（过去时间归零）；能穿透 `RetryExhausted` 等包装异常挖到响应头。有服务端提示就**精确等待**，不再瞎猜指数 |
+> | **T8.7②AIMD** | `RetryPolicy._bump_interval / delay_for` | 连续限速**先乘性放缓再等**（10→20→40→80…），连续成功**加性恢复**（每次只回收半个基准，不会一步回到基准）。修掉一个真实缺陷：原实现是"先等完再放缓"，等于第一次限速只等基准时长 |
+> | **T8.7③每 profile 记忆** | `RetryMemory`（`data_dir/retry_memory.json`） | 记住"上次退避多久才成功"，新 policy 直接从该量级起跳；按 profile 隔离；文件损坏一律当空、写失败只记日志——记忆坏掉绝不影响调用 |
+> | **T8.7④动态预算** | `effective_max_retries()` | 重档 +5 次、封禁档 +10 次，避免"5 次×5 分钟就放弃"；服务端给的量级可以突破 `max_interval`（否则 1 小时被砍成 5 分钟） |
+> | **T8.8 分档** | `RateLimitSeverity / severity_for / RateLimitPaused` | 轻（<60s）原地等 / 重（<30min）等待+通知 / 封禁（≥30min）**抛 `RateLimitPaused` 暂停**——不原地睡小时级 |
+> | **T8.8 联动** | `main._on_llm_severity`、`runners.PromptRunner`、`loop.AgentLoop` | 发 `rate_limit.paused` 事件；`AgentLoop` 把暂停映射成 `stop_reason=rate_limited`，`PromptRunner` 映射成状态 `rate_limited`，调度器因此**只标暂停并通知、不计入连续失败**（区别于 fail 暂停）。`_last_rate_limit_wait` 留给 T8.5 算"模型越慢→迭代越慢" |
+>
+> 顺带修掉一个真实缺陷：封禁级限速原本会**先按普通瞬态续跑 3 轮退避（30 秒）才暂停**；
+> 现已改为立即暂停（有专门的回归断言 `transient_retries == 0`），测试耗时也从 31s 降到 0.7s。
 
 **组一 · 任务自动化（原定 W1/W2/W4）**
 - **T8.1 Agent 自助排期（W1，1 天）**：新增员工可用的 schedule 工具（权限从紧——只能给本工位/
@@ -500,4 +514,5 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 | 新增工具必须同步角色白名单 | `ADMIN_TOOLS` / `WORKER_PROGRAMMER_TOOLS`，有不变量测试 `test_self_upgrade_tool.py` 守着 |
 | 本仓库公开 | 凭据绝不入库；面板地址/密码/令牌由 owner 私下提供 |
 | **别用 PowerShell 的 `Invoke-RestMethod -Body <字符串>` 传中文** | WinPS 5.1 按 Latin-1 发送，中文全变 `?` 且服务端"看起来成功"→ 数据静默损坏（实测模型备注被写成 `??????;429 ????,???? 2;???`）。改用：本地 UTF-8 文件 + `-InFile`，或 base64 落地后 `curl --data-binary @file`。**验证**：读回字段打印 `ascii(v)`，能见 `\u5de5\u5177` 才对；见到真 `?` 就是被截断。产品自身 API 用 UTF-8 完全正常 |
+| **也别用 PowerShell 调 `curl.exe -d "<JSON>"`** | WinPS 5.1 把参数交给原生程序时**不转义内嵌双引号**，`{"name":"x"}` 会变成 `{name:x}`，服务端报 `json_invalid / Expecting property name enclosed in double quotes`（实测创建群组时踩到）。**推荐姿势**：把验证脚本整段通过面板 `bash` 执行（那里 `-d '{...}'` 由 bash 解析，一切正常），或先把 body 写进文件再 `curl --data-binary @file`（`-F` 上传文件同理，`Invoke-RestMethod -Form` 在 5.1 不存在） |
 | `manage.py update` 不为前端做构建 | 改了 `web/static/**` 必须本地跑 `tools/rebuild-bundles.py` 再提交，否则 bundle/指纹过期（有 `--check` 守卫） |

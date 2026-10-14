@@ -67,14 +67,22 @@ class PromptRunner:
             tool_names=env.tool_names, max_iterations=env.max_iterations)
         result: AgentResult = await loop.run(task.prompt, env.ctx,
                                              on_delta=env.on_delta)
-        status = "failed" if result.stop_reason == "error" else "ok"
-        if "rate limited" in (result.content or "").lower():
+        # T8.8: 限速暂停是"rate_limited"而不是"failed"——调度器据此只标暂停并通知，
+        # 不会计进连续失败（否则重度限速会把 job 误判死）
+        if result.stop_reason == "rate_limited":
+            status = "rate_limited"
+        elif result.stop_reason == "error":
+            status = "failed"
+        else:
+            status = "ok"
+        if status != "rate_limited" and "rate limited" in (result.content or "").lower():
             status = "rate_limited"
         return RunnerResult(
             status=status, summary=result.content or "",
             pending_confirms=result.pending_confirms,
             pending_questions=result.pending_questions,
-            meta={"iterations": result.iterations, "tool_calls": result.tool_calls})
+            meta={"iterations": result.iterations, "tool_calls": result.tool_calls,
+                  "stop_reason": result.stop_reason})
 
 
 class ScriptRunner:

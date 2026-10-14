@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from ... import errors
 from ...errors import Disposition, ErrorClass
+from ...llm.retry import RateLimitPaused
 from ...tools.registry import ToolContext, ToolRegistry, ToolResult
 from ...windows.context import ContextBuilder
 from ...windows.session import WindowSession
@@ -88,6 +89,20 @@ class AgentLoop:
                 # C1: transient failures get continuation attempts instead of
                 # killing the whole run on the first timeout.
                 resp = await self._chat_with_continuation(messages, schemas, on_delta, result)
+            except RateLimitPaused as e:
+                # T8.8 封禁级限速：**暂停**任务，不是失败。
+                # stop_reason=rate_limited 会被 PromptRunner 映射成 rate_limited 状态，
+                # 调度器据此把 job 标成 rate_limited（区别于 fail 暂停）并通知。
+                logger.warning("任务因封禁级限速暂停：需等待 %.0fs", e.wait_seconds)
+                self.session.append(
+                    "system",
+                    f"[限速暂停] 服务端要求等待 {e.wait_seconds:.0f} 秒"
+                    f"（{getattr(e.severity, 'value', 'banned')} 档）；"
+                    f"本轮暂停，不是失败，稍后会自动重试。")
+                result.stop_reason = "rate_limited"
+                result.content = (f"限速暂停（非失败）：服务端要求等待约 "
+                                  f"{e.wait_seconds / 60:.0f} 分钟，任务已挂起等待重试。")
+                break
             except Exception as e:  # noqa: BLE001 — classified below, never swallowed
                 cls = errors.classify(e)
                 logger.exception("LLM chat failed (%s)", cls.value)
@@ -158,6 +173,10 @@ class AgentLoop:
         for attempt in range(1, attempts + 1):
             try:
                 return await self._chat(messages, schemas, on_delta)
+            except RateLimitPaused:
+                # 封禁级限速：立即上报给外层暂停任务，
+                # **不要**当普通瞬态续跑（否则先白等好几轮退避才暂停）
+                raise
             except Exception as e:  # noqa: BLE001 — classified immediately
                 cls = errors.classify(e)
                 if cls is not ErrorClass.TRANSIENT:

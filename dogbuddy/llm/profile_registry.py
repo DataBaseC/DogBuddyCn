@@ -32,10 +32,20 @@ def _freeze(value: Any) -> Any:
 
 
 class LLMProfileRegistry:
-    def __init__(self, app_config: Any, on_wait_hook: Callable[[str, int, float], Any] | None = None):
-        """on_wait_hook(profile_name, attempt, delay) — surfaced for UI rate-limit status."""
+    def __init__(self, app_config: Any,
+                 on_wait_hook: Callable[[str, int, float], Any] | None = None,
+                 retry_memory: Any = None,
+                 on_severity_hook: Callable[[str, Any, float, Any], Any] | None = None):
+        """on_wait_hook(profile_name, attempt, delay) — surfaced for UI rate-limit status.
+
+        T8.7/T8.8：`retry_memory` 让每个 profile 记住上次退避量级；
+        `on_severity_hook(profile, severity, delay, exc)` 把限速严重度抛给上层
+        （UI 徽标 / 报告 / 项目迭代降速）。
+        """
         self.cfg = app_config
         self.on_wait_hook = on_wait_hook
+        self.retry_memory = retry_memory
+        self.on_severity_hook = on_severity_hook
         # keyed by (profile, model): a per-window model override must not mutate a
         # shared provider, or one window's model would leak into every other one
         self._cache: dict[tuple[str, str], Any] = {}
@@ -104,6 +114,14 @@ class LLMProfileRegistry:
                 except Exception:  # noqa: BLE001 — status reporting never breaks the wait
                     pass
 
+        def on_severity(severity: Any, delay: float, exc: Any) -> None:
+            """T8.8: 把限速严重度往上抛（UI 徽标 / 报告 / 迭代降速都用它）。"""
+            if self.on_severity_hook:
+                try:
+                    self.on_severity_hook(name, severity, delay, exc)
+                except Exception:  # noqa: BLE001
+                    pass
+
         retry_cfg = section.retry
         ovr_retry = ovr.get("retry")
         if isinstance(ovr_retry, dict) and hasattr(retry_cfg, "model_copy"):
@@ -112,7 +130,10 @@ class LLMProfileRegistry:
                     update={k: v for k, v in ovr_retry.items() if v is not None})
             except Exception:  # noqa: BLE001 — bad override values fall back to profile
                 retry_cfg = section.retry
-        retry = RetryPolicy.from_config(retry_cfg, on_wait=on_wait)
+        # T8.7: 每 profile 一份退避记忆（"上次退避多久才成功"），下次从该量级起跳
+        retry = RetryPolicy.from_config(retry_cfg, on_wait=on_wait,
+                                        memory=self.retry_memory, profile=name,
+                                        on_severity=on_severity)
         temperature = ovr.get("temperature", section.temperature)
         timeout = ovr.get("request_timeout", section.request_timeout)
         if (section.provider or "").lower() == "ollama":

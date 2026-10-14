@@ -46,13 +46,21 @@ class DogBuddyApp:
     def __init__(self, config: AppConfig):
         self.config = config
         self._rate_limit = {"waiting": False, "attempt": 0, "window_id": ""}
+        # T8.8：最近一次限速严重度/等待时长（UI 徽标 + 项目迭代降速都用它）
+        self._rate_limit_severity = ""
+        self._last_rate_limit_wait = 0.0
         self._setup_logging()
         self.db = Database(config.db_path)
         self.memory = MemoryService(config.memory_dir)
         self.bus = EventBus()
         self.panel = self._build_panel()
+        # T8.7：退避记忆落盘位置（每 profile "上次退避多久才成功"）
+        from .llm.retry import RetryMemory
+        self.retry_memory = RetryMemory(Path(config.paths.data_dir) / "retry_memory.json")
         # named LLM config sets → providers (windows/jobs may bind a profile)
-        self.profiles = LLMProfileRegistry(config, on_wait_hook=self._on_llm_wait)
+        self.profiles = LLMProfileRegistry(config, on_wait_hook=self._on_llm_wait,
+                                           retry_memory=self.retry_memory,
+                                           on_severity_hook=self._on_llm_severity)
         # callable accepting an optional profile and returning a *provider*.
         # Binding `profiles.factory` here (v1.3) returned a lambda instead of a
         # provider → every real LLM call failed with
@@ -213,6 +221,35 @@ class DogBuddyApp:
         self._rate_limit = {"waiting": True, "attempt": attempt, "window_id": profile or ""}
         self.bus.emit(Event(type="rate_limit.status",
                             payload={"attempt": attempt, "delay": delay, "profile": profile}))
+        # T8.8: 记下最近一次等待时长，供迭代速度计算"模型越慢→迭代越慢"
+        self._last_rate_limit_wait = float(delay or 0.0)
+
+    def _on_llm_severity(self, profile: str, severity: Any, delay: float,
+                         exc: Any = None) -> None:
+        """T8.8：限速严重度分档上报 + 联动。
+
+        * light  秒级：仅刷新徽标
+        * heavy  分钟级：刷新徽标 + 打出"建议放慢迭代"标记（T8.5 会读）
+        * banned 小时级：发出 `rate_limit.paused`，UI 明确显示"已暂停，等待重试"
+          ——**区别于 fail 暂停**，调度器把该任务标成 `rate_limited`
+        """
+        name = getattr(severity, "value", str(severity))
+        self._rate_limit_severity = name
+        # 供 T8.5 迭代加速/降速判断："模型越慢 → 迭代越慢"
+        self._last_rate_limit_wait = float(delay or 0.0)
+        self._rate_limit = {"waiting": name != "banned", "attempt": 0,
+                            "window_id": profile or "", "severity": name,
+                            "delay": float(delay or 0.0)}
+        if name == "banned":
+            self.bus.emit(Event(type="rate_limit.paused",
+                                payload={"profile": profile, "severity": name,
+                                         "delay": float(delay or 0.0),
+                                         "reason": str(exc or "")[:300]}))
+            logger.warning("限速封禁级：profile=%s 需等待 %.0fs，任务已暂停（非失败）",
+                           profile or "(默认)", delay or 0.0)
+        elif name == "heavy":
+            logger.warning("限速重档：profile=%s 需等待 %.0fs，建议放慢迭代节奏",
+                           profile or "(默认)", delay or 0.0)
 
     def _llm_ready(self) -> bool:
         return bool(self.config.llm.api_key) or self.config.llm.provider == "ollama"
