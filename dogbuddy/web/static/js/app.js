@@ -9,7 +9,7 @@
 
   var TITLES = {
     overview: '总览', chat: '对话', decisions: '待决', windows: '工位', jobs: '任务',
-    groups: '群组', capabilities: '能力', ledger: '账本', files: '文件管理器',
+    groups: '群组', capabilities: '能力', models: '模型', ledger: '账本', files: '文件管理器',
     logs: '日志审计', settings: '设置'
   };
 
@@ -143,6 +143,9 @@
           break;
         case 'ledger':
           if (V.Ledger) V.Ledger.load();
+          break;
+        case 'models':
+          if (V.Models) V.Models.load();
           break;
         case 'files':
           global.FileMgr.load();

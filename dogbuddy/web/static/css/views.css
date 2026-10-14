@@ -669,6 +669,49 @@ tr.history-row td { background: rgba(255, 255, 255, 0.02); padding: 0 12px 14px;
 
 /* ---------------- 对话视图（控制台 ↔ 管理员 Agent） ---------------- */.chat-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
+/* ---------------- 模型管理页 ---------------- */
+.mdl-current {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 16px; margin-bottom: 12px;
+  border-radius: var(--r-md); background: var(--bg-2); border: 1px solid var(--line);
+}
+.mdl-cur-label { font-size: 11px; color: var(--tx-3); }
+.mdl-cur-model { font-size: 14px; font-weight: 650; color: var(--acc-1); }
+.mdl-summary { margin-bottom: 12px; }
+.mdl-check {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--tx-2); cursor: pointer; user-select: none;
+}
+.mdl-table td { vertical-align: top; }
+.mdl-name { font-weight: 600; color: var(--tx-1); }
+.mdl-note {
+  max-width: 420px; white-space: pre-wrap; word-break: break-word;
+  font-size: 12px; line-height: 1.55; color: var(--tx-2);
+}
+.mdl-note-empty { color: var(--warn); font-style: italic; }
+.mdl-row-cur { background: rgba(79, 140, 255, 0.06); }
+.mdl-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.mdl-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.chip-btn { cursor: pointer; border: 1px solid var(--line); background: var(--bg-3); color: var(--tx-2); }
+.chip-btn:hover { border-color: var(--line-hi); color: var(--tx-1); }
+.chip-on { background: var(--grad-soft); border-color: rgba(79, 140, 255, 0.45); color: var(--tx-1); }
+.chip-grey { background: var(--bg-4); color: var(--tx-3); }
+
+/* 统计小卡：账本 / 能力清单 / 模型页共用 */
+.stat {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 12px 14px; border-radius: var(--r-md);
+  background: var(--bg-2); border: 1px solid var(--line);
+}
+.stat-num { font-size: 18px; font-weight: 650; color: var(--tx-1); font-family: var(--mono); }
+.stat-label { font-size: 11px; color: var(--tx-3); }
+
+/* 自适应网格（能力清单 / 模型卡） */
+.auto-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+
+/* 任务表（index.html 用了 jobs-table，之前一直没定义） */
+.jobs-table .th-actions { width: 180px; text-align: right; }
+
 /* 工位上的“继承 / 指定”标记 */
 .hint-inline {
   margin-left: 6px; padding: 0 5px; border-radius: 4px;

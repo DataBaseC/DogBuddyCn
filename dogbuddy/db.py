@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -140,6 +140,25 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    """Model catalog with operator notes (模型管理页).
+
+    `note` 是核心字段：光有模型名没用，管理员要能记下"这个模型擅长什么、
+    什么不能干、限速多凶"，选型才有依据。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS models(
+      id TEXT PRIMARY KEY, provider TEXT DEFAULT '', model TEXT NOT NULL,
+      base_url TEXT DEFAULT '', display_name TEXT DEFAULT '',
+      note TEXT DEFAULT '', capability TEXT DEFAULT '',
+      context_window INTEGER DEFAULT 0, speed TEXT DEFAULT '', cost TEXT DEFAULT '',
+      enabled INTEGER DEFAULT 1, is_default INTEGER DEFAULT 0,
+      source TEXT DEFAULT 'manual', created_at TEXT, updated_at TEXT);
+    CREATE INDEX IF NOT EXISTS idx_models_default ON models(is_default, enabled);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -148,6 +167,7 @@ _MIGRATIONS: dict[int, Any] = {
     2: _migrate_v2,
     3: _migrate_v3,
     4: _migrate_v4,
+    5: _migrate_v5,
 }
 
 
@@ -749,6 +769,87 @@ class Database:
                 "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [AuditEntry(id=r["id"], actor=r["actor"], action=r["action"],
                            detail=r["detail"], created_at=r["created_at"]) for r in rows]
+
+    # ------------------------------------------------- models (模型管理页, v5)
+    _MODEL_FIELDS = ("provider", "model", "base_url", "display_name", "note",
+                     "capability", "context_window", "speed", "cost",
+                     "enabled", "is_default", "source")
+
+    def list_models(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        q = "SELECT * FROM models"
+        if enabled_only:
+            q += " WHERE enabled=1"
+        q += " ORDER BY is_default DESC, provider ASC, model ASC"
+        with self._lock:
+            rows = self._conn.execute(q).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_model(self, model_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM models WHERE id=?", (model_id,)).fetchone()
+        return dict(row) if row else None
+
+    def upsert_model(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """按 id 新增或更新。**未提供的字段保持原值**（PATCH 语义）。"""
+        model_id = str(entry.get("id") or "").strip()
+        if not model_id:
+            raise ValueError("model id 不能为空")
+        now = _now_iso()
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT * FROM models WHERE id=?", (model_id,)).fetchone()
+            if existing is None:
+                if not str(entry.get("model") or "").strip():
+                    raise ValueError("新增模型必须给 model（API 里的模型名）")
+                cols = {"id": model_id, "created_at": now, "updated_at": now}
+                for f in self._MODEL_FIELDS:
+                    if entry.get(f) is not None:
+                        cols[f] = entry[f]
+                cols.setdefault("model", model_id)
+                names = ", ".join(cols)
+                marks = ", ".join("?" for _ in cols)
+                self._conn.execute(f"INSERT INTO models({names}) VALUES({marks})",
+                                   tuple(cols.values()))
+            else:
+                updates = {}
+                for f in self._MODEL_FIELDS:
+                    if f in entry and entry[f] is not None:
+                        updates[f] = entry[f]
+                updates["updated_at"] = now
+                sets = ", ".join(f"{k}=?" for k in updates)
+                self._conn.execute(f"UPDATE models SET {sets} WHERE id=?",
+                                   (*updates.values(), model_id))
+            self._conn.commit()
+            row = self._conn.execute("SELECT * FROM models WHERE id=?", (model_id,)).fetchone()
+        return dict(row) if row else {}
+
+    def delete_model(self, model_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM models WHERE id=?", (model_id,))
+            self._conn.commit()
+        return bool(cur.rowcount)
+
+    def set_default_model(self, model_id: str) -> bool:
+        """把某个模型标为全局默认（其它全部清掉）。"""
+        with self._lock:
+            if not self._conn.execute("SELECT 1 FROM models WHERE id=?", (model_id,)).fetchone():
+                return False
+            self._conn.execute("UPDATE models SET is_default=0")
+            self._conn.execute("UPDATE models SET is_default=1, updated_at=? WHERE id=?",
+                               (_now_iso(), model_id))
+            self._conn.commit()
+        return True
+
+    def models_summary(self) -> dict[str, int]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) AS enabled, "
+                "SUM(CASE WHEN is_default=1 THEN 1 ELSE 0 END) AS defaults, "
+                "SUM(CASE WHEN COALESCE(note,'')<>'' THEN 1 ELSE 0 END) AS noted "
+                "FROM models").fetchone()
+        return {"total": int(row["total"] or 0), "enabled": int(row["enabled"] or 0),
+                "defaults": int(row["defaults"] or 0), "noted": int(row["noted"] or 0)}
 
 
 def new_id() -> str:

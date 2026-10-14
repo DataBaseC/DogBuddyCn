@@ -27,6 +27,7 @@ from .services.admin_service import AdminService
 from .services.config_service import ConfigService
 from .services.file_service import FileService
 from .services.job_manager import JobManager
+from .services.model_service import ModelService
 from .services.report_service import ReportService
 from .services.decisions import DecisionService
 from .services.group_manager import GroupManager
@@ -90,6 +91,9 @@ class DogBuddyApp:
         self.job_store = JobStore(self.db)
         self.jobs = JobManager(self.job_store, self.windows)
         self.config_svc = ConfigService(self.db, config, persist=self.persist_config)
+        # 模型目录（模型管理页）：目录是备选清单，activate() 才写运行时配置并落盘
+        self.models = ModelService(self.db, config, persist=self.persist_config,
+                                   fetch_models=self.config_svc.fetch_models)
         self.files = FileService(self._file_roots())
         self.admin = AdminService(
             db=self.db, llm_factory=self.llm_factory, windows=self.windows, jobs=self.jobs,
@@ -114,7 +118,7 @@ class DogBuddyApp:
             db=self.db, windows=self.windows, jobs=self.jobs, sessions=self.sessions,
             workspaces=self.workspaces, config=self.config_svc, memory=self.memory,
             files=self.files, admin=self.admin, app_config=config,
-            decisions=self.decisions, sse=self.sse, groups=self.groups,
+            decisions=self.decisions, sse=self.sse, groups=self.groups, models=self.models,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)

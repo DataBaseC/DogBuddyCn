@@ -1,7 +1,21 @@
 # DogBuddyCn 开发路线图 / 外包交接文档
 
 > 面向接手本项目的开发 Agent。本文档 = **决策定稿** + **批次任务卡** + 已确认缺陷（带代码位置）+ 验收标准。
-> 最后更新：2026-10-14，对应版本 `0.5.0`，状态：**Batch 1-6 已完成**（Batch 1-5：工位参数/能力清单/SSE/待决队列/账本/流式/共享频道群组/审批托管/MCP 桥；Batch 6：错误分类体系 + C1-C5 纠错加固）。**217 测试全绿**。
+> 最后更新：2026-10-14，对应版本 `0.5.2`，状态：**Batch 1-6 已完成**（Batch 1-5：工位参数/能力清单/SSE/待决队列/账本/流式/共享频道群组/审批托管/MCP 桥；Batch 6：错误分类体系 + C1-C5 纠错加固）**+ 模型管理页（用户追加需求）+ Batch 7 T7.4（shell 逃逸缝）**。**249 测试全绿**。
+>
+> ### 模型管理页（2026-10-14 追加，v0.5.2）
+> 用户诉求原话："得有个模型管理页，不然用户怎么替换模型？每个模型后边可以写备注，方便管理员了解模型能力和限制。"
+>
+> 落地：`models` 表（**迁移 v5**，`projects` 因此顺延到 v6）+ `dogbuddy/services/model_service.py` +
+> `web/routes/models.py` + 前端 `views-models.js`（导航「模型」）。要点：
+> * 目录与运行时配置**解耦**：目录是备选清单，`POST /api/models/{id}/activate` 才写
+>   `AppConfig.llm` 并**落盘**（否则重启回退）——这是"换模型"的唯一入口。
+> * **`note` 是核心字段**：能力与限制备注；`import_fetched` 批量导入时
+>   **绝不覆盖用户手写的 note**（有专项测试）。
+> * 附 `capability`(能力标签) / `context_window` / `speed` / `cost` / `enabled` / `is_default` / `source`。
+> * 页面：当前生效横幅、统计、搜索、只看启用、「拉取模型」批量导入、行内改备注、
+>   设为当前、启停、删除；切换后提示"已写盘，重启后仍生效"。
+> * 这同时提前兑现了 T8.4 的**模型能力表**部分，T8.4 只剩 `RoleSpec` 员工画像。
 > 设计方案与选项对比见 `docs/PROPOSALS.md`（决策依据，已全部拍板）。
 
 ---
@@ -290,7 +304,7 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 > ③shell 有逃逸缝（文件工具锁死，但 shell `cd /` 就绕过）。
 > 目标划分：**项目=根目录+默认参数**，工位挂载项目（可带子目录），群组挂项目。
 
-**T7.1 projects 表 + 迁移 v5**：`projects(id, name, root_path, params_json, created_at)`；
+**T7.1 projects 表 + 迁移 v6**：`projects(id, name, root_path, params_json, created_at)`；
 `windows` 加 `project_id`（+ `subdir` 子目录，可空）；`groups` 加 `project_id`。
 兼容旧库：迁移时把已有 `workspace_path` 自动包一层项目（一目录一项目），数据无痛。
 **T7.2 挂载解析与参数链**：`ToolContext.workspace` = 项目根 + 工位 `subdir`；文件工具边界

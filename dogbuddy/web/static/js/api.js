@@ -147,6 +147,26 @@
     },
 
     /* ---------------- 群组（共享工作频道） ---------------- */
+    /* ---------------- 模型管理（目录 + 备注 + 切换） ---------------- */
+    models: {
+      /* GET /api/models?enabled_only= → {models:[...], current:{...}, summary:{...}} */
+      list: function (enabledOnly) {
+        return request('GET', '/api/models' + qs({ enabled_only: enabledOnly ? true : undefined }));
+      },
+      /* GET /api/models/options → {capabilities:[], speeds:[], costs:[]} */
+      options: function () { return request('GET', '/api/models/options'); },
+      /* POST /api/models {model,provider,base_url,display_name,note,capability,
+         context_window,speed,cost} → {model, models:[...]} */
+      create: function (body) { return request('POST', '/api/models', body); },
+      /* PATCH /api/models/{id}（部分更新；备注走这里） */
+      update: function (id, body) { return request('PATCH', '/api/models/' + enc(id), body); },
+      /* DELETE /api/models/{id} */
+      remove: function (id) { return request('DELETE', '/api/models/' + enc(id)); },
+      /* POST /api/models/{id}/activate → 写运行时配置并落盘（换模型） */
+      activate: function (id) { return request('POST', '/api/models/' + enc(id) + '/activate'); },
+      /* POST /api/models/import {provider,base_url,api_key} → 拉取列表批量入库 */
+      import: function (body) { return request('POST', '/api/models/import', body || {}); }
+    },
     groups: {
       /* GET /api/groups → {groups:[{id,name,description,lead_window_id,created_at,
          updated_at,members:[{window_id,window_name,role,joined_at,exists}]}]} */

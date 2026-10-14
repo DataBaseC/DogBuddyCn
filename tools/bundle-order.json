@@ -9,6 +9,7 @@
     "js/views-settings.js",
     "js/views-profiles.js",
     "js/views-capabilities.js",
+    "js/views-models.js",
     "js/views-params.js",
     "js/views-decisions.js",
     "js/views-groups.js",
