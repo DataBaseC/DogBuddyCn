@@ -1,7 +1,12 @@
 # DogBuddyCn 开发路线图 / 外包交接文档
 
 > 面向接手本项目的开发 Agent。本文档 = **决策定稿** + **批次任务卡** + 已确认缺陷（带代码位置）+ 验收标准。
-> 最后更新：2026-10-14，对应版本 `0.10.2`，状态：**Batch 1-9 全部完成**（含模型管理页）+ v2 口径修正。**375 测试全绿**。
+> 最后更新：2026-10-14，对应版本 `0.10.3`，状态：**Batch 1-9 完成 + 独立审查报告的 32 项缺陷已修**。
+> **453 个测试通过（4 个跳过）**。
+>
+> ⚠️ **审查结论修正**：文档此前多处写"完成"，但独立审查（`审查/REPORT.md`）证明
+> Batch 8/9 存在"零件在、没接线"的缺陷（指挥链四向只有审批一通、参数页点了没反应、
+> 主管角色控制台造不出来）。这些**已在本版修复**，详见本文档 §6 下方"审查修复批次"。
 >
 > ⚠️ **v2 最终口径（用户 2026-10-14 拍板）**：只有**一个管理员**，它是用户唯一的对接窗口
 > （员工不直接找用户，逐级上报）；用户**可以新建对话**（每个对话独立上下文）。
@@ -57,7 +62,7 @@ dogbuddy/            Python 包（五层架构，依赖只许向下）
   db.py  config.py  ports.py  memory/  updater.py   L5 基础设施
 manage.py            CLI：start|stop|restart|status|logs|backup|restore|version|update
 scripts/             make_bundle.py（打包）/ deploy_bundle.py（远程部署）/ bootstrap_git.sh
-tests/               130 个用例，pytest 全绿
+tests/               457 个用例（453 passed / 4 skipped，环境相关），pytest 全绿
 docs/                设计文档（ARCHITECTURE / DESIGN / DEV_PROMPT / EXTENSIBILITY / PROPOSALS）+ 本文档
 ```
 
@@ -167,6 +172,9 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 **T1.3 UI"按钮不显示"复现**（原 P0-2.1，阻塞项）
 - 按原 2.1 的 6 步排查清单在浏览器复现（Console 报错 / 304 缓存 / 登录遮罩 / 逐视图截图 / script 顺序 / 响应式隐藏）。
 - 验收：修复前后截图 + Console 报错文本；`python scripts/audit_ui.py --strict` 通过。
+  （2026-10-14 已达成：`--strict` 输出 **0 个未定义 CSS class、0 个缺失图标、exit 0**，
+  可以真正挂 CI。此前它恒 exit=1 —— 报的 10 个 class 逐个核对后 0 个是真缺失，
+  详见"审查修复批次"P2-8。）
 
 **T1.4 前端工程化补强**（决策 2 的配套，可穿插）
 - JSDoc 类型注解 + `tsc --noEmit` 检查 + ESLint；静态资源加 `?v=<__version__>` 指纹。
@@ -418,8 +426,8 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 > | 项 | 落地 | 说明 |
 > |---|---|---|
 > | **T9.1 底座** | `agents/core/scope.py`（新）、`permissions.check_scope`、`roles.RoleSpec.scope_level` | `Scope{level,project_ids}` 值对象 + `ScopeResolver`（**由角色推导、不接受自报**；主管按 owner 字段 ∪ 项目内 `role=supervisor` 工位兜底）。Gate 新增作用域维度并**在模式矩阵之前**裁决：未声明/判不出目标/越界 → **一律拒绝（fail-closed）** |
-> | **T9.2 工具统一化** | `agents/admin/tools.py` → `agents/management/tools.py`（admin 变兼容再导出） | 每个工具加 `required_scope`；`SYSTEM_TOOL_NAMES`（10 个）vs `PROJECT_TOOLS`（22 个）；**未归类的新工具默认 system**（不下放主管）。管理员 = 全部 32 个工具，**行为逐位不变** |
-> | **T9.3 主管装配** | `agents/supervisor/tools.py`、`SUPERVISOR_TOOLS`、`SUPERVISOR_SYSTEM_PROMPT` | 主管 = 员工工具 + 项目级管理工具 + `project_memory_write`（共 42），**零 system 级**。主管工位 workspace = 项目根（吃 T7），提示词要求多项目时按 project 分段 |
+> | **T9.2 工具统一化** | `agents/admin/tools.py` → `agents/management/tools.py`（admin 变兼容再导出） | 每个工具加 `required_scope`；`SYSTEM_TOOL_NAMES`（11 个）vs `PROJECT_TOOLS`（24 个）；**未归类的新工具默认 system**（不下放主管）。管理员 = 全部 35 个工具，**行为逐位不变**（T9.2 时为 32；T9.4 起 +`supervisor_command`/`approve_decision`/`decision_list`） |
+> | **T9.3 主管装配** | `agents/supervisor/tools.py`、`SUPERVISOR_TOOLS`、`SUPERVISOR_SYSTEM_PROMPT` | 主管 = 员工工具 + 项目级管理工具 + `project_memory_write`（共 48，随工具集增长，以 `len(SUPERVISOR_TOOLS)` 为准），**零 system 级**。主管工位 workspace = 项目根（吃 T7），提示词要求多项目时按 project 分段 |
 > | **T9.4 指挥链服务** | `services/supervision_service.py` | 四向事件 `supervisor.command` / `worker.report` / `supervisor.digest` / `project.iteration.step`；寻址 `project_id → owner_supervisor_id → 主管工位`；**无主管/主管工位不存在 → 退化直连管理员**（v1 行为零回归）。`report_up()` 按角色自动分流 |
 > | **T9.5 数据与 API** | 迁移 v8（`projects.owner_supervisor_id` + `admins`）、**迁移 v9（`conversations`）**、`tools/project_memory_ops.py`、`/api/projects/{id}/chain` | 项目主管字段是寻址枢纽；**v2 最终口径：只有一个管理员**（多管理员 CRUD 已移除，`admins` 表保留但不再用于鉴权/CRUD）；**用户可新建多个对话**（各自独立上下文，见 `docs/DECISIONS-指挥链口径.md`）；项目记忆 `memory/projects/<id>.md`（**主管可写、员工只读**）；`/chain` 摊开 管理员→主管→员工 与健康度 |
 > | **T9.6 既有批次修正** | `loop._approval_flow` + `SupervisionService.approval_target` | 审批改**逐级**：不可逆动作永远升级管理员（第一道保险）；普通高危先投主管；**投出去后本轮仍然暂停**（不能算批准）。无主管 → 管理员 |
@@ -512,7 +520,7 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 |---|---|---|
 | 配置永不落盘 | `dogbuddy/config.py: save_config()`、`main.py: persist_config()` | 控制台/管理员改的设置以前只改内存，重启全丢。现在原子写 + 0600 + `.bak` + env 注入的密钥不写回文件 |
 | 无任何自更新能力 | `manage.py: cmd_update()`、`dogbuddy/updater.py` | 锁 / 脏树检查 / 配置备份 / 切代码 / 装依赖 / 重启 / **`/healthz` 断言版本** / 失败自动回滚 |
-| 无 schema 迁移 | `dogbuddy/db.py:_MIGRATIONS` + `schema_version` 表 | 幂等有序迁移 |
+| 无 schema 迁移 | `dogbuddy/db.py:_MIGRATIONS` + `schema_version` 表 | 幂等有序迁移；**当前 SCHEMA_VERSION = 11**。旧代码打开"未来库"会 fail-fast（`SchemaTooNewError`），`manage.py update` 升级前也会拒绝降级到更旧的 schema |
 | 控制台无法与管理员对话 | `dogbuddy/web/routes/chat.py` + 前端「对话」视图 | `/api/admin/chat{,/admins,/messages,/reset}` |
 | `settings.py` 未导入 `HTTPException` | `web/routes/settings.py` | 无效 profile 名以前 500 |
 | 工位提问进不了管理员上下文 | `main.py: _on_worker_question` | 订阅 `worker.question` / `confirm.request` |
@@ -553,5 +561,41 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 | 本仓库公开 | 凭据绝不入库；面板地址/密码/令牌由 owner 私下提供 |
 | **别用 PowerShell 的 `Invoke-RestMethod -Body <字符串>` 传中文** | WinPS 5.1 按 Latin-1 发送，中文全变 `?` 且服务端"看起来成功"→ 数据静默损坏（实测模型备注被写成 `??????;429 ????,???? 2;???`）。改用：本地 UTF-8 文件 + `-InFile`，或 base64 落地后 `curl --data-binary @file`。**验证**：读回字段打印 `ascii(v)`，能见 `\u5de5\u5177` 才对；见到真 `?` 就是被截断。产品自身 API 用 UTF-8 完全正常 |
 | **也别用 PowerShell 调 `curl.exe -d "<JSON>"`** | WinPS 5.1 把参数交给原生程序时**不转义内嵌双引号**，`{"name":"x"}` 会变成 `{name:x}`，服务端报 `json_invalid / Expecting property name enclosed in double quotes`（实测创建群组时踩到）。**推荐姿势**：把验证脚本整段通过面板 `bash` 执行（那里 `-d '{...}'` 由 bash 解析，一切正常），或先把 body 写进文件再 `curl --data-binary @file`（`-F` 上传文件同理，`Invoke-RestMethod -Form` 在 5.1 不存在） |
-| `manage.py update` 不为前端做构建 | 改了 `web/static/**` 必须本地跑 `tools/rebuild-bundles.py` 再提交，否则 bundle/指纹过期（有 `--check` 守卫） |
+| `manage.py update` 不为前端做构建 | 改了 `web/static/**` 必须本地跑 `tools/rebuild-bundles.py` 再提交，否则 bundle/指纹过期（有 `--check` 守卫；⚠️ 仓库里**没有 `.github/`**，`--check` 目前只在本地/手工流程里生效，尚未挂 CI） |
 | **升级"看起来成功"但其实回滚了** | 2026-10-14 实测踩到：面板托管的应用被 kill 后，**旧进程仍占着 :8100 在应答**，新进程起不来；`manage.py update` 的健康检查读到的是旧版本号（`version=0.7.0` 而非 `0.7.1`），于是**自动回滚代码**——日志里只有一句 `已完成: version=...` 且 exit=0，很容易看漏。**判断方法**：`curl /healthz` 看 `version` 与 `build` 是否等于刚推的 commit；**处理**：确认旧进程已退出（`ps aux | grep dogbuddy`）后**再跑一次** `manage.py update` 即可（第二次会成功）。这是回滚保护在起作用，不是 bug，但会造成"我明明升级了却没变" |
+
+---
+
+## 7. 审查修复批次（2026-10-14，独立审查报告落地）
+
+背景：`docs/REVIEW-PROMPT.md` 交独立审查者跑了一轮，产出 `审查/REPORT.md`
+（P0×4 / P1×16 / P2×12）。**报告的大部分结论经过我方独立复现**——
+包括它最致命的一条：把 `registry.py` 的 `required_scope` 转发删掉、或把迭代
+执行器的工具白名单换掉，**375 条测试全绿**（`scripts/verify_mutation_catch.sh` 现在
+会红 5 条 / 1 条，见下）。修复按九个批次落地：
+
+| 批次 | 覆盖 | 关键点 |
+|---|---|---|
+| B1 | P0-1、P0-2 | `server_exec` 声明 `required_scope="system"`（员工/主管 fail-closed）；`shell_guard` 口径收紧——工作区外的**读写一律拦**，含无法静态判定的构造（`$VAR`/`$( )`/`sh -c`/`sed -i`/`python -c`…）；面板路径保护扩到 shell 通道 |
+| B2 | P0-3 | 删对话不再连带删同名真实工位的消息；对话 id 白名单；`system` 保留频道不可被对话接口操作 |
+| B3 | P0-4、P2-1、P2-4 | 解包改用 `Path.is_relative_to` + 不提取链接成员；未来库 fail-fast；`/tmp` pid 加 cmdline 校验 |
+| B4 | P1-7、P0-2降级 | `schemas(only=[])` 不再等于"不过滤"；删除 `except TypeError` fail-open 回退；未知角色不给工具 |
+| B5 | P1-4、P1-5 | 新增 `project_read` 读级（员工只读项目记忆）+ `window_memory_*`（本工位记忆）；五条装配路径全部注入 `ctx.scope` |
+| B6 | P1-1 | **指挥链四向事件的生产者**：`ReportService` 逐级收敛 + `supervisor_command` 入口；应用级接线测试（真实 `DogBuddyApp` + 真实总线） |
+| B7 | P1-6 | 审批升级**落 `pending_decisions` 并可回传**（主管工具 `approve_decision`）；超时/未答一律 fail-closed |
+| B8 | P1-8、P1-10、P2-6、P2-7 | 手动推轮与自动 tick 共用并发锁 + `UNIQUE(iteration_id, round)`；迭代停摆推送停因；重启收尸含轮次；长任务超时不再计失败 |
+| B9 | P1-9、P1-11、P1-12、P1-13、P1-15 | profile 落盘；MCP 默认 system 作用域；cron 按时区比较 + 跨进程锁；`job_runs.owner_pid` 只收死属主；后台进程表统一 |
+| B10 | P1-2、P1-3、P1-16 | 角色下拉加 `supervisor` 去掉 `admin`；项目表单加主管字段；指挥链接口接上前端；参数页补分支 + 分发加 `else`；**前端不变量加强**（三种绕过手法均被抓住） |
+| B11 | P2-2/3/5/8/9/10/12 | 历史清理 + WAL 收回 + 快照 prune；允许根按需重算；日志先装后建；`audit_ui --strict` 真正 exit 0；project_id 校验 |
+
+### 测试可信度（审查报告第六节的直接回答）
+
+报告问"我不小心把作用域检查关掉，测试能不能拦住我？"——**当时不能**（v1 与基线
+逐字节相同的失败集）。现在有两条**验证过的**回归守卫：
+
+```bash
+bash scripts/verify_mutation_catch.sh    # v1 / v4 变异各自被新测试抓住
+bash scripts/verify_frontend_guards.sh   # 前端三种绕过手法各自被抓住
+```
+
+判据：新测试在变异下**必须变红**，恢复后**必须全绿**。两个脚本都会自证这一点。

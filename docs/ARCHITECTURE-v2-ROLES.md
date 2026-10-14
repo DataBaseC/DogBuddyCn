@@ -96,7 +96,8 @@ v1 的 `agents/admin/tools.py` 是管理员专属，v2 改造为 **`agents/manag
 | `supervisor.command` | 管理员 → 主管 | 投递指令到主管工位队列 |
 | `worker.report` | 员工 → 主管 | 定位项目 owner 主管，投递结果/提问 |
 | `supervisor.digest` | 主管 → 管理员 | 合并后按策略上报 |
-| `project.iteration.step` | 迭代执行器 → 全体 | 轮次推进 / 停止判定 |
+| `iteration.round` / `iteration.stopped` | 迭代执行器 → 全体 | 轮次推进 / 停止判定
+  （实际事件名是这两个，不是 `project.iteration.step`） |
 
 - **寻址规则**：事件带 `project_id` → 查 `projects.owner_supervisor_id` → 找主管工位 → 投递。
 - **退化规则**：项目无主管时，`worker.report` 直连管理员（兼容现有单管理员部署）。
@@ -108,10 +109,13 @@ projects(id, name, root_path, owner_supervisor_id, params_json, created_at)
   ↑ windows.project_id        (工位归属项目)
   ↑ groups.project_id         (共享频道归属项目)
   ↑ messages.project_id       (可选：项目级消息索引)
-admins(id, name, qq_id, role_level, status, created_at)   # 多管理员实体化
+admins(id, name, role_level, token_hash, note, enabled, created_at)  # 保留但不再用于鉴权/CRUD
+# （v2 最终口径：只有一个管理员；该表列名以上面为准，迁移 v8 已建）
 ```
 
-- 遗留数据兜底：无 `project_id` 的工位/群组 → 自动归入「默认项目」，owner = 初始管理员工位。
+- 遗留数据兜底：迁移 v6 把**无 `project_id` 的工位**按工作目录归入默认项目
+  （一目录一项目）；**群组不回填、也不设 owner**——需要时手工指定。
+  实际实现见 `db.py:_migrate_v6`。
 - 记忆作用域扩展：`memory/projects/<id>.md`（项目级记忆，主管读写，员工只读）。
 
 ## 5. 目录结构 v2（分层视角，只列变化）
