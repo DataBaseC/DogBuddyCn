@@ -96,6 +96,7 @@
 <button class="nav-item" data-view="chat"><svg class="ic"><use href="#ic-chat"/></svg><span>对话</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="windows"><svg class="ic"><use href="#ic-monitor"/></svg><span>工位</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="jobs"><svg class="ic"><use href="#ic-clock"/></svg><span>任务</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="decisions"><svg class="ic"><use href="#ic-alert"/></svg><span>待决</span><span class="badge badge-red hidden" id="nav-decisions-badge"></span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="groups"><svg class="ic"><use href="#ic-layers"/></svg><span>群组</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="capabilities"><svg class="ic"><use href="#ic-zap"/></svg><span>能力</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="ledger"><svg class="ic"><use href="#ic-activity"/></svg><span>账本</span><i class="nav-ind"></i></button>
@@ -290,6 +291,32 @@
         </div>
       </section>
 
+      <!-- 能力清单 -->
+      <section class="view" id="view-capabilities">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">能力清单</h2>
+            <p class="card-sub">工具 / 角色 / MCP 上架 · 从注册表实时生成（"我能做什么"一目了然）</p>
+          </div>
+          <div class="toolbar-actions">
+            <div class="searchbox solid">
+              <svg class="ic"><use href="#ic-search"/></svg>
+              <input id="cap-search" placeholder="搜索工具名或描述…" autocomplete="off">
+            </div>
+            <select class="select select-sm" id="cap-role-filter"><option value="">全部角色</option></select>
+            <select class="select select-sm" id="cap-perm-filter">
+              <option value="">全部权限</option>
+              <option value="read">read</option>
+              <option value="write">write</option>
+              <option value="shell">shell</option>
+              <option value="network">network</option>
+            </select>
+          </div>
+        </div>
+        <div class="grid stat-grid" id="cap-roles"></div>
+        <div class="grid auto-grid" id="cap-grid"></div>
+      </section>
+
       <!-- 待决事项 -->
       <section class="view" id="view-decisions">
         <div class="toolbar">
@@ -404,6 +431,6 @@
 <div id="toast-root" class="toast-root"></div>
 
 <!-- 页面只加载 bundle：源文件顺序见 tools/bundle-order.json，由 tools/rebuild-bundles.py 拼接 -->
-<script src="/assets/js/index.bundle.js?v=997203c418"></script>
+<script src="/assets/js/index.bundle.js?v=9ad049db44"></script>
 </body>
 </html>

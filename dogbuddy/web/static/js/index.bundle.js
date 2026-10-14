@@ -6324,6 +6324,12 @@
         case 'capabilities':
           if (V.Capabilities) V.Capabilities.load();
           break;
+        case 'decisions':
+          if (V.Decisions) V.Decisions.load();
+          break;
+        case 'ledger':
+          if (V.Ledger) V.Ledger.load();
+          break;
         case 'files':
           global.FileMgr.load();
           break;
