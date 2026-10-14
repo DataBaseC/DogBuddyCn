@@ -26,6 +26,7 @@ from .routes import decisions as decisions_routes
 from .routes import events as events_routes
 from .routes import files as files_routes
 from .routes import groups as groups_routes
+from .routes import iterations as iterations_routes
 from .routes import ledger as ledger_routes
 from .routes import jobs as jobs_routes
 from .routes import logs as logs_routes
@@ -66,6 +67,8 @@ class WebServices:
         self.groups = kw.get("groups")
         self.sse = kw.get("sse")
         self.models = kw.get("models")
+        self.iterations = kw.get("iterations")
+        self.iteration_exec = kw.get("iteration_exec")
         self.app_config = kw.get("app_config")
         self.rate_limit_status = kw.get("rate_limit_status", lambda: {"waiting": False, "attempt": 0})
         self.on_startup = kw.get("on_startup")    # async callable (DogBuddyApp.start)
@@ -153,6 +156,7 @@ def create_app(svc: WebServices) -> FastAPI:
     app.include_router(files_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(models_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(projects_routes.router(svc, auth_deps), prefix="/api")
+    app.include_router(iterations_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(settings_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(logs_routes.router(svc, auth_deps), prefix="/api")
 

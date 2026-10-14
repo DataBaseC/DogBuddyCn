@@ -106,6 +106,15 @@ class DogBuddyApp:
         self.models = ModelService(self.db, config, persist=self.persist_config,
                                    fetch_models=self.config_svc.fetch_models)
         self.files = FileService(self._file_roots())
+        # T8.5/T8.6：项目迭代计划 + 执行器（到点拉项目团队进共享工作区跑一轮）
+        from .services.iteration_executor import IterationExecutor
+        from .services.iteration_service import IterationService
+        self.iterations = IterationService(
+            self.db, windows=self.windows, models=self.models,
+            rate_limit_status=lambda: dict(self._rate_limit))
+        self.iteration_exec = IterationExecutor(
+            service=self.iterations, db=self.db, windows=self.windows,
+            groups=self.groups, bus=self.bus)
         self.admin = AdminService(
             db=self.db, llm_factory=self.llm_factory, windows=self.windows, jobs=self.jobs,
             sessions=self.sessions, workspaces=self.workspaces, memory=self.memory,
@@ -130,6 +139,7 @@ class DogBuddyApp:
             workspaces=self.workspaces, config=self.config_svc, memory=self.memory,
             files=self.files, admin=self.admin, app_config=config,
             decisions=self.decisions, sse=self.sse, groups=self.groups, models=self.models,
+            iterations=self.iterations, iteration_exec=self.iteration_exec,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)
@@ -334,6 +344,7 @@ class DogBuddyApp:
         await self.windows.start()
         self._tasks.append(asyncio.get_event_loop().create_task(self.bus.start()))
         self._tasks.append(asyncio.get_event_loop().create_task(self.scheduler.run_loop()))
+        self._tasks.append(asyncio.get_event_loop().create_task(self.iteration_exec.run_loop()))
         self._tasks.append(self.decisions.start_sweeper())
         if self.adapter is not None and self.router is not None:
             self._tasks.append(asyncio.get_event_loop().create_task(self.adapter.run()))

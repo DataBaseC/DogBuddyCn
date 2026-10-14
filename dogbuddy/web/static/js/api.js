@@ -167,6 +167,27 @@
       }
     },
 
+    /* ---------------- 项目迭代（ROADMAP T8.5/T8.6） ---------------- */
+    iterations: {
+      /* GET /api/iterations?project_id= → {iterations:[{...plan}], presets} */
+      list: function (projectId) {
+        return request('GET', '/api/iterations' + qs({ project_id: projectId }));
+      },
+      /* GET /api/iterations/presets → 三档预设（保守/标准/激进） */
+      presets: function () { return request('GET', '/api/iterations/presets'); },
+      /* POST /api/iterations {project_id,goal,mode,window_ids,speed_minutes,...} */
+      create: function (body) { return request('POST', '/api/iterations', body); },
+      /* GET /api/iterations/{id} → {iteration, plan, rounds} */
+      detail: function (id) { return request('GET', '/api/iterations/' + enc(id)); },
+      update: function (id, body) { return request('PATCH', '/api/iterations/' + enc(id), body); },
+      stop: function (id, reason) {
+        return request('POST', '/api/iterations/' + enc(id) + '/stop' + qs({ reason: reason }));
+      },
+      resume: function (id) { return request('POST', '/api/iterations/' + enc(id) + '/resume'); },
+      /* 手动推一轮（不等下一个间隔） */
+      runNow: function (id) { return request('POST', '/api/iterations/' + enc(id) + '/run_now'); },
+      remove: function (id) { return request('DELETE', '/api/iterations/' + enc(id)); }
+    },
     /* ---------------- 模型管理（目录 + 备注 + 切换） ---------------- */
     models: {
       /* GET /api/models?enabled_only= → {models:[...], current:{...}, summary:{...}} */

@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -207,6 +207,34 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """项目迭代计划（ROADMAP T8.5/T8.6）。
+
+    一个项目一份"迭代计划"：目标 + 参与工位 + 档位（保守/标准/激进）+ 停止条件。
+    轮次明细单独一张表，便于控制台看"每轮做了什么、有没有进展"。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS iterations(
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '', goal TEXT DEFAULT '',
+      mode TEXT DEFAULT 'standard', window_ids_json TEXT DEFAULT '[]',
+      speed_minutes INTEGER DEFAULT 0, max_rounds INTEGER DEFAULT 0,
+      no_progress_limit INTEGER DEFAULT 0, budget_tokens INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'active', round INTEGER DEFAULT 0,
+      stop_reason TEXT DEFAULT '', last_progress TEXT DEFAULT '',
+      no_progress_streak INTEGER DEFAULT 0, next_run_at TEXT DEFAULT '',
+      created_at TEXT, updated_at TEXT);
+    CREATE INDEX IF NOT EXISTS idx_iter_status ON iterations(status, next_run_at);
+    CREATE INDEX IF NOT EXISTS idx_iter_project ON iterations(project_id, status);
+    CREATE TABLE IF NOT EXISTS iteration_rounds(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, iteration_id TEXT, round INTEGER,
+      started_at TEXT, finished_at TEXT, status TEXT DEFAULT 'running',
+      summary TEXT DEFAULT '', progress INTEGER DEFAULT 0, goal_achieved INTEGER DEFAULT 0,
+      window_count INTEGER DEFAULT 0);
+    CREATE INDEX IF NOT EXISTS idx_iter_rounds ON iteration_rounds(iteration_id, round);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -217,6 +245,7 @@ _MIGRATIONS: dict[int, Any] = {
     4: _migrate_v4,
     5: _migrate_v5,
     6: _migrate_v6,
+    7: _migrate_v7,
 }
 
 
@@ -886,6 +915,119 @@ class Database:
             win = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM windows WHERE COALESCE(project_id,'')<>''").fetchone()
         return {"total": int(row["total"] or 0), "mounted_windows": int(win["n"] or 0)}
+
+    # ------------------------------------------------- iterations (T8.5/T8.6, v7)
+    _ITER_FIELDS = ("project_id", "goal", "mode", "window_ids_json", "speed_minutes",
+                    "max_rounds", "no_progress_limit", "budget_tokens", "status",
+                    "round", "stop_reason", "last_progress", "no_progress_streak",
+                    "next_run_at")
+
+    @staticmethod
+    def _to_iteration(r: sqlite3.Row) -> dict[str, Any]:
+        d = dict(r)
+        try:
+            d["window_ids"] = json.loads(d.pop("window_ids_json", "[]") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            d["window_ids"] = []
+        return d
+
+    def insert_iteration(self, entry: dict[str, Any]) -> dict[str, Any]:
+        now = _now_iso()
+        cols = {"id": entry.get("id") or uuid.uuid4().hex[:12],
+                "created_at": now, "updated_at": now}
+        for f in self._ITER_FIELDS:
+            if entry.get(f) is not None:
+                cols[f] = entry[f]
+        cols["window_ids_json"] = json.dumps(entry.get("window_ids") or [], ensure_ascii=False)
+        cols.pop("window_ids", None)
+        names = ", ".join(cols)
+        marks = ", ".join("?" for _ in cols)
+        with self._lock:
+            self._conn.execute(f"INSERT INTO iterations({names}) VALUES({marks})",
+                               tuple(cols.values()))
+            self._conn.commit()
+        return self.get_iteration(cols["id"]) or {}
+
+    def get_iteration(self, iteration_id: str) -> dict[str, Any] | None:
+        if not iteration_id:
+            return None
+        with self._lock:
+            r = self._conn.execute("SELECT * FROM iterations WHERE id=?",
+                                   (iteration_id,)).fetchone()
+        return self._to_iteration(r) if r else None
+
+    def list_iterations(self, project_id: str | None = None,
+                        status: str | None = None) -> list[dict[str, Any]]:
+        q = "SELECT * FROM iterations"
+        where, args = [], []
+        if project_id:
+            where.append("project_id=?"); args.append(project_id)
+        if status:
+            where.append("status=?"); args.append(status)
+        if where:
+            q += " WHERE " + " AND ".join(where)
+        q += " ORDER BY created_at DESC"
+        with self._lock:
+            rows = self._conn.execute(q, tuple(args)).fetchall()
+        return [self._to_iteration(r) for r in rows]
+
+    def update_iteration(self, iteration_id: str, **fields: Any) -> dict[str, Any] | None:
+        patch = {k: v for k, v in fields.items()
+                 if k in self._ITER_FIELDS or k == "window_ids"}
+        if not patch:
+            return self.get_iteration(iteration_id)
+        if "window_ids" in patch:
+            patch["window_ids_json"] = json.dumps(patch.pop("window_ids") or [],
+                                                  ensure_ascii=False)
+        patch["updated_at"] = _now_iso()
+        sets = ", ".join(f"{k}=?" for k in patch)
+        with self._lock:
+            self._conn.execute(f"UPDATE iterations SET {sets} WHERE id=?",
+                               (*patch.values(), iteration_id))
+            self._conn.commit()
+        return self.get_iteration(iteration_id)
+
+    def delete_iteration(self, iteration_id: str) -> bool:
+        with self._lock:
+            self._conn.execute("DELETE FROM iteration_rounds WHERE iteration_id=?",
+                               (iteration_id,))
+            cur = self._conn.execute("DELETE FROM iterations WHERE id=?", (iteration_id,))
+            self._conn.commit()
+        return bool(cur.rowcount)
+
+    def due_iterations(self, now_iso: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM iterations WHERE status='active' AND COALESCE(next_run_at,'')<>'' "
+                "AND next_run_at<=? ORDER BY next_run_at", (now_iso,)).fetchall()
+        return [self._to_iteration(r) for r in rows]
+
+    def start_iteration_round(self, iteration_id: str, round_no: int,
+                              window_count: int = 0) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO iteration_rounds(iteration_id,round,started_at,status,window_count)"
+                " VALUES(?,?,?,'running',?)",
+                (iteration_id, round_no, _now_iso(), window_count))
+            self._conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def finish_iteration_round(self, round_id: int, status: str, summary: str = "",
+                               progress: int = 0, goal_achieved: bool = False) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE iteration_rounds SET finished_at=?, status=?, summary=?, progress=?,"
+                " goal_achieved=? WHERE id=?",
+                (_now_iso(), status, summary[:4000], int(progress), 1 if goal_achieved else 0,
+                 round_id))
+            self._conn.commit()
+
+    def list_iteration_rounds(self, iteration_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM iteration_rounds WHERE iteration_id=? ORDER BY round DESC LIMIT ?",
+                (iteration_id, limit)).fetchall()
+        return [dict(r) for r in rows]
 
     def list_audit(self, limit: int = 200) -> list[AuditEntry]:
         with self._lock:

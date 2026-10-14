@@ -340,7 +340,15 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 > 现状底座：`cron/jobs.py` 4 种排程 + 60s tick + `job_runs` + 连续失败 auto_paused；
 > `llm/retry.py` 指数退避（10s→20→…cap 300s，5 次，**不读 Retry-After、无历史记忆**）。
 
+> **组二 · 能力画像与项目迭代（✅ 已完成，v0.8.0）**：新增 29 个专项测试，全量 332 绿、零回归。
+
 > **组一 · 任务自动化（✅ 已完成，v0.7.1）**：新增 19 个专项测试，全量 303 绿、零回归。
+>
+> | 项 | 落地 | 说明 |
+> |---|---|---|
+> | **T8.4 员工画像** | `roles.RoleSpec` + `capabilities` 路由 | `RoleSpec` 新增 `domains`（擅长域）/ `can_deliver_alone`（能否独立交付）/ `needs_approval`（是否需审批）/ `iteration_speed`（推进节奏档）/ `note`（画像备注）；`tool_breadth`（工具集广度）**由工具数推导**（narrow<8≤standard<18≤broad）。内置：程序员=可独立交付/标准节奏，管理员=运维域/保守节奏。**模型能力表部分已在 v0.5.2 的模型管理页提前完成** |
+> | **T8.5 迭代计划** | `services/iteration_service.py` + **迁移 v7**（`iterations` / `iteration_rounds`） | 项目级 `{目标, 参与工位, 档位}`。**方案 c：三档预设 + 手动覆盖并存**——预设（保守 240min/20 轮/2 轮无进展；标准 60min/50 轮/3 轮；激进 15min/100 轮/5 轮）给默认值，`speed_minutes`/`max_rounds`/`no_progress_limit` 一旦显式填写就以填的为准。**节奏按画像自动推**：参与工位里最慢的节奏档（木桶原理）× 当前模型能力表的速度档 × T8.8 限速严重度（banned ×6），模型越慢/工位越保守/正在被限速 → 迭代越慢（避免排队雪崩）。`effective_plan().derived` 逐项写明**每个数字来自哪一层**，控制台能解释"为什么它 4 小时才跑一轮"。停止条件：**达成目标 / 无进展 N 轮 / 次数上限**，预算上限是可选字段（0=不限） |
+> | **T8.6 迭代执行器** | `services/iteration_executor.py` + `report_iteration` 工具 + `/api/iterations` + 项目页迭代块 | 到点把项目团队拉进**共享工作区**跑一轮（优先用项目上已有的群组，天然共享工作区+频道记录；没有群组则逐个派发，仍在同一共享目录）。轮次 +1、记 `iteration_rounds`；达停止条件即停、发 `iteration.stopped` 并写明原因；每轮发 `iteration.round` 汇报进展与下次时间。**进展判定**靠 `report_iteration`（工位自己汇报 progress/note/goal_achieved）——**没汇报也算一次"无进展"**，否则会永远转下去；progress 与上轮持平也算无进展，有进展则清零。单轮崩溃只记一次无进展，不会停掉整个迭代 |
 >
 > | 项 | 落地 | 说明 |
 > |---|---|---|
@@ -526,3 +534,4 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 | **别用 PowerShell 的 `Invoke-RestMethod -Body <字符串>` 传中文** | WinPS 5.1 按 Latin-1 发送，中文全变 `?` 且服务端"看起来成功"→ 数据静默损坏（实测模型备注被写成 `??????;429 ????,???? 2;???`）。改用：本地 UTF-8 文件 + `-InFile`，或 base64 落地后 `curl --data-binary @file`。**验证**：读回字段打印 `ascii(v)`，能见 `\u5de5\u5177` 才对；见到真 `?` 就是被截断。产品自身 API 用 UTF-8 完全正常 |
 | **也别用 PowerShell 调 `curl.exe -d "<JSON>"`** | WinPS 5.1 把参数交给原生程序时**不转义内嵌双引号**，`{"name":"x"}` 会变成 `{name:x}`，服务端报 `json_invalid / Expecting property name enclosed in double quotes`（实测创建群组时踩到）。**推荐姿势**：把验证脚本整段通过面板 `bash` 执行（那里 `-d '{...}'` 由 bash 解析，一切正常），或先把 body 写进文件再 `curl --data-binary @file`（`-F` 上传文件同理，`Invoke-RestMethod -Form` 在 5.1 不存在） |
 | `manage.py update` 不为前端做构建 | 改了 `web/static/**` 必须本地跑 `tools/rebuild-bundles.py` 再提交，否则 bundle/指纹过期（有 `--check` 守卫） |
+| **升级"看起来成功"但其实回滚了** | 2026-10-14 实测踩到：面板托管的应用被 kill 后，**旧进程仍占着 :8100 在应答**，新进程起不来；`manage.py update` 的健康检查读到的是旧版本号（`version=0.7.0` 而非 `0.7.1`），于是**自动回滚代码**——日志里只有一句 `已完成: version=...` 且 exit=0，很容易看漏。**判断方法**：`curl /healthz` 看 `version` 与 `build` 是否等于刚推的 commit；**处理**：确认旧进程已退出（`ps aux | grep dogbuddy`）后**再跑一次** `manage.py update` 即可（第二次会成功）。这是回滚保护在起作用，不是 bug，但会造成"我明明升级了却没变" |

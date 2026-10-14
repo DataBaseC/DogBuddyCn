@@ -684,6 +684,15 @@ tr.history-row td { background: rgba(255, 255, 255, 0.02); padding: 0 12px 14px;
 }
 .chip-x:hover { color: var(--danger); }
 
+/* 项目迭代块（T8.5/T8.6） */
+.prj-iter {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; border-radius: var(--r-md);
+  background: var(--bg-3); border: 1px dashed var(--line);
+}
+.prj-iter-head { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.prj-iter-goal { font-size: 12.5px; color: var(--tx-1); line-height: 1.5; }
+
 /* ---------------- 模型管理页 ---------------- */
 .mdl-current {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;

@@ -314,4 +314,59 @@ class NotifyOwnerTool:
 
 
 def all_tools(jobs: Any = None, runner: Any = None) -> list:
-    return [ScheduleTool(jobs=jobs, runner=runner), RescheduleTool(), NotifyOwnerTool()]
+    return [ScheduleTool(jobs=jobs, runner=runner), RescheduleTool(), NotifyOwnerTool(),
+            ReportIterationTool()]
+
+
+# --------------------------------------------------------------------------- T8.6
+class ReportIterationTool:
+    """report_iteration — 迭代轮次结束时汇报"做到哪了、目标达成没"。
+
+    这是 T8.6 的停止条件（达成目标 / 无进展 N 轮）**唯一的判定依据**：
+    没有汇报 = 无法判断进展 → 记为一次"无进展"，所以迭代提示词里要求必须调用。
+    """
+
+    name = "report_iteration"
+    description = (
+        "Report this project-iteration round's outcome. Required at the end of every "
+        "iteration round: how far the goal is done, what you actually changed, and whether "
+        "the goal is fully achieved. If you made NO real progress this round, report the "
+        "SAME progress_percent as before and say what is blocking you — that is how the "
+        "system decides to stop an iteration that is going nowhere.")
+    parameters = {
+        "type": "object",
+        "properties": {
+            "progress_percent": {
+                "type": "integer",
+                "description": "Completion relative to the goal, 0-100.",
+            },
+            "note": {"type": "string",
+                     "description": "What you actually did this round + what is next (concise)."},
+            "goal_achieved": {"type": "boolean",
+                              "description": "True ONLY if the goal is fully achieved."},
+        },
+        "required": ["progress_percent", "note"],
+    }
+    permission = "read"  # 只写本轮记录，不产生对外副作用
+
+    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        raw = args.get("progress_percent")
+        try:
+            pct = int(raw)
+        except (TypeError, ValueError):
+            return ToolResult.failure(
+                f"progress_percent 必须是 0-100 的整数，收到 {raw!r}。"
+                f"如果这轮没有进展，就给和上一轮相同的数字。")
+        pct = max(0, min(100, pct))
+        note = str(args.get("note") or "").strip()
+        if not note:
+            return ToolResult.failure("note 不能为空：写清这轮做了什么/卡在哪。")
+        achieved = bool(args.get("goal_achieved"))
+        ctx.extra["iteration_progress"] = pct
+        ctx.extra["iteration_note"] = note[:2000]
+        ctx.extra["iteration_goal_achieved"] = achieved
+        logger.info("window %s reported iteration progress %d%% (achieved=%s)",
+                    ctx.window_id, pct, achieved)
+        return ToolResult.success(f"已记录本轮进展：{pct}%"
+                                  + ("，目标达成" if achieved else ""),
+                                  progress=pct, goal_achieved=achieved)

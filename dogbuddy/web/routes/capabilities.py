@@ -85,6 +85,13 @@ def router(svc, auth_deps) -> APIRouter:
                 "default_mode": spec.default_mode,
                 "is_admin": spec.is_admin,
                 "tool_names": list(spec.tool_names),
+                # T8.4 员工画像
+                "domains": list(getattr(spec, "domains", []) or []),
+                "tool_breadth": getattr(spec, "tool_breadth", "standard"),
+                "can_deliver_alone": bool(getattr(spec, "can_deliver_alone", False)),
+                "needs_approval": bool(getattr(spec, "needs_approval", False)),
+                "iteration_speed": getattr(spec, "iteration_speed", "standard"),
+                "note": getattr(spec, "note", ""),
             })
 
         names = {t["name"] for t in tools}

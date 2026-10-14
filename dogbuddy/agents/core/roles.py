@@ -14,6 +14,35 @@ class RoleSpec:
     tool_names: list[str] = field(default_factory=list)
     default_mode: str = "BUILD"
     is_admin: bool = False
+    # ---- 员工画像（T8.4）——管理员据此判断"这个员工能干什么、要不要盯"
+    domains: list[str] = field(default_factory=list)   # 擅长域
+    can_deliver_alone: bool = False                    # 能否独立交付（不需要人接手）
+    needs_approval: bool = False                       # 每个写操作是否都要人先批
+    iteration_speed: str = "standard"                  # slow | standard | fast：推进节奏档
+    note: str = ""                                     # 画像备注（写给人看）
+
+    @property
+    def tool_breadth(self) -> str:
+        """工具集广度：由 tool_names 数量推导（narrow < 8 ≤ standard < 18 ≤ broad）。"""
+        n = len(self.tool_names)
+        if n < 8:
+            return "narrow"
+        return "broad" if n >= 18 else "standard"
+
+    def profile(self) -> dict:
+        """给控制台/迭代计划用的画像快照。"""
+        return {
+            "name": self.name, "display_name": self.display_name,
+            "domains": list(self.domains),
+            "tool_breadth": self.tool_breadth,
+            "tool_count": len(self.tool_names),
+            "can_deliver_alone": self.can_deliver_alone,
+            "needs_approval": self.needs_approval,
+            "iteration_speed": self.iteration_speed,
+            "default_mode": self.default_mode,
+            "is_admin": self.is_admin,
+            "note": self.note,
+        }
 
 
 _REGISTRY: dict[str, RoleSpec] = {}
@@ -94,6 +123,8 @@ WORKER_PROGRAMMER_TOOLS = [
     "explore_subagent", "ask_user", "server_exec",
     # Batch 8 组一：员工也能给自己排期、自决节奏、有事才通知（权限从紧）
     "schedule", "reschedule", "notify_owner",
+    # Batch 8 组二：项目迭代轮次的进展汇报（T8.6 停止条件的唯一依据）
+    "report_iteration",
 ]
 
 
@@ -101,11 +132,19 @@ def register_builtin_roles() -> None:
     register_role(RoleSpec(
         name="admin", display_name="管理员",
         system_prompt=ADMIN_SYSTEM_PROMPT, tool_names=ADMIN_TOOLS,
-        default_mode="AUTO", is_admin=True))
+        default_mode="AUTO", is_admin=True,
+        # T8.4 画像：管理员管的是系统本身，改动风险高 → 节奏保守
+        domains=["运维", "部署", "配置", "调度"],
+        can_deliver_alone=True, needs_approval=False, iteration_speed="slow",
+        note="管理员工位：管工位/项目/任务/配置/自升级。改动影响面大，迭代节奏按保守档。"))
     register_role(RoleSpec(
         name="worker_programmer", display_name="程序员",
         system_prompt=WORKER_PROGRAMMER_SYSTEM_PROMPT, tool_names=WORKER_PROGRAMMER_TOOLS,
-        default_mode="BUILD"))
+        default_mode="BUILD",
+        # T8.4 画像：能读写文件、跑 shell、建检查点、自助排期 → 可独立交付
+        domains=["后端", "前端", "测试", "重构"],
+        can_deliver_alone=True, needs_approval=False, iteration_speed="standard",
+        note="程序员工位：能读写代码、跑命令、建检查点回滚、给自己排期。默认可独立交付。"))
 
 
 # register on import so get_role() works everywhere without an init dance

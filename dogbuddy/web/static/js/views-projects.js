@@ -8,7 +8,52 @@
   var U = global.UI, A = global.API;
   global.DogBuddyViews = global.DogBuddyViews || {};
 
-  var state = { projects: [], summary: {}, windows: [], bound: false, keyword: '' };
+  var state = { projects: [], summary: {}, windows: [], iterations: [], bound: false, keyword: '' };
+
+  var MODE_LABEL = { conservative: '保守', standard: '标准', aggressive: '激进' };
+
+  function iterOf(projectId) {
+    return state.iterations.filter(function (x) { return x.project_id === projectId; })[0];
+  }
+
+  function iterBlock(p) {
+    var it = iterOf(p.id);
+    if (!it) {
+      return '<div class="prj-iter"><span class="card-sub">尚无迭代计划</span>' +
+        '<button class="btn btn-soft btn-sm" data-prj="iter-start" data-id="' + U.esc(p.id) + '">' +
+        '开始迭代…</button></div>';
+    }
+    var act = it.status === 'active';
+    var prog = it.last_progress === '' || it.last_progress === undefined ? '—' : (it.last_progress + '%');
+    var derived = (it.plan && it.plan.derived) || {};
+    var why = [];
+    if (derived.model_speed) why.push('模型' + derived.model_speed);
+    if (derived.staff_speed) why.push('工位' + derived.staff_speed);
+    if (derived.rate_limit) why.push('限速' + derived.rate_limit);
+    return '<div class="prj-iter">' +
+      '<div class="prj-iter-head">' +
+      '<span class="chip ' + (act ? 'chip-on' : 'chip-grey') + '">迭代' +
+      (act ? '进行中' : (it.status === 'done' ? '已完成' : '已停止')) + '</span>' +
+      '<span class="chip chip-grey">' + U.esc(MODE_LABEL[it.mode] || it.mode) + '档</span>' +
+      '<span class="card-sub">第 ' + (it.round || 0) + '/' + ((it.plan && it.plan.max_rounds) || '?') + ' 轮</span>' +
+      '<span class="card-sub">进度 ' + U.esc(String(prog)) + '</span>' +
+      '<span class="card-sub">每 ' + ((it.plan && it.plan.interval_minutes) || '?') + ' 分钟一轮</span>' +
+      (act && it.next_run_at ? '<span class="card-sub">下次 ' + U.esc(String(it.next_run_at).slice(5, 16)) + '</span>' : '') +
+      (it.stop_reason ? '<span class="card-sub">停止原因：' + U.esc(it.stop_reason) + '</span>' : '') +
+      '</div>' +
+      '<div class="prj-iter-goal">目标：' + U.esc(it.goal || '') + '</div>' +
+      (why.length ? '<div class="card-sub">节奏来源：' + U.esc(why.join(' · ')) +
+        (derived.interval === 'manual' ? '（间隔为手动覆盖）' : '') + '</div>' : '') +
+      '<div class="prj-actions">' +
+      '<button class="btn btn-soft btn-sm" data-prj="iter-run" data-id="' + U.esc(p.id) + '">推一轮</button>' +
+      '<button class="btn btn-soft btn-sm" data-prj="iter-chain" data-id="' + U.esc(p.id) + '">轮次记录</button>' +
+      (act
+        ? '<button class="btn btn-ghost btn-sm" data-prj="iter-stop" data-id="' + U.esc(p.id) + '">停止</button>'
+        : '<button class="btn btn-soft btn-sm" data-prj="iter-resume" data-id="' + U.esc(p.id) + '">恢复</button>') +
+      '<button class="btn btn-danger btn-sm" data-prj="iter-del" data-id="' + U.esc(p.id) + '">' +
+      U.icon('trash', 'sm') + '</button>' +
+      '</div></div>';
+  }
 
   var SOURCE_LABEL = {
     window: { text: '工位覆盖', cls: 'chip-on' },
@@ -58,6 +103,7 @@
       (groups ? '<span class="card-sub">' + groups + '</span>' : '') +
       '</div>' +
       '<div class="prj-wins">' + wins + '</div>' +
+      iterBlock(p) +
       '</div></div>';
   }
 
@@ -92,13 +138,16 @@
   /* ---------------- 动作 ---------------- */
   function load() {
     ensureBound();
-    return Promise.all([A.projects.list(), A.windows.list()]).then(function (res) {
+    return Promise.all([A.projects.list(), A.windows.list(), A.iterations.list()])
+      .then(function (res) {
       var d = res[0] || {};
       state.projects = d.projects || [];
       state.summary = d.summary || {};
       state.roots = d.workspaces || [];
       A.projects._roots = state.roots;
       state.windows = Array.isArray(res[1]) ? res[1] : (res[1].windows || []);
+      state.iterations = (res[2] && res[2].iterations) || [];
+      state.presets = (res[2] && res[2].presets) || [];
       renderSummary();
       render();
     }).catch(function (e) {
@@ -112,6 +161,34 @@
     if (kind === 'edit') return editProject(p);
     if (kind === 'mount') return mountWindow(p);
     if (kind === 'chain') return showChain(p);
+    if (kind === 'iter-start') return startIteration(p);
+    if (kind === 'iter-run') return runIteration(p, true);
+    if (kind === 'iter-chain') return showRounds(p);
+    if (kind === 'iter-delete' || kind === 'iter-del') {
+      var it = iterOf(p.id);
+      if (!it) return;
+      return U.confirm({ title: '删除迭代计划', text: '只删计划与轮次记录，不影响项目文件。确定？', danger: true })
+        .then(function (ok) {
+          if (!ok) return;
+          return A.iterations.remove(it.id).then(function () {
+            U.toast('success', '已删除迭代'); return load();
+          }).catch(function (e) { U.toast('error', e.message); });
+        });
+    }
+    if (kind === 'iter-stop') {
+      var it2 = iterOf(p.id);
+      if (!it2) return;
+      return A.iterations.stop(it2.id, '管理员手动停止').then(function () {
+        U.toast('success', '已停止迭代'); return load();
+      }).catch(function (e) { U.toast('error', e.message); });
+    }
+    if (kind === 'iter-resume') {
+      var it3 = iterOf(p.id);
+      if (!it3) return;
+      return A.iterations.resume(it3.id).then(function () {
+        U.toast('success', '已恢复迭代'); return load();
+      }).catch(function (e) { U.toast('error', e.message); });
+    }
     if (kind === 'del') {
       return U.confirm({
         title: '删除项目',
@@ -125,6 +202,116 @@
         }).catch(function (e) { U.toast('error', e.message); });
       });
     }
+  }
+
+  /* ---------------- 迭代（T8.5/T8.6） ---------------- */
+  function startIteration(p) {
+    var presets = state.presets || [];
+    var mounted = (p.windows || []).map(function (w) { return w.id; });
+    U.modal({
+      title: '开始项目迭代：' + p.name,
+      wide: true,
+      body:
+        '<div class="field"><span class="field-label">迭代目标 *（要具体、可判定"达成没"）</span>' +
+        '<textarea class="textarea" id="it-goal" rows="3" ' +
+        'placeholder="例如：让 /api/models 的备注字段支持批量导入，并补齐 12 个单测。"></textarea></div>' +
+        '<div class="field"><span class="field-label">档位（三档预设；下面的手动值会覆盖它）</span>' +
+        '<select class="select" id="it-mode">' + presets.map(function (x) {
+          return '<option value="' + U.esc(x.mode) + '"' + (x.mode === 'standard' ? ' selected' : '') +
+            '>' + U.esc(x.label) + ' —— ' + U.esc(x.hint) + '</option>';
+        }).join('') + '</select></div>' +
+        '<div class="set-two">' +
+        '<div class="field"><span class="field-label">迭代间隔（分钟，0=自动推）</span>' +
+        '<input class="input" id="it-speed" type="number" min="0" value="0"></div>' +
+        '<div class="field"><span class="field-label">次数上限（0=用档位默认）</span>' +
+        '<input class="input" id="it-max" type="number" min="0" value="0"></div>' +
+        '</div>' +
+        '<div class="set-two">' +
+        '<div class="field"><span class="field-label">无进展几轮就停（0=用档位默认）</span>' +
+        '<input class="input" id="it-npl" type="number" min="0" value="0"></div>' +
+        '<div class="field"><span class="field-label">预算上限 tokens（可选，0=不限）</span>' +
+        '<input class="input" id="it-budget" type="number" min="0" value="0"></div>' +
+        '</div>' +
+        '<div class="card-sub">参与工位：' + (mounted.length
+          ? U.esc((p.windows || []).map(function (w) { return w.name; }).join('、'))
+          : '<b>该项目还没有挂工位</b>——先去挂工位再来开迭代') + '</div>' +
+        '<div class="hint">系统会按<b>员工画像 + 模型能力 + 当前限速严重度</b>自动推节奏：' +
+        '模型越慢、工位越保守、正在被限速 → 迭代越慢（避免排队雪崩）。</div>',
+      buttons: [
+        { label: '取消', cls: 'btn-ghost' },
+        {
+          label: '开始', cls: 'btn-primary',
+          onClick: function (body) {
+            var goal = body.querySelector('#it-goal').value.trim();
+            if (!goal) { U.toast('warn', '迭代目标不能为空'); return false; }
+            A.iterations.create({
+              project_id: p.id, goal: goal,
+              mode: body.querySelector('#it-mode').value,
+              window_ids: mounted,
+              speed_minutes: Number(body.querySelector('#it-speed').value) || 0,
+              max_rounds: Number(body.querySelector('#it-max').value) || 0,
+              no_progress_limit: Number(body.querySelector('#it-npl').value) || 0,
+              budget_tokens: Number(body.querySelector('#it-budget').value) || 0
+            }).then(function (r) {
+              var plan = (r && r.plan) || {};
+              U.toast('success', '迭代已开始：每 ' + plan.interval_minutes + ' 分钟一轮，最多 ' +
+                plan.max_rounds + ' 轮');
+              return load();
+            }).catch(function (e) { U.toast('error', e.message); });
+          }
+        }
+      ]
+    });
+  }
+
+  function runIteration(p, confirmFirst) {
+    var it = iterOf(p.id);
+    if (!it) return;
+    var go = function () {
+      U.toast('info', '正在推一轮…（可能要几分钟）');
+      return A.iterations.runNow(it.id).then(function (r) {
+        var res = (r && r.result) || {};
+        U.toast(res.stopped ? 'warn' : 'success',
+          res.stopped ? ('本轮后停止：' + (res.stop_reason || ''))
+                      : ('第 ' + res.round + ' 轮完成，进度 ' +
+                         (res.progress === null || res.progress === undefined ? '未汇报' : res.progress + '%')));
+        return load();
+      }).catch(function (e) { U.toast('error', '推轮失败：' + e.message); });
+    };
+    if (confirmFirst) {
+      return U.confirm({ title: '立即推一轮',
+        text: '会立刻让项目团队在共享工作区跑一轮（消耗模型额度）。确定？' })
+        .then(function (ok) { if (ok) return go(); });
+    }
+    return go();
+  }
+
+  function showRounds(p) {
+    var it = iterOf(p.id);
+    if (!it) return;
+    A.iterations.detail(it.id).then(function (d) {
+      var rounds = d.rounds || [];
+      var rows = rounds.map(function (x) {
+        return '<tr><td class="mono">#' + x.round + '</td>' +
+          '<td>' + U.esc(String(x.progress)) + '%' + (x.goal_achieved ? ' <span class="badge badge-green">达成</span>' : '') + '</td>' +
+          '<td>' + U.esc(x.status) + '</td>' +
+          '<td class="mdl-note">' + U.esc((x.summary || '').slice(0, 400)) + '</td></tr>';
+      }).join('');
+      U.modal({
+        title: '迭代轮次记录',
+        wide: true,
+        body: '<div class="card-sub" style="margin-bottom:8px">目标：' + U.esc(it.goal) +
+          '　·　计划：每 ' + d.plan.interval_minutes + ' 分钟一轮，最多 ' + d.plan.max_rounds +
+          ' 轮，连续 ' + d.plan.no_progress_limit + ' 轮无进展即停' +
+          (d.plan.budget_tokens ? '，预算 ' + d.plan.budget_tokens + ' tokens' : '') + '</div>' +
+          (rounds.length
+            ? '<div class="table-wrap"><table class="table"><thead><tr><th>轮次</th>' +
+              '<th>进度</th><th>状态</th><th>本轮做了什么</th></tr></thead><tbody>' +
+              rows + '</tbody></table></div>'
+            : '<div class="card-sub">还没有轮次记录。</div>'),
+        buttons: [{ label: '关闭', cls: 'btn-ghost' }]
+      });
+    }).catch(function (e) { U.toast('error', e.message); });
   }
 
   function editProject(p) {
