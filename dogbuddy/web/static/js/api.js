@@ -147,6 +147,26 @@
     },
 
     /* ---------------- 群组（共享工作频道） ---------------- */
+    /* ---------------- 项目（ROADMAP T7.1/T7.6） ---------------- */
+    projects: {
+      /* GET /api/projects → {projects, summary, workspaces} */
+      list: function () { return request('GET', '/api/projects'); },
+      /* POST /api/projects {name,root_path,git_init,params} */
+      create: function (body) { return request('POST', '/api/projects', body); },
+      /* PATCH /api/projects/{id} */
+      update: function (id, body) { return request('PATCH', '/api/projects/' + enc(id), body); },
+      /* DELETE /api/projects/{id}（解挂工位/群组，保留目录） */
+      remove: function (id) { return request('DELETE', '/api/projects/' + enc(id)); },
+      /* POST /api/projects/mount {window_id,project_id,subdir} */
+      mount: function (body) { return request('POST', '/api/projects/mount', body); },
+      /* POST /api/projects/unmount/{window_id} */
+      unmount: function (windowId) { return request('POST', '/api/projects/unmount/' + enc(windowId)); },
+      /* GET /api/projects/{id}/params-chain?window_id= → 继承链与实际生效值 */
+      chain: function (id, windowId) {
+        return request('GET', '/api/projects/' + enc(id) + '/params-chain' + qs({ window_id: windowId }));
+      }
+    },
+
     /* ---------------- 模型管理（目录 + 备注 + 切换） ---------------- */
     models: {
       /* GET /api/models?enabled_only= → {models:[...], current:{...}, summary:{...}} */

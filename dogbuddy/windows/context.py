@@ -55,7 +55,8 @@ class ContextBuilder:
         if facts:
             parts.append(facts)
         parts.append(f"## Workstation\nwindow_id={w.id} name={w.name} role={w.role} "
-                     f"workspace={w.workspace_path} mode={w.mode}")
+                     f"workspace={getattr(session, 'effective_workspace', '') or w.workspace_path} "
+                     f"mode={w.mode}")
         return "\n\n".join(parts)
 
     @staticmethod

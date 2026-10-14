@@ -285,9 +285,20 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
   崩溃恢复模拟）；187+ 测试全绿不回归。
 - **明确不做**：多步任务补偿回滚（sagas）——个人服务器场景副作用轻，不做。
 
-### Batch 7｜工作区划分重构：项目层（约 1 周，2026-10-14 拍板 A+D1+D2）
+### Batch 7｜工作区划分重构：项目层（✅ 已完成，2026-10-14，v0.6.0）
 
-> **进度：T7.4 已完成（2026-10-14，v0.5.1）**；T7.1/T7.2/T7.3/T7.5/T7.6 待做。
+> **完成情况**：T7.1~T7.6 全部落地，新增 29 个专项测试（T7.4 的 15 个 + 项目层 14 个），**263 测试全绿、零回归**。
+>
+> | 项 | 落地位置 | 说明 |
+> |---|---|---|
+> | **T7.1 projects 表** | `db.py: _migrate_v6`（**迁移 v6**，v5 被模型表占用） | `projects(id,name,root_path,params_json)` + `windows.project_id/subdir` + `groups.project_id`；**老库自动一目录一项目**（把已有 `workspace_path` 包成项目并挂上工位），老数据零人工处理；删项目只解挂、绝不删目录/工位 |
+> | **T7.2 挂载解析 + 四级参数链** | `window_manager.effective_workspace/project_for/params_for`、`config.effective_params(param_sources)`、`session.workspace_override` | 参数优先级 **工位 > 项目 > 绑定 profile > 全局**（`retry` 逐键合并，项目调 `max_retries`、工位调 `base_interval` 能叠加）；生效工作区 = `项目根/(工位子目录)`，**已存在时自动创建**、子目录越出项目根直接拒绝；该工作区同时写进 `ToolContext.workspace`（文件工具与 shell 越界守卫的唯一边界）**和提示词的 Workstation 块**（否则模型会按老路径找文件） |
+> | **T7.3 群组共享工作区** | `group_manager.run` | 群组挂了项目 → **全体成员跑项目根**（组员看到同一批文件、组长汇总的产物就在同目录），没挂项目才退回各自工作区 |
+> | **T7.4 shell 逃逸缝** | `tools/shell_guard.py`（v0.5.1 已完成） | 见下 |
+> | **T7.5 文件管理器边界** | `workspace_manager.list/create_project/mount` | 可见根按**项目**对齐：已挂项目的工位不再列出被取代的 `workspace_path`；未挂项目的保留老行为 |
+> | **T7.6 项目 UI** | `web/routes/projects.py`、`views-projects.js`、`tools/wire_projects_view.py` | 项目卡片（根目录/默认参数/已挂工位带子目录/关联群组）、新建/编辑/删除、挂载工位（可选子目录）、**参数继承链可视化**（`GET /api/projects/{id}/params-chain` 摊开每层的值与来源 window/project/inherited）、工位 DTO 增加 `project_id/subdir/project_name/effective_workspace` |
+
+#### T7.4 补 shell 逃逸缝（✅ v0.5.1 已完成）
 >
 > **T7.4 D1 补 shell 逃逸缝（✅ 已完成）**：新增 `dogbuddy/tools/shell_guard.py`，
 > `shell` 执行前先分析越界（`cd` 出工作区 / 重定向与写命令的绝对路径出界 /

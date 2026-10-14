@@ -30,6 +30,7 @@ from .routes import ledger as ledger_routes
 from .routes import jobs as jobs_routes
 from .routes import logs as logs_routes
 from .routes import models as models_routes
+from .routes import projects as projects_routes
 from .routes import settings as settings_routes
 from .routes import windows as windows_routes
 
@@ -151,6 +152,7 @@ def create_app(svc: WebServices) -> FastAPI:
     app.include_router(jobs_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(files_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(models_routes.router(svc, auth_deps), prefix="/api")
+    app.include_router(projects_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(settings_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(logs_routes.router(svc, auth_deps), prefix="/api")
 

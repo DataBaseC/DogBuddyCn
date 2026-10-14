@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .ports import (AuditEntry, Compaction, Group, GroupMember, Job, JobRun,
-                    Message, PendingDecision, Todo, Window)
+                    Message, PendingDecision, Project, Todo, Window)
 
 
 def _now_iso() -> str:
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -159,6 +159,54 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """项目层（ROADMAP T7.1）：projects 表 + windows.project_id/subdir + groups.project_id。
+
+    兼容旧库：把已有 `workspace_path` **自动包一层项目**（一目录一项目），
+    并把工位挂上去，这样老数据无需人工处理，行为与之前等价。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS projects(
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL,
+      params_json TEXT DEFAULT '{}', created_at TEXT, updated_at TEXT);
+    CREATE INDEX IF NOT EXISTS idx_projects_root ON projects(root_path);
+    """)
+    wcols = {r[1] for r in conn.execute("PRAGMA table_info(windows)").fetchall()}
+    if "project_id" not in wcols:
+        conn.execute("ALTER TABLE windows ADD COLUMN project_id TEXT DEFAULT ''")
+    if "subdir" not in wcols:
+        conn.execute("ALTER TABLE windows ADD COLUMN subdir TEXT DEFAULT ''")
+    gcols = {r[1] for r in conn.execute("PRAGMA table_info(groups)").fetchall()}
+    if gcols and "project_id" not in gcols:
+        conn.execute("ALTER TABLE groups ADD COLUMN project_id TEXT DEFAULT ''")
+    conn.commit()
+
+    # ---- 老数据回填：一目录一项目
+    try:
+        rows = conn.execute(
+            "SELECT id, name, workspace_path FROM windows "
+            "WHERE COALESCE(project_id,'')='' AND COALESCE(workspace_path,'')<>''").fetchall()
+    except sqlite3.Error:  # windows 表结构异常时不阻塞启动
+        rows = []
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    for row in rows:
+        win_id, win_name, root = row[0], row[1], row[2]
+        existing = conn.execute(
+            "SELECT id FROM projects WHERE root_path=?", (root,)).fetchone()
+        if existing:
+            pid = existing[0]
+        else:
+            base = (root or "").rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] or "project"
+            pid = f"legacy-{uuid.uuid4().hex[:8]}"
+            conn.execute(
+                "INSERT INTO projects(id,name,root_path,params_json,created_at,updated_at)"
+                " VALUES(?,?,?,'{}',?,?)",
+                (pid, f"{base}（自动创建）", root, now, now))
+        conn.execute("UPDATE windows SET project_id=? WHERE id=?", (pid, win_id))
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -168,6 +216,7 @@ _MIGRATIONS: dict[int, Any] = {
     3: _migrate_v3,
     4: _migrate_v4,
     5: _migrate_v5,
+    6: _migrate_v6,
 }
 
 
@@ -224,10 +273,12 @@ class Database:
         w.updated_at = _now_iso()
         with self._lock:
             self._conn.execute(
-                "INSERT INTO windows(id,name,role,workspace_path,model,mode,status,group_id,llm_profile,params_json,created_at,updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO windows(id,name,role,workspace_path,model,mode,status,group_id,"
+                "llm_profile,params_json,project_id,subdir,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (w.id, w.name, w.role, w.workspace_path, w.model, w.mode, w.status,
                  w.group_id, w.llm_profile, json.dumps(w.params or {}, ensure_ascii=False),
+                 getattr(w, "project_id", "") or "", getattr(w, "subdir", "") or "",
                  w.created_at, w.updated_at))
             self._conn.commit()
         return w
@@ -249,7 +300,7 @@ class Database:
 
     def update_window(self, window_id: str, **fields: Any) -> Window | None:
         allowed = {"name", "role", "workspace_path", "model", "mode", "status", "group_id",
-                   "llm_profile", "params"}
+                   "llm_profile", "params", "project_id", "subdir"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return self.get_window(window_id)
@@ -283,6 +334,8 @@ class Database:
                       mode=r["mode"], status=r["status"], group_id=r["group_id"],
                       llm_profile=r["llm_profile"] if "llm_profile" in keys else "",
                       params=params if isinstance(params, dict) else {},
+                      project_id=(r["project_id"] or "") if "project_id" in keys else "",
+                      subdir=(r["subdir"] or "") if "subdir" in keys else "",
                       created_at=r["created_at"], updated_at=r["updated_at"])
 
     # ------------------------------------------------------------ messages
@@ -617,9 +670,11 @@ class Database:
     # ----------------------------------------------------- groups (T3.1)
     @staticmethod
     def _to_group(r: sqlite3.Row) -> Group:
+        keys = r.keys()
         return Group(id=r["id"], name=r["name"],
                      description=r["description"] or "",
                      lead_window_id=r["lead_window_id"] or "",
+                     project_id=(r["project_id"] or "") if "project_id" in keys else "",
                      created_at=r["created_at"], updated_at=r["updated_at"])
 
     def insert_group(self, g: Group) -> Group:
@@ -627,10 +682,10 @@ class Database:
         g.updated_at = _now_iso()
         with self._lock:
             self._conn.execute(
-                "INSERT INTO groups(id,name,description,lead_window_id,created_at,updated_at)"
-                " VALUES(?,?,?,?,?,?)",
+                "INSERT INTO groups(id,name,description,lead_window_id,project_id,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?,?)",
                 (g.id, g.name, g.description, g.lead_window_id,
-                 g.created_at, g.updated_at))
+                 getattr(g, "project_id", "") or "", g.created_at, g.updated_at))
             self._conn.commit()
         return g
 
@@ -646,7 +701,7 @@ class Database:
         return [self._to_group(r) for r in rows]
 
     def update_group(self, group_id: str, **fields: Any) -> Group | None:
-        allowed = {"name", "description", "lead_window_id"}
+        allowed = {"name", "description", "lead_window_id", "project_id"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if fields:
             fields["updated_at"] = _now_iso()
@@ -762,6 +817,75 @@ class Database:
                 "INSERT INTO audit_log(actor,action,detail,created_at) VALUES(?,?,?,?)",
                 (actor, action, detail, _now_iso()))
             self._conn.commit()
+
+    # ------------------------------------------------- projects (T7.1, v6)
+    @staticmethod
+    def _to_project(r: sqlite3.Row) -> Project:
+        try:
+            params = json.loads(r["params_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            params = {}
+        return Project(id=r["id"], name=r["name"], root_path=r["root_path"],
+                       params=params if isinstance(params, dict) else {},
+                       created_at=r["created_at"] or "", updated_at=r["updated_at"] or "")
+
+    def insert_project(self, p: Project) -> Project:
+        p.created_at = p.created_at or _now_iso()
+        p.updated_at = _now_iso()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO projects(id,name,root_path,params_json,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (p.id, p.name, p.root_path,
+                 json.dumps(p.params or {}, ensure_ascii=False), p.created_at, p.updated_at))
+            self._conn.commit()
+        return p
+
+    def get_project(self, project_id: str) -> Project | None:
+        if not project_id:
+            return None
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM projects WHERE id=? OR name=?",
+                                     (project_id, project_id)).fetchone()
+        return self._to_project(row) if row else None
+
+    def list_projects(self) -> list[Project]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM projects ORDER BY name").fetchall()
+        return [self._to_project(r) for r in rows]
+
+    def update_project(self, project_id: str, **fields: Any) -> Project | None:
+        allowed = {"name", "root_path", "params"}
+        fields = {k: v for k, v in fields.items() if k in allowed}
+        if not fields:
+            return self.get_project(project_id)
+        if "params" in fields:
+            fields["params_json"] = json.dumps(fields.pop("params") or {}, ensure_ascii=False)
+        fields["updated_at"] = _now_iso()
+        sets = ", ".join(f"{k}=?" for k in fields)
+        with self._lock:
+            self._conn.execute(f"UPDATE projects SET {sets} WHERE id=?",
+                               (*fields.values(), project_id))
+            self._conn.commit()
+        return self.get_project(project_id)
+
+    def delete_project(self, project_id: str) -> bool:
+        """删项目：**不删工位**，只把它们解挂（避免误删工作目录归属记录）。"""
+        with self._lock:
+            self._conn.execute("UPDATE windows SET project_id='' WHERE project_id=?",
+                               (project_id,))
+            self._conn.execute("UPDATE groups SET project_id='' WHERE project_id=?",
+                               (project_id,))
+            cur = self._conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+            self._conn.commit()
+        return bool(cur.rowcount)
+
+    def project_summary(self) -> dict[str, int]:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS total FROM projects").fetchone()
+            win = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM windows WHERE COALESCE(project_id,'')<>''").fetchone()
+        return {"total": int(row["total"] or 0), "mounted_windows": int(win["n"] or 0)}
 
     def list_audit(self, limit: int = 200) -> list[AuditEntry]:
         with self._lock:

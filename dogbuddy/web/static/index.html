@@ -6,7 +6,7 @@
 <title>DogBuddyCn · 控制台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z' fill='%234f8cff'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/assets/css/base.css?v=4d2d49ea4b">
-<link rel="stylesheet" href="/assets/css/views.css?v=00ef83445f">
+<link rel="stylesheet" href="/assets/css/views.css?v=c88bd0cfe3">
 </head>
 <body>
 
@@ -99,6 +99,7 @@
       <button class="nav-item" data-view="decisions"><svg class="ic"><use href="#ic-alert"/></svg><span>待决</span><span class="badge badge-red hidden" id="nav-decisions-badge"></span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="groups"><svg class="ic"><use href="#ic-layers"/></svg><span>群组</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="capabilities"><svg class="ic"><use href="#ic-zap"/></svg><span>能力</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="projects"><svg class="ic"><use href="#ic-folder"/></svg><span>项目</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="models"><svg class="ic"><use href="#ic-cpu"/></svg><span>模型</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="ledger"><svg class="ic"><use href="#ic-activity"/></svg><span>账本</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="files"><svg class="ic"><use href="#ic-folder"/></svg><span>文件管理器</span><i class="nav-ind"></i></button>
@@ -334,6 +335,26 @@
         <div class="dec-history" id="dec-history"></div>
       </section>
 
+      <!-- 项目管理（T7.6） -->
+      <section class="view" id="view-projects">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">项目管理</h2>
+            <p class="card-sub">项目 = 根目录 + 默认参数 · 工位挂载(可带子目录) · 群组挂项目即共享工作区</p>
+          </div>
+          <div class="toolbar-actions">
+            <div class="searchbox solid">
+              <svg class="ic"><use href="#ic-search"/></svg>
+              <input id="prj-search" placeholder="搜项目名 / 路径…" autocomplete="off">
+            </div>
+            <button class="btn btn-soft btn-sm" id="prj-refresh"><svg class="ic"><use href="#ic-refresh"/></svg>刷新</button>
+            <button class="btn btn-primary btn-sm" id="prj-add"><svg class="ic"><use href="#ic-plus"/></svg>新建项目</button>
+          </div>
+        </div>
+        <div class="grid stat-grid" id="prj-summary"></div>
+        <div id="prj-list"></div>
+      </section>
+
       <!-- 模型管理 -->
       <section class="view" id="view-models">
         <div class="toolbar">
@@ -455,6 +476,6 @@
 <div id="toast-root" class="toast-root"></div>
 
 <!-- 页面只加载 bundle：源文件顺序见 tools/bundle-order.json，由 tools/rebuild-bundles.py 拼接 -->
-<script src="/assets/js/index.bundle.js?v=b65d6a50e0"></script>
+<script src="/assets/js/index.bundle.js?v=528687674a"></script>
 </body>
 </html>

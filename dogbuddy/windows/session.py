@@ -18,6 +18,14 @@ class WindowSession:
         self.messages = message_repo
         self.todos = todo_repo
         self.compactions = compaction_repo
+        # T7.2: 挂载项目后，真正生效的工作区 = 项目根 (+ 工位子目录)。
+        # 由 WindowManager 每次执行前写入；为空表示沿用 window.workspace_path。
+        # 存在的理由：提示词里必须告诉模型**真实的**工作目录，否则它会按老路径找文件。
+        self.workspace_override: str = ""
+
+    @property
+    def effective_workspace(self) -> str:
+        return self.workspace_override or getattr(self.window, "workspace_path", "") or ""
 
     # ------------------------------------------------------------- messages
     def append(self, role: str, content: str, tokens: int = 0,

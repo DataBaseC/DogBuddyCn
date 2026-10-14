@@ -20,6 +20,7 @@ concurrent writers would interleave turns into nonsense. This also sidesteps
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from ..agents.core.roles import get_role
@@ -152,6 +153,17 @@ class GroupManager:
             raise ValueError(f"group {g.name} has no members")
 
         tools = self._strict_tools(order)
+        # T7.3: 群组挂载的项目 → 共享工作区（成员共用项目根目录）
+        shared_ws = ""
+        proj_ref = getattr(g, "project_id", "") or ""
+        if proj_ref:
+            proj = self.db.get_project(proj_ref)
+            if proj is not None and str(proj.root_path or "").strip():
+                shared_ws = str(Path(proj.root_path).expanduser())
+                try:
+                    Path(shared_ws).mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    logger.warning("shared workspace not creatable: %s", shared_ws)
         steps: list[dict] = []
         for wid in order:
             w = self.db.get_window(wid)
@@ -179,8 +191,13 @@ class GroupManager:
                 compactor=self.windows._compactor_for(w),
                 tool_names=member_tools,
                 max_iterations=self.windows.params_for(w).get("max_iterations", 25))
+            # T7.3: 群组挂了项目 → **全体成员跑项目根**（共享工作区）。
+            # 这是"群组协作"能成立的前提：组员看到同一批文件，组长汇总的产物
+            # 就在同一个目录里，不用互相传。没挂项目才退回各自工作区。
+            ws = shared_ws or self.windows.effective_workspace(w)
+            rt.session.workspace_override = ws
             ctx = ToolContext(
-                window_id=w.id, workspace=w.workspace_path, mode=w.mode, actor="worker",
+                window_id=w.id, workspace=ws, mode=w.mode, actor="worker",
                 todo_repo=self.db, db=self.db, panel=self.windows.panel,
                 llm_factory=(lambda p=None: self.windows._llm(
                     p or w.llm_profile or None, w.model or None)),

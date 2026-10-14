@@ -31,6 +31,8 @@ class Window:
     llm_profile: str = ""  # named LLM config set; "" = default
     params: dict[str, Any] = field(default_factory=dict)  # 工位级参数覆盖；空 = 全继承
     group_id: str | None = None  # 群组（共享工作频道）id
+    project_id: str = ""  # T7.1 挂载的项目；空 = 用 workspace_path（老数据）
+    subdir: str = ""  # T7.2 项目内的子目录（工位边界）；空 = 项目根
     created_at: str = ""
     updated_at: str = ""
 
@@ -103,12 +105,31 @@ class JobRun:
 
 
 @dataclass
+class Project:
+    """项目（ROADMAP T7.1）：一个根目录 + 一组默认参数，工位挂载它。
+
+    `project` 是"工作区划分"的中间层：以前工位与目录一对一硬隔离，导致
+    ①多工位干同一活被迫割裂 ②群组没有共享工作区。现在
+    项目=根目录+默认参数 → 工位挂载项目(可带子目录) → 群组挂项目。
+    """
+
+    id: str
+    name: str
+    root_path: str
+    params: dict[str, Any] = field(default_factory=dict)  # 项目级默认参数（工位可覆盖）
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass
 class Group:
     """共享工作频道（ROADMAP T3）：一组窗口共享上下文与任务流。"""
+
     id: str
     name: str
     description: str = ""
     lead_window_id: str = ""  # 组长（汇总者）
+    project_id: str = ""  # T7.3 群组挂载的项目（共享工作区）；空 = 用成员各自工作区
     created_at: str = ""
     updated_at: str = ""
 

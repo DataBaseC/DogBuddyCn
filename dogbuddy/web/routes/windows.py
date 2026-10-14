@@ -41,8 +41,22 @@ def _win_dto(w: Any, todos: list | None = None, windows: Any = None,
          "model": w.model, "mode": w.mode, "status": w.status,
          "llm_profile": w.llm_profile,
          "params": dict(getattr(w, "params", {}) or {}),
+         # T7.1/T7.2: 项目挂载与真正生效的工作区（UI 要能看出工位被挂到哪了）
+         "project_id": getattr(w, "project_id", "") or "",
+         "subdir": getattr(w, "subdir", "") or "",
          "resolved_model": (windows.resolved_model(w) if windows is not None else (w.model or "")),
          "created_at": w.created_at, "updated_at": w.updated_at}
+    if windows is not None and hasattr(windows, "effective_workspace"):
+        try:
+            d["effective_workspace"] = windows.effective_workspace(w)
+        except Exception:  # noqa: BLE001
+            d["effective_workspace"] = w.workspace_path
+    if windows is not None and hasattr(windows, "project_for"):
+        try:
+            proj = windows.project_for(w)
+            d["project_name"] = getattr(proj, "name", "") if proj else ""
+        except Exception:  # noqa: BLE001
+            d["project_name"] = ""
     if windows is not None and hasattr(windows, "params_for"):
         try:
             d["effective_params"] = windows.params_for(w)

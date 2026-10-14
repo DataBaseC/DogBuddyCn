@@ -214,13 +214,52 @@ class WindowManager:
                 pass
         return w.model or ""
 
+    def project_for(self, w: Window) -> Any:
+        """工位挂载的项目（T7.1）；没挂或查不到 → None。"""
+        pid = getattr(w, "project_id", "") or ""
+        if not pid:
+            return None
+        try:
+            return self.db.get_project(pid)
+        except Exception:  # noqa: BLE001 — 项目层绝不阻塞执行
+            logger.warning("project lookup failed for %s", pid, exc_info=True)
+            return None
+
+    def effective_workspace(self, w: Window) -> str:
+        """工位真正生效的工作区（T7.2）。
+
+        挂了项目 → `项目根 / 工位子目录`；没挂 → 老行为（`workspace_path`）。
+        这是文件工具与 shell 越界守卫的**唯一边界来源**，所以改项目根后
+        越界判定自动跟着变，不需要各处改代码。
+        """
+        proj = self.project_for(w)
+        root = str(getattr(proj, "root_path", "") or "").strip() if proj else ""
+        if not root:
+            return w.workspace_path or ""
+        base = Path(root).expanduser()
+        sub = str(getattr(w, "subdir", "") or "").strip().strip("/\\")
+        target = (base / sub) if sub else base
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            return str(target.resolve())
+        except OSError:
+            logger.warning("cannot prepare workspace %s", target, exc_info=True)
+            return str(target)
+
     def params_for(self, w: Window) -> dict:
-        """Effective params for this window (工位覆盖→profile→全局), via AppConfig."""
+        """Effective params for this window (T7.2: 工位→项目→profile→全局)."""
         if self.param_resolver is not None:
+            project = self.project_for(w)
             try:
-                return dict(self.param_resolver(w) or {})
+                return dict(self.param_resolver(w, project=project) or {})
+            except TypeError:
+                # 兼容只接受单参数的旧解析器（第三方注入）
+                try:
+                    return dict(self.param_resolver(w) or {})
+                except Exception:  # noqa: BLE001
+                    pass
             except Exception:  # noqa: BLE001
-                pass
+                logger.warning("param resolver failed", exc_info=True)
         return {"max_iterations": self.max_iterations,
                 "max_context_tokens": self.max_context_tokens,
                 "compact_threshold": self.threshold}
@@ -316,7 +355,11 @@ class WindowManager:
         w = self.db.update_window(rt.window.id) or rt.window
         return {
             "window_id": w.id, "name": w.name, "role": w.role, "mode": w.mode,
-            "status": w.status, "model": w.model, "workspace": w.workspace_path,
+            "status": w.status, "model": w.model,
+            "workspace": self.effective_workspace(w),
+            "workspace_path": w.workspace_path,
+            "project_id": getattr(w, "project_id", "") or "",
+            "subdir": getattr(w, "subdir", "") or "",
             "current_task": rt.current_task_label,
             "queue_len": len(rt.queue.pending()),
             "tokens": rt.session.token_usage(),
@@ -368,12 +411,16 @@ class WindowManager:
         # per-window model override: was decorative in v1.3 (never read), so users
         # had to set the model in several places to get any effect
         model = w.model or None
-        # per-window params (T1.1): workbench overrides → profile → global
+        # per-window params (T1.1/T7.2): workbench → project → profile → global
         p = self.params_for(w)
         ovr = self._llm_overrides(p) or None
         llm_factory = (lambda pp=None: self._llm(pp or profile, model, ovr))
+        # T7.2: 挂载项目后工作区=项目根(+子目录)。这是文件工具与 shell 边界
+        # 的唯一来源；同时写进会话，提示词里才能告诉模型真实目录。
+        ws = self.effective_workspace(w)
+        rt.session.workspace_override = ws
         ctx = ToolContext(
-            window_id=w.id, workspace=w.workspace_path, mode=w.mode, actor="worker",
+            window_id=w.id, workspace=ws, mode=w.mode, actor="worker",
             todo_repo=self.db, db=self.db, panel=self.panel,
             llm_factory=llm_factory,
             ask_user_fn=self._make_ask_user(w.id),

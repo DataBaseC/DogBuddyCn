@@ -151,12 +151,16 @@ class AppConfig(BaseModel):
         "max_context_tokens", "compact_threshold", "temperature",
         "request_timeout", "max_iterations", "retry", "trust")
 
-    def effective_params(self, window: Any = None, profile: str | None = None) -> dict[str, Any]:
+    def effective_params(self, window: Any = None, profile: str | None = None,
+                         project: Any = None) -> dict[str, Any]:
         """Full parameter set a window actually runs with.
 
-        Resolution chain (same rule as effective_model):
-          **window.params override → bound profile → active profile → global defaults**
-        `retry` merges per-key so a window can raise just `max_retries` etc.
+        Resolution chain (T7.2 extends T1.1 with the project layer):
+          **window.params → project.params → bound profile → active profile → global defaults**
+
+        项目是比工位**弱**的一层（项目定默认，工位可覆盖）；`retry` 逐键合并，
+        所以项目只调 `max_retries`、工位只调 `base_interval` 也能叠加。
+        `project` 可以是 Project 实体、dict，或 None（= 没挂项目）。
         """
         section = self.llm_for(profile or (getattr(window, "llm_profile", "") or None))
         raw_retry = getattr(section, "retry", None)
@@ -178,21 +182,44 @@ class AppConfig(BaseModel):
             "retry": retry_dump,
             "trust": "normal",
         }
-        overrides = getattr(window, "params", None) or {}
-        for key, value in overrides.items():
-            if key not in self.WINDOW_PARAM_KEYS or value is None:
-                continue
-            if key == "retry" and isinstance(value, dict):
-                params["retry"] = {**params["retry"], **{k: v for k, v in value.items() if v is not None}}
-            else:
-                params[key] = value
+        for layer in (project, window):
+            overrides = self._layer_params(layer)
+            for key, value in overrides.items():
+                if key not in self.WINDOW_PARAM_KEYS or value is None:
+                    continue
+                if key == "retry" and isinstance(value, dict):
+                    params["retry"] = {**params["retry"],
+                                       **{k: v for k, v in value.items() if v is not None}}
+                else:
+                    params[key] = value
         return params
 
-    def param_sources(self, window: Any = None, profile: str | None = None) -> dict[str, str]:
-        """Where each parameter comes from — powers the console's '继承中/已覆盖' labels."""
-        overrides = getattr(window, "params", None) or {}
-        return {key: ("window" if key in overrides and overrides[key] is not None else "inherited")
-                for key in self.WINDOW_PARAM_KEYS}
+    @staticmethod
+    def _layer_params(layer: Any) -> dict[str, Any]:
+        """从 Project 实体 / dict / None 里取出参数覆盖。"""
+        if layer is None:
+            return {}
+        if isinstance(layer, dict):
+            return layer
+        return getattr(layer, "params", None) or {}
+
+    def param_sources(self, window: Any = None, profile: str | None = None,
+                      project: Any = None) -> dict[str, str]:
+        """每个参数来自哪一层 —— 控制台的「继承中/已覆盖」标签用它。
+
+        取值：`window`（工位覆盖）> `project`（项目覆盖）> `inherited`（跟全局/profile）。
+        """
+        win_params = self._layer_params(window)
+        proj_params = self._layer_params(project)
+        out: dict[str, str] = {}
+        for key in self.WINDOW_PARAM_KEYS:
+            if key in win_params and win_params[key] is not None:
+                out[key] = "window"
+            elif key in proj_params and proj_params[key] is not None:
+                out[key] = "project"
+            else:
+                out[key] = "inherited"
+        return out
 
     def profile_names(self) -> list[str]:
         return [""] + sorted(self.llm_profiles)
