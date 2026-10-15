@@ -3604,6 +3604,12 @@
           U.toast('success', 'LLM 配置已保存');
           state.saved = true;
           Settings.closeWizard();
+          /* v0.10.17：**模型只有一个来源 —— 模型目录**。向导里填的模型立刻收进目录，
+             免得出现"配置里有个模型、模型页里查不到"的两套说法。 */
+          A.models.adoptCurrent().then(function (r) {
+            var name = (r && r.model && r.model.model) || payload.model;
+            if (name) U.toast('info', '已把 ' + name + ' 纳入模型目录（可在模型页切换/备注）');
+          }).catch(function () { /* 收编失败不影响已保存的配置 */ });
           if (global.App) {
             App.refreshStatus().then(function () {
               if (App.reloadView) App.reloadView();

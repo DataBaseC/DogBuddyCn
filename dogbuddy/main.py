@@ -156,8 +156,9 @@ class DogBuddyApp:
         self.admin = AdminService(
             db=self.db, llm_factory=self.llm_factory, windows=self.windows, jobs=self.jobs,
             sessions=self.sessions, workspaces=self.workspaces, memory=self.memory,
-            config=self.config_svc, bus=self.bus,
+            config=self.config_svc, bus=self.bus, models=self.models,
             self_status=self.update_status, self_update=self.start_self_update)
+
         # T9.3：主管工位装配（只给项目级管理工具，system 级永不下放）；
         # P1-3：管理员工位也要装（否则是个带着管理员提示词却没有工具的壳）。
         self.windows.management_tools_factory = lambda w: self.admin.tools_for(w)

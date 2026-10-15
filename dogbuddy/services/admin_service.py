@@ -38,6 +38,7 @@ class AdminService:
         workspaces: Any,       # WorkspaceManager
         memory: Any,           # MemoryService
         config: Any,           # ConfigService
+        models: Any = None,    # ModelService（模型目录；管理员只能选不能造）
         bus: Any = None,
         max_iterations: int = 20,
         self_status: Callable[[bool], dict] | None = None,
@@ -51,6 +52,7 @@ class AdminService:
         self.workspaces = workspaces
         self.memory = memory
         self.config = config
+        self.models = models
         self.bus = bus
         self.max_iterations = max_iterations
         self.self_status = self_status
@@ -69,7 +71,9 @@ class AdminService:
                             progress=self._progress_dict,
                             self_status=self_status, self_update=self_update,
                             # P1-9：agent 路径改 profile 也要落盘
-                            persist=getattr(config, "persist", None))
+                            persist=getattr(config, "persist", None),
+                            # v0.10.17：管理员只能从模型目录里"选"模型
+                            models=models)
         self.registry = ToolRegistry(gate=None, audit=db)
         self.registry.gate = _AdminGate()
         for tool in build_admin_tools(svc):

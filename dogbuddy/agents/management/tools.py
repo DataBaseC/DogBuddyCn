@@ -47,7 +47,8 @@ class AdminServices:
                  self_status: Callable[[bool], dict] | None = None,
                  self_update: Callable[..., dict] | None = None,
                  supervision: Any = None,
-                 persist: Callable[[], Any] | None = None):
+                 persist: Callable[[], Any] | None = None,
+                 models: Any = None):
         self.windows = windows      # WindowManager: create/list/get/update/pause/resume/delete/status/dispatch
         self.jobs = jobs            # JobManager: create/list/get/update/pause/resume/remove/run_now
         self.sessions = sessions    # SessionManager: get/compress/reset/inject
@@ -60,6 +61,8 @@ class AdminServices:
         self.self_update = self_update
         # T9.4 指挥链：管理员→主管 的指令下发（`supervisor_command` 用）
         self.supervision = supervision
+        # v0.10.17：模型目录（管理员只能"选"，不能自己拉/造模型）
+        self.models = models
         # 配置落盘（审查报告 P1-9）：`profile_save`/`profile_remove` 改的是内存里的
         # app config，**不调 persist 就等于重启即丢**。Web 路由那边是调了的
         # （`web/routes/settings.py`），agent 路径漏了。
@@ -106,14 +109,47 @@ def _p(t: str, desc: str, required: bool = False, **extra: Any) -> dict[str, Any
 def build_admin_tools(svc: AdminServices) -> list[Any]:
     tools: list[Any] = []
     W, J, S = svc.windows, svc.jobs, svc.sessions
+    M = getattr(svc, "models", None)
 
     def need(obj: Any, name: str) -> None:
         if obj is None:
             raise RuntimeError(f"service {name} not wired")
 
     # ------------------------------------------------------------- windows
+    def _catalog_models() -> list[dict]:
+        if M is None:
+            return []
+        try:
+            return [m for m in M.catalog() if m.get("enabled", 1)]
+        except Exception:  # noqa: BLE001 — 目录查询失败按"无目录"处理
+            logger.warning("model catalog lookup failed", exc_info=True)
+            return []
+
+    def _check_model_in_catalog(name: str) -> str:
+        """工位模型必须来自模型目录（空 = 继承）。
+
+        v0.10.17（owner 决定）：**不搞"默认模型"了，全从模型目录里配**；
+        管理员不能自己拉模型，只能从模型页里的列表选。以前这里随手写个名字也能过，
+        请求就打到 profile 的端点上，报错看起来还像"模型配置没配好"。
+        返回空串 = 通过，否则返回给人看的失败原因。
+        """
+        name = (name or "").strip()
+        if not name:
+            return ""
+        entries = _catalog_models()
+        if not entries:
+            return ("模型目录是空的：先让用户在「模型管理」页拉取/新增模型，"
+                    "再选一个（管理员不能自己拉模型）")
+        if any(str(m.get("model") or "") == name for m in entries):
+            return ""
+        avail = "、".join(str(m.get("model") or "") for m in entries[:12])
+        return f"模型「{name}」不在模型目录里，不能使用。可选：{avail}"
+
     async def window_create(args: dict, ctx: ToolContext) -> ToolResult:
         need(W, "windows")
+        bad = _check_model_in_catalog(args.get("model", ""))
+        if bad:
+            return ToolResult.failure(bad)
         params: dict[str, Any] = {}
         if args.get("compact_threshold") not in (None, ""):
             params["compact_threshold"] = args["compact_threshold"]
@@ -164,6 +200,9 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
 
     async def window_update(args: dict, ctx: ToolContext) -> ToolResult:
         need(W, "windows")
+        bad = _check_model_in_catalog(args.get("model", ""))
+        if bad:
+            return ToolResult.failure(bad)
         fields = {k: v for k, v in args.items()
                   if k in ("name", "model", "mode", "llm_profile") and v is not None and v != ""}
         # 压缩阈值/上下文上限走工位参数覆盖：与**已有覆盖合并**（不是整包替换）
@@ -368,6 +407,64 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
             mark = " [ACTIVE]" if name == app.active_llm_profile else ""
             lines.append(f"- {name}: {section.provider} {section.base_url} model={section.model or '(unset)'}{mark}")
         return ToolResult.success("\n".join(lines), active=app.active_llm_profile or "(default)")
+
+    async def model_catalog(args: dict, ctx: ToolContext) -> ToolResult:
+        """列出模型目录（管理员**只能从这里选**，不能自己拉取或编造模型名）。"""
+        entries = _catalog_models()
+        if not entries:
+            return ToolResult.success("模型目录是空的 —— 请用户在「模型管理」页拉取或新增模型。")
+        cur = ""
+        try:
+            cur = str(getattr(getattr(M, "app", None), "llm", None).model or "")
+        except Exception:  # noqa: BLE001
+            cur = ""
+        lines = []
+        for m in entries:
+            mark = " ← 管理员当前" if m.get("model") == cur else ""
+            note = (m.get("note") or "").strip().replace("\n", " ")[:60]
+            ctx_n = int(m.get("context_window") or 0)
+            lines.append(f"{m.get('model')} | {m.get('provider') or '-'} | "
+                         f"{'有独立密钥' if m.get('has_api_key') else '用全局密钥'} | "
+                         f"上下文 {ctx_n or '继承'}{(' | ' + note) if note else ''}{mark}")
+        return ToolResult.success("\n".join(lines))
+
+    tools.append(FnTool("model_catalog",
+        "List the model catalog (the ONLY models you may use). You cannot fetch models "
+        "from a provider and you must not invent model names.",
+        _OBJ, model_catalog))
+
+    async def model_select(args: dict, ctx: ToolContext) -> ToolResult:
+        """把目录里的某条设为**管理员模型**，或给某个工位指定。
+
+        只允许选择目录里已有的条目（owner 决定："不搞默认模型了，全从模型目录里自己配"）。
+        """
+        need(M, "models")
+        name = str(args.get("model") or "").strip()
+        if not name:
+            return ToolResult.failure("要选哪个模型？先用 model_catalog 看列表。")
+        entries = _catalog_models()
+        hit = [m for m in entries if str(m.get("model") or "") == name]
+        if not hit:
+            avail = "、".join(str(m.get("model") or "") for m in entries[:12]) or "(目录为空)"
+            return ToolResult.failure(f"模型「{name}」不在目录里。可选：{avail}")
+        wid = str(args.get("window_id") or "").strip()
+        if wid:
+            need(W, "windows")
+            try:
+                w = W.update(wid, model=name)
+            except Exception as e:  # noqa: BLE001
+                return ToolResult.failure(f"设置工位模型失败：{e}")
+            return ToolResult.success(f"工位 {w.id}（{w.name}）已改用模型 {name}")
+        res = M.activate(hit[0]["id"])
+        note = "（该条目自带密钥，已一并切换）" if res.get("api_key_switched") else ""
+        return ToolResult.success(f"管理员模型已切换为 {name}{note}")
+
+    tools.append(FnTool("model_select",
+        "Switch the model the ADMIN itself runs on (no window_id), or set one window's "
+        "model (with window_id). The model must exist in the catalog — see model_catalog.",
+        _props(model=_p("string", "exact model name from model_catalog", True),
+               window_id=_p("string", "optional window id; empty = change the admin's own model")),
+        model_select, "write"))
 
     tools.append(FnTool("profile_list", "List named LLM config sets (profiles) and which is active.",
         _OBJ, profile_list))

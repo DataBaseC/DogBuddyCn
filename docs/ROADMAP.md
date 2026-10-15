@@ -836,3 +836,47 @@ owner 的三条反馈：
 对**用户正等着结果的人工派单**就是"掉线了没人告诉我"）。
 现在：`payload.manual=True` 的失败**立即按 brief 汇报**（模板里带 `[错误码]` + 人话），
 定时任务仍按连败降噪；给主管看的原文也带上错误码。
+
+---
+
+## 15. 第八轮：`tool` 配对 400 的真正原因 + 模型只从目录里选（2026-10-15 深夜，`0.10.17`）
+
+owner 报：
+
+> 我配置模型是不是没配好？
+> `[LLM error/permanent] ... Messages with role 'tool' must be a response to a
+>  preceding message with 'tool_calls'`
+> 要不不搞默认模型了，全从模型目录里自己配得了。管理员不能自己拉取模型，
+> 只能从模型页里的模型列表选。
+
+### 15.1 那个 400 **不是他配错了**，是我们重建请求时形状错了
+
+`ContextBuilder.build()` 把持久化消息映射成 OpenAI 形状时是**逐条独立**映射的：
+一条 `tool` 结果只要有 `tool_call_id` 就原样发出。可是历史一旦被
+`recent_limit=60` 裁剪、被压缩、或被 `context_reset` 清掉一半，就会出现
+**"有 tool 结果、它的 assistant.tool_calls 已被裁掉"** —— DeepSeek 对这条极严格，
+整轮 400，而用户看到的是一个像"配置问题"的报错。
+
+生产数据里的实锤（本机脚本扫的）：
+
+```
+tester-2: 全量 119 条 | limit= 60 段首=tool ← 孤儿开头=True 内部断裂=1
+tester-1: 全量  58 条 | limit= 60 段首=user 孤儿开头=False 内部断裂=0
+```
+
+修法（`windows/context.py`，L3 域内）：
+- **孤儿 tool 结果 → 降级成 `user` 文本**（信息不丢，形状合法）；
+- **assistant 声明了 tool_calls 却没有结果 → 在下一条非 tool 消息前补占位 tool 结果**；
+- 用与服务商同规则的校验器写测试（`tests/test_tool_call_pairing.py`，5 条），
+  并用 **tester-2 的真实历史**验证：裁剪到 60 条后构建 **61 条消息、0 处形状问题**。
+
+### 15.2 模型只从目录里选（owner 的决定）
+
+- 管理员新增两个工具：`model_catalog`（只读列表，标出"管理员当前"）与
+  `model_select`（只选目录里的条目：给自己换，或 `window_id` 指定某个工位）。
+- `window_create` / `window_update` 的 `model` **必须命中目录**，否则失败并**列出候选**
+  （以前随手写也能过 → 请求打到 profile 端点上，报错还像"模型没配好"）。
+- 管理员**没有任何拉取服务商模型列表的工具**（本就没有，加测试钉住）；
+  `ADMIN_TOOLS` 同步补上两个新名字（不变量测试会拦）。
+- 向导保存凭据后自动 `adopt-current`：填的模型立刻进目录 ——"配置里的模型"和
+  "模型页里的模型"不再有两套说法。

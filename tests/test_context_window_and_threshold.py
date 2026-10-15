@@ -132,7 +132,13 @@ def test_uid_create_and_update_carry_the_threshold(tmp_path):
     mem = MemoryService(tmp_path / "memory")
     wm = WindowManager(db=db, llm_factory=lambda: None, bus=bus, memory=mem,
                        checkpoints_dir=tmp_path / "ckpt")
-    svc = AdminServices(windows=wm)
+    # v0.10.17：工位模型必须来自模型目录 → 测试也要先建目录条目
+    cfg = AppConfig(llm=LLMConfig(), paths=PathsConfig(
+        data_dir=str(tmp_path), workspaces_dir=str(tmp_path / "ws")))
+    models = ModelService(db, cfg, persist=lambda: "cfg.yaml")
+    db.upsert_model({"id": "m-x", "provider": "openai_compat", "model": "m-x",
+                     "base_url": "https://x/v1", "enabled": 1})
+    svc = AdminServices(windows=wm, models=models)
     tools = {t.name: t for t in build_admin_tools(svc)}
     ctx = ToolContext(window_id="admin:default", workspace=str(tmp_path), db=db)
 

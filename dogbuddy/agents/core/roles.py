@@ -114,6 +114,10 @@ ADMIN_TOOLS = [
     "context_view", "context_compress", "context_reset", "context_inject",
     "config_get", "config_set", "report_set",
     "profile_list", "profile_save", "profile_remove",
+    # v0.10.17：模型**只能从目录里选**（管理员不能自己拉取/编造模型名）。
+    # owner 的决定："不搞默认模型了，全从模型目录里自己配；管理员不能自己拉取模型，
+    # 只能从模型页里的模型列表选。"
+    "model_catalog", "model_select",
     "memory_write", "memory_recall",
     "progress_report",
     # T9.6 审批闭环（P1-6）：主管裁决员工升级上来的高危操作

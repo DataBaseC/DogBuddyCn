@@ -119,7 +119,9 @@ def test_settings_no_longer_edits_models():
     assert "App.go('models')" in s
     # 兜底配置的连通性测试还在，但**不做对话**（按模型测连接在模型页）
     assert 'id="set-test-llm"' in s
-    assert "payload.model" not in s
+    # "保存该组" 的 payload 不再带 model（模型只在模型页维护）；
+    # 向导那一步会把填的模型收进目录，那里的 payload.model 是允许的
+    assert "model: document.getElementById('set-model').value" not in s
     assert "换模型请到「模型管理」页点「设为管理员模型」" in s
 
 

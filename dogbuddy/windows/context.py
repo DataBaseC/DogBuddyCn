@@ -85,6 +85,42 @@ class ContextBuilder:
 
     def build(self, session: Any, recent_limit: int = 60) -> list[dict[str, Any]]:
         msgs: list[dict[str, Any]] = [{"role": "system", "content": self.system_block(session)}]
+        # v0.10.17：**修复 tool / tool_calls 配对**。
+        # 历史一旦被裁剪（recent_limit）、压缩或被外部清空，就可能出现
+        # "有 tool 结果、没有配对的 assistant.tool_calls"。DeepSeek 会直接 400：
+        #   Messages with role 'tool' must be a response to a preceding message
+        #   with 'tool_calls' (request_id …)
+        # 这是**我们重建请求时的形状问题**，不是用户配置问题 —— 所以在这里补形状：
+        #   · 孤儿 tool 结果 → 降级成 user 文本（信息不丢，形状合法）
+        #   · assistant 声明了 tool_calls 却没有结果 → 补一条占位 tool 结果
+        pending: list[str] = []          # 当前 assistant 声明、还没被满足的 tool_call_id
+
+        def flush_missing() -> None:
+            """把没人应答的 tool_calls 补上占位结果（必须在下一个非 tool 消息之前）。"""
+            for cid in pending:
+                msgs.append({"role": "tool", "tool_call_id": cid,
+                             "content": "(tool result not available in this context)"})
+            pending.clear()
+
         for m in session.recent(recent_limit):
-            msgs.append(message_to_llm(m))
+            item = message_to_llm(m)
+            role = item.get("role")
+            if role == "assistant":
+                flush_missing()
+                msgs.append(item)
+                pending = [str(tc.get("id") or "") for tc in (item.get("tool_calls") or [])
+                           if tc.get("id")]
+            elif role == "tool":
+                cid = str(item.get("tool_call_id") or "")
+                if cid and cid in pending:
+                    pending.remove(cid)
+                    msgs.append(item)
+                else:
+                    # 孤儿：转成 user 文本，避免整轮请求被服务商拒绝
+                    msgs.append({"role": "user",
+                                 "content": f"[tool result] {item.get('content') or ''}"})
+            else:
+                flush_missing()
+                msgs.append(item)
+        flush_missing()
         return msgs
