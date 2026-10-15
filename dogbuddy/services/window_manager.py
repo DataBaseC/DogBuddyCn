@@ -338,6 +338,35 @@ class WindowManager:
                          max_context_tokens=p.get("max_context_tokens", self.max_context_tokens))
 
     # ---------------------------------------------------------- crud facade
+    #: 工位级参数的范围（与参数面板一致）。越界**直接报错**——否则一个 "compact_threshold: 5"
+    #: 会让压缩永不触发（或每次都触发），而且界面上看不出来。业务规则住这里（L3），
+    #: 不在路由/工具里各写一遍。
+    _PARAM_RANGES: dict[str, tuple[float, float]] = {
+        "compact_threshold": (0.3, 0.95),
+        "max_context_tokens": (2000, 10_000_000),
+        "task_timeout": (30, 86400),
+        "max_iterations": (1, 200),
+        "temperature": (0.0, 2.0),
+        "request_timeout": (5.0, 3600.0),
+    }
+    _PARAM_INT_KEYS = ("max_context_tokens", "task_timeout", "max_iterations")
+
+    @classmethod
+    def _check_params(cls, params: dict | None) -> dict:
+        """校验/规范化工位参数覆盖。未知键原样保留（可能给扩展用），已知键必须合法。"""
+        out = dict(params or {})
+        for key, (lo, hi) in cls._PARAM_RANGES.items():
+            if key not in out or out[key] is None or out[key] == "":
+                continue
+            try:
+                val = float(out[key])
+            except (TypeError, ValueError):
+                raise ValueError(f"参数 {key} 不是数字：{out[key]!r}") from None
+            if not (lo <= val <= hi):
+                raise ValueError(f"参数 {key} 超出范围 {lo}~{hi}：{val}")
+            out[key] = int(val) if key in cls._PARAM_INT_KEYS else val
+        return out
+
     def create(self, name: str, role: str = "worker_programmer", workspace_path: str = "",
                model: str = "", mode: str = "BUILD", llm_profile: str = "",
                params: dict | None = None) -> Window:
@@ -347,15 +376,18 @@ class WindowManager:
         spec = get_role(role)
         if spec is None:
             raise ValueError(f"unknown role: {role}")
+        checked_params = self._check_params(params)
         ws = Path(workspace_path).expanduser()
         ws.mkdir(parents=True, exist_ok=True)
         w = Window(id=new_id(), name=name, role=role, workspace_path=str(ws.resolve()),
                    model=model, mode=mode if mode in ("BUILD", "PLAN", "AUTO") else spec.default_mode,
                    status="idle", llm_profile=llm_profile or "",
-                   params=params if isinstance(params, dict) else {})
+                   params=checked_params)
         self.db.insert_window(w)
         self._boot(w)
-        self.db.audit("system", "window:create", f"{w.id} {name} role={role} profile={llm_profile or 'default'}")
+        self.db.audit("system", "window:create",
+                      f"{w.id} {name} role={role} profile={llm_profile or 'default'} "
+                      f"params={checked_params or '{}'}")
         return w
 
     def list(self) -> list[Window]:
@@ -383,6 +415,8 @@ class WindowManager:
         rt = self._rt(window_id)
         if "mode" in fields and fields["mode"] not in ("BUILD", "PLAN", "AUTO"):
             raise ValueError(f"invalid mode: {fields['mode']}")
+        if "params" in fields and fields["params"] is not None:
+            fields["params"] = self._check_params(fields["params"])
         w = self.db.update_window(rt.window.id, **fields)
         if w:
             rt.window = w

@@ -83,6 +83,13 @@ class ConfigService:
         p, b, k = self._llm_params(provider, base_url, api_key)
         return await fetch_model_list(p, b, k)
 
+    async def fetch_models_meta(self, provider: str | None = None, base_url: str | None = None,
+                                api_key: str | None = None) -> list[dict[str, Any]]:
+        """同 `fetch_models`，但带上服务商给的上下文长度（读不到就是 0 = 未知）。"""
+        from ..llm.models import fetch_model_meta
+        p, b, k = self._llm_params(provider, base_url, api_key)
+        return await fetch_model_meta(p, b, k)
+
     async def test_llm(self, provider: str | None = None, base_url: str | None = None,
                        api_key: str | None = None, model: str | None = None) -> dict[str, Any]:
         from ..llm.models import test_connection

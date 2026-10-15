@@ -874,8 +874,7 @@
           (w.resolved_model && !w.model ? '（当前 ' + U.esc(w.resolved_model) + '）' : '') + '">' +
           '<button class="btn btn-soft btn-sm" id="model-fetch" type="button">拉取模型</button></div>' +
           '<select class="select mono" id="model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
-          '<div class="hint">留空即跟随管理员使用的模型；填了则此工位单独使用该模型。</div>' +
-          '<datalist id="model-options"></datalist></div>' +
+          '<div class="hint">留空即跟随管理员使用的模型；填了则此工位单独使用该模型。</div></div>' +
           '<div class="field"><span class="field-label">模式</span>' +
           '<select class="select" id="mode-input">' +
           ['BUILD', 'PLAN', 'CHAT', 'REVIEW'].map(function (m) {
@@ -916,13 +915,7 @@
           fetchBtn.textContent = '拉取中…';
           var profileSel = document.getElementById('model-profile');
           A.settings.models('', '', '', profileSel ? profileSel.value : '').then(function (r) {
-            var dl = document.getElementById('model-options');
-            if (dl) {
-              dl.innerHTML = (r.models || []).map(function (m) {
-                return '<option value="' + U.esc(m) + '"></option>';
-              }).join('');
-            }
-            /* 全量进下拉：datalist 会按输入框已有文字过滤，只靠它会出现"只能选一个" */
+            /* 全量进下拉（datalist 会按输入框已有文字过滤，所以不再用它） */
             U.fillModelSelect('model-select', r.models || [], 'model-input');
             if (r.error) U.toast('warn', '拉取模型失败：' + r.error);
             else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
@@ -961,6 +954,17 @@
           '<div class="field"><span class="field-label">LLM 配置套</span>' +
           '<select class="select" id="nw-profile"><option value="">默认</option></select>' +
           '<div class="hint">空 = 跟随全局默认配置套</div></div>' +
+          '</div>' +
+          '<div class="set-two">' +
+          '<div class="field"><span class="field-label">压缩阈值（0.3 ~ 0.95）</span>' +
+          '<input class="input num" id="win-threshold" type="number" min="0.3" max="0.95" step="0.05"' +
+          ' placeholder="留空 = 继承全局（默认 0.8）">' +
+          '<div class="hint">上下文用到这个比例就自动压缩。按员工的活来定：' +
+          '长任务/贵模型可以调高（0.85）省压缩，短任务可以调低（0.6）省上下文开销。</div></div>' +
+          '<div class="field"><span class="field-label">上下文上限（tokens，可选）</span>' +
+          '<input class="input num" id="win-maxctx" type="number" min="2000" step="1000"' +
+          ' placeholder="留空 = 用模型的默认上下文">' +
+          '<div class="hint">默认跟着模型走（模型页里填的上下文窗口）；只有这个工位要特殊对待时才填。</div></div>' +
           '</div>',
         buttons: [
           { label: '取消', cls: 'btn-ghost' },
@@ -985,6 +989,20 @@
               var model = body.querySelector('#nw-model').value.trim();
               if (ws) payload.workspace_path = ws;
               if (model) payload.model = model;
+              /* v0.10.12：管理员建员工时明确指定压缩阈值（可选，越界后端会 400） */
+              var thrRaw = body.querySelector('#win-threshold').value.trim();
+              var ctxRaw = body.querySelector('#win-maxctx').value.trim();
+              var params = {};
+              if (thrRaw !== '') {
+                var thr = Number(thrRaw);
+                if (!isFinite(thr) || thr < 0.3 || thr > 0.95) {
+                  U.toast('warn', '压缩阈值要在 0.3 ~ 0.95 之间');
+                  return false;
+                }
+                params.compact_threshold = thr;
+              }
+              if (ctxRaw !== '') params.max_context_tokens = Number(ctxRaw);
+              if (Object.keys(params).length) payload.params = params;
               A.windows.create(payload).then(function () {
                 U.toast('success', '工位已创建');
                 Windows.load();

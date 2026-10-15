@@ -155,12 +155,20 @@ def router(svc, auth_deps) -> APIRouter:
         except Exception:  # noqa: BLE001
             pass
         ratio = (used / max_tokens) if max_tokens else 0.0
+        # 管理员的模型 = 运行时全局配置（管理员没有工位，所以在"模型管理"页点「设为当前」
+        # 就是给管理员换模型；工位不单独指定模型时继承它）
+        cur_model = str(getattr(llm, "model", "") or "")
+        cur_base = str(getattr(llm, "base_url", "") or "")
+        cur_provider = str(getattr(llm, "provider", "") or "")
         return {"conversation": cid,
                 "context_tokens": used,
                 "max_context_tokens": max_tokens,
                 "ratio": round(min(ratio, 1.0), 4),
                 "threshold": threshold,
                 "tokens": spent,
+                "model": cur_model,
+                "base_url": cur_base,
+                "provider": cur_provider,
                 "estimated": bool(getattr(session, "context_tokens_estimated", True))}
 
     @r.post("/admin/chat", dependencies=auth_deps)

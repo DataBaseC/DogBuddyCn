@@ -79,11 +79,13 @@ def make_model_id(provider: str, model: str) -> str:
 class ModelService:
     def __init__(self, db: Any, app_config: Any = None,
                  persist: Callable[[], str] | None = None,
-                 fetch_models: Callable[..., Any] | None = None):
+                 fetch_models: Callable[..., Any] | None = None,
+                 fetch_meta: Callable[..., Any] | None = None):
         self.db = db
         self.app = app_config
         self._persist = persist
         self._fetch = fetch_models  # async (provider, base_url, api_key) -> list[str]
+        self._fetch_meta = fetch_meta  # async (...) -> [{id, context_window}]（服务商没给就是 0）
 
     # ------------------------------------------------------------- 读
     def catalog(self, enabled_only: bool = False) -> list[dict[str, Any]]:
@@ -218,19 +220,32 @@ class ModelService:
     # ------------------------------------------------------------- 导入
     async def import_fetched(self, provider: str | None = None, base_url: str | None = None,
                              api_key: str | None = None) -> dict[str, Any]:
-        """从 provider 拉模型列表并入库。**绝不覆盖已存在的 note**。"""
-        if self._fetch is None:
+        """从 provider 拉模型列表并入库。**绝不覆盖已存在的 note**。
+
+        v0.10.12：能拿到服务商给的上下文长度就写进条目（`context_window`）；
+        **只填"还没有值"的条目**——用户手填过的数一律不覆盖。
+        服务商没给（`0`）就留空，表示"继承服务商/全局默认"，不替它编一个数。
+        """
+        if self._fetch_meta is None and self._fetch is None:
             raise RuntimeError("未接入模型列表拉取能力")
-        names = await self._fetch(provider, base_url, api_key)
-        names = [str(n).strip() for n in (names or []) if str(n).strip()]
         cfg = self.app
         used_provider = provider or (cfg.llm.provider if cfg else "openai_compat")
         used_base = base_url or (cfg.llm.base_url if cfg else "")
+        ctx_of: dict[str, int] = {}
+        if self._fetch_meta is not None:
+            meta = await self._fetch_meta(provider, base_url, api_key)
+            names = [str(m.get("id") or "").strip() for m in (meta or [])]
+            ctx_of = {str(m.get("id")): int(m.get("context_window") or 0)
+                      for m in (meta or []) if m.get("id")}
+        else:
+            names = await self._fetch(provider, base_url, api_key)
+        names = [n for n in names if n]
         existing = {r["id"]: r for r in self.db.list_models()}
-        added, refreshed, kept_notes = [], [], 0
+        added, refreshed, kept_notes, ctx_filled = [], [], 0, 0
         for name in names:
             mid = make_model_id(used_provider, name)
             entry = existing.get(mid)
+            ctx = ctx_of.get(name, 0)
             if entry is None:
                 new_entry: dict[str, Any] = {"id": mid, "provider": used_provider, "model": name,
                                              "base_url": used_base, "source": "fetched",
@@ -238,18 +253,25 @@ class ModelService:
                 # 用哪把 key 拉的列表，新条目就带上哪把（跨服务商导入后可直接"设为当前"）
                 if (api_key or "").strip():
                     new_entry["api_key"] = api_key.strip()
+                if ctx > 0:
+                    new_entry["context_window"] = ctx
+                    ctx_filled += 1
                 self.db.upsert_model(new_entry)
                 added.append(name)
             else:
                 patch: dict[str, Any] = {"id": mid, "provider": used_provider, "base_url": used_base}
                 if entry.get("source") != "manual":
                     patch["source"] = "fetched"
+                if ctx > 0 and not int(entry.get("context_window") or 0):
+                    patch["context_window"] = ctx      # 只补空，不覆盖用户填过的值
+                    ctx_filled += 1
                 self.db.upsert_model(patch)
                 refreshed.append(name)
                 if (entry.get("note") or "").strip():
                     kept_notes += 1
         self.db.audit("web", "model:import",
                       f"provider={used_provider} fetched={len(names)} added={len(added)} "
-                      f"refreshed={len(refreshed)}")
+                      f"refreshed={len(refreshed)} ctx_filled={ctx_filled}")
         return {"fetched": len(names), "added": added, "refreshed": refreshed,
-                "kept_notes": kept_notes, "provider": used_provider, "base_url": used_base}
+                "kept_notes": kept_notes, "context_filled": ctx_filled,
+                "provider": used_provider, "base_url": used_base}

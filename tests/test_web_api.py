@@ -170,17 +170,21 @@ def test_settings_models_and_test_llm(tmp_path):
     app, client = _client(tmp_path)
 
     async def fake_models(provider=None, base_url=None, api_key=None):
-        return ["gpt-4o-mini", "gpt-4o"]
+        # v0.10.12：拉取现在带上下文长度（服务商给不了就是 0）
+        return [{"id": "gpt-4o-mini", "context_window": 128000},
+                {"id": "gpt-4o", "context_window": 0}]
 
     async def fake_test(provider=None, base_url=None, api_key=None, model=None):
         return {"ok": True, "latency_ms": 42, "model_count": 2, "message": "connected"}
 
-    app.config_svc.fetch_models = fake_models
+    app.config_svc.fetch_models_meta = fake_models
     app.config_svc.test_llm = fake_test
 
     r = client.get("/api/settings/models", params={"base_url": "https://x/v1"})
     assert r.status_code == 200
     assert r.json()["models"] == ["gpt-4o-mini", "gpt-4o"] and r.json()["error"] == ""
+    assert r.json()["details"] == [{"id": "gpt-4o-mini", "context_window": 128000},
+                                   {"id": "gpt-4o", "context_window": 0}]
 
     r = client.post("/api/settings/test_llm", json={"model": "gpt-4o"})
     assert r.json()["ok"] is True and r.json()["latency_ms"] == 42

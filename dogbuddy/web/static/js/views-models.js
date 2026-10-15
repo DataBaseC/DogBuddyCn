@@ -16,12 +16,15 @@
     var tag = state.summary && state.summary.current_in_catalog ? '' :
       ' <span class="badge badge-amber">未纳入目录</span>';
     return '<div class="card"><div class="card-body mdl-current">' +
-      '<span class="mdl-cur-label">当前生效</span>' +
+      '<span class="mdl-cur-label" title="管理员就是你正在对话的那个 Agent；它在模型管理页点「设为当前」即可更换">管理员当前模型</span>' +
       '<span class="mono mdl-cur-model">' + U.esc(c.model || '(未设置)') + '</span>' + tag +
       '<span class="card-sub mono">' + U.esc(c.base_url || '') + '</span>' +
       '<span class="card-sub">上下文 ' + U.esc(String(c.max_context_tokens || 0)) + ' tokens</span>' +
       '<span class="card-sub">活跃配置套 ' + U.esc(c.active_profile || '(默认)') + '</span>' +
-      '</div></div>';
+      '</div>' +
+      '<div class="card-sub" style="margin-top:6px">下面对话那头（管理员）用的就是这条模型；' +
+      '工位没有单独指定模型时也继承它。点某一行的「设为管理员模型」即可切换。</div>' +
+      '</div>';
   }
 
   function noteCell(m) {
@@ -57,7 +60,7 @@
       '<td class="num">' + (m.context_window ? U.esc(String(m.context_window)) : '—') + '</td>' +
       '<td class="mdl-actions">' +
       '<button class="btn btn-soft btn-sm" data-mdl="note" data-id="' + U.esc(m.id) + '">' + U.icon('edit', 'sm') + '备注</button>' +
-      (isCur ? '' : '<button class="btn btn-primary btn-sm" data-mdl="activate" data-id="' + U.esc(m.id) + '">设为当前</button>') +
+      (isCur ? '' : '<button class="btn btn-primary btn-sm" data-mdl="activate" data-id="' + U.esc(m.id) + '" title="管理员与（未单独指定模型的）工位都会用它">设为管理员模型</button>') +
       '<button class="btn btn-ghost btn-sm" data-mdl="toggle" data-id="' + U.esc(m.id) + '">' + (m.enabled ? '停用' : '启用') + '</button>' +
       '<button class="btn btn-danger btn-sm" data-mdl="del" data-id="' + U.esc(m.id) + '">' + U.icon('trash', 'sm') + '</button>' +
       '</td></tr>';
@@ -148,7 +151,7 @@
     if (kind === 'activate') {
       return apiModels().activate(id).then(function (r) {
         var res = (r && r.result) || {};
-        U.toast('success', '已切换为 ' + (res.model || id) + '（已写盘，重启后仍生效）');
+        U.toast('success', '管理员模型已切换为 ' + (res.model || id) + '（已写盘，重启后仍生效）');
         return load();
       }).catch(function (e) { U.toast('error', '切换失败：' + e.message); });
     }
@@ -187,9 +190,11 @@
 
   function editModel(m, focusNote) {
     var isNew = !m;
+    /* v0.10.12：新条目**不预填 128k**——上下文窗口跟着服务商/模型走，
+       服务商没给就留空（0 = 继承），别替它编一个数。 */
     m = m || { model: '', provider: state.current.provider || 'openai_compat',
                base_url: state.current.base_url || '', note: '', capability: '',
-               context_window: state.current.max_context_tokens || 0, speed: '', cost: '' };
+               context_window: 0, speed: '', cost: '' };
     var keyHint = m.has_api_key
       ? ('已保存 ' + (m.api_key || '********') + '，留空保持不变')
       : '留空 = 用全局密钥（设置页那把）';
@@ -200,10 +205,9 @@
         '<div class="field"><span class="field-label">服务商预设（点一下带出地址）</span>' +
         '<div class="mdl-chips" id="mdl-f-presets">' + presetChips() + '</div></div>' +
         '<div class="set-two">' +
-        '<div class="field"><span class="field-label">模型名 *（可点下面「拉取模型列表」选）</span>' +
-        '<input class="input mono" id="mdl-f-model" list="mdl-f-model-list" value="' +
-        U.esc(m.model || '') + '" placeholder="如 deepseek-v4-flash">' +
-        '<datalist id="mdl-f-model-list"></datalist></div>' +
+        '<div class="field"><span class="field-label">模型名 *</span>' +
+        '<input class="input mono" id="mdl-f-model" value="' +
+        U.esc(m.model || '') + '" placeholder="也可以直接在下面的下拉里选"></div>' +
         '<div class="field"><span class="field-label">API 地址（base_url）</span>' +
         '<input class="input mono" id="mdl-f-base" value="' + U.esc(m.base_url || '') +
         '" placeholder="https://…/v1"></div>' +
@@ -222,10 +226,10 @@
         '<span class="hint" id="mdl-f-probe-out"></span></div>' +
         /* 拉取结果放进真正的下拉：<datalist> 会**按输入框里已有的文字过滤**，
            所以"自动填第一个"会让下拉里只剩那一个（实测就是这样：99 个只能选到 1 个）。 */
-        '<div class="field" id="mdl-f-picker" style="display:none">' +
+        '<div class="field" id="mdl-f-picker">' +
         '<span class="field-label">从拉取到的列表里选（<span id="mdl-f-count">0</span> 个）</span>' +
-        '<select class="select mono" id="mdl-f-select"><option value="">（选择…）</option></select>' +
-        '<div class="hint">选中后会填进上面的「模型名」；也可以直接在模型名框里输入关键词，用下拉建议。</div></div>' +
+        '<select class="select mono" id="mdl-f-select"><option value="">（点上面「拉取模型列表」后在这里选）</option></select>' +
+        '<div class="hint">这里列的是**全量**模型，选中即填入上面的「模型名」；不拉取也可以手输。</div></div>' +
         '<div class="field"><span class="field-label">备注：能力与限制（建议写清）</span>' +
         '<textarea class="textarea" id="mdl-f-note" rows="3" placeholder="例如：工具调用稳定；429 限速很凶，并发别超 2；中文好；不支持 vision。">' +
         U.esc(m.note || '') + '</textarea></div>' +
@@ -237,7 +241,9 @@
         '<input class="input" id="mdl-f-name" value="' + U.esc(m.display_name || '') + '"></div>' +
         '<div class="field"><span class="field-label">上下文窗口（tokens）</span>' +
         '<input class="input" id="mdl-f-ctx" type="number" min="0" value="' +
-        U.esc(String(m.context_window || 0)) + '"></div>' +
+        U.esc(String(m.context_window || 0)) + '" placeholder="0 / 留空 = 用服务商默认">' +
+        '<div class="hint" id="mdl-f-ctx-hint">拉取后如果服务商报了上下文，会自动填在这里；' +
+        '没报就留 0（= 继承全局，不瞎填）。这个值会在「设为当前」时写进模型的运行时上下文。</div></div>' +
         '</div>' +
         '<div class="set-two">' +
         '<div class="field"><span class="field-label">速度档</span>' +
@@ -323,6 +329,21 @@
       return out;
     }
 
+    /* 拉取的上下文长度缓存：id → tokens（0 = 服务商没说） */
+    var mdlCtx = {};
+    function applyCtx(name) {
+      var inp = U.$('#mdl-f-ctx');
+      var hint = U.$('#mdl-f-ctx-hint');
+      if (!inp) return;
+      var ctx = Number(mdlCtx[name] || 0);
+      if (ctx > 0) {
+        if (!Number(inp.value)) inp.value = String(ctx);
+        if (hint) hint.textContent = '服务商报的上下文是 ' + ctx + ' tokens（已填入，可改）。';
+      } else if (!Number(inp.value) && hint) {
+        hint.textContent = '这家服务商没给上下文长度 → 留 0 = 继承全局（不替它瞎填）。';
+      }
+    }
+
     var fetchBtn = U.$('#mdl-f-fetch');
     if (fetchBtn) {
       fetchBtn.addEventListener('click', function () {
@@ -331,24 +352,32 @@
         A.settings.models(a.provider, a.base_url, a.api_key, undefined, a.model_ref).then(function (r) {
           var list = (r && r.models) || [];
           if (r && r.error) { probeOut('拉取失败：' + r.error, 'err'); return; }
-          /* ① 给输入框留一份建议（供手输过滤） */
-          var dl = U.$('#mdl-f-model-list');
-          if (dl) dl.innerHTML = list.map(function (x) { return '<option value="' + U.esc(x) + '"></option>'; }).join('');
-          /* ② 真正能选的是这个 select：不自动填值，用户点开就是全量列表
-             （实现见 ui.js `fillModelSelect`：datalist 会按输入框文字过滤） */
+          /* 唯一的选择入口：select（全量、不按输入框过滤） */
           U.fillModelSelect('mdl-f-select', list, 'mdl-f-model');
+          /* 服务商愿意给上下文就记下来，选中时自动填进「上下文窗口」 */
+          mdlCtx = {};
+          (r.details || []).forEach(function (d) {
+            if (d && d.id) mdlCtx[d.id] = Number(d.context_window || 0);
+          });
+          var ctxCount = Object.keys(mdlCtx).filter(function (k2) { return mdlCtx[k2] > 0; }).length;
           var cnt = U.$('#mdl-f-count');
           if (cnt) cnt.textContent = String(list.length);
-          var picker = U.$('#mdl-f-picker');
-          if (picker) picker.style.display = list.length ? '' : 'none';
           probeOut(list.length
-            ? ('拉到 ' + list.length + ' 个模型，在下面下拉里选')
+            ? ('拉到 ' + list.length + ' 个模型，在下面下拉里选' +
+               (ctxCount ? '（其中 ' + ctxCount + ' 个服务商给了上下文长度，选中会自动填）'
+                         : '（这家没报上下文长度，条目留 0 = 继承）'))
             : '没拉到模型（检查地址与密钥）', list.length ? 'ok' : 'err');
         }).catch(function (e) { probeOut('拉取失败：' + e.message, 'err'); });
       });
     }
 
-    /* 选中下拉项 → 填进「模型名」输入框（事件在 ui.fillModelSelect 里绑，幂等） */
+    /* 选中下拉项 → 填「模型名」（ui.fillModelSelect 已绑），并顺手带出服务商给的上下文 */
+    var ctxSel = U.$('#mdl-f-select');
+    if (ctxSel) {
+      ctxSel.addEventListener('change', function () {
+        if (ctxSel.value) applyCtx(ctxSel.value);
+      });
+    }
 
     var testBtn = U.$('#mdl-f-test');
     if (testBtn) {

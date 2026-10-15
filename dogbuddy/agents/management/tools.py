@@ -114,21 +114,35 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
     # ------------------------------------------------------------- windows
     async def window_create(args: dict, ctx: ToolContext) -> ToolResult:
         need(W, "windows")
-        w = W.create(name=args["name"], role=args.get("role", "worker_programmer"),
-                     workspace_path=args["workspace"], model=args.get("model", ""),
-                     mode=args.get("mode", "BUILD"),
-                     llm_profile=args.get("llm_profile", ""))
-        return ToolResult.success(f"window created: {w.id} ({w.name})", window_id=w.id)
+        params: dict[str, Any] = {}
+        if args.get("compact_threshold") not in (None, ""):
+            params["compact_threshold"] = args["compact_threshold"]
+        if args.get("max_context_tokens") not in (None, ""):
+            params["max_context_tokens"] = args["max_context_tokens"]
+        try:
+            w = W.create(name=args["name"], role=args.get("role", "worker_programmer"),
+                         workspace_path=args["workspace"], model=args.get("model", ""),
+                         mode=args.get("mode", "BUILD"),
+                         llm_profile=args.get("llm_profile", ""),
+                         params=params or None)
+        except ValueError as e:  # 参数越界 / 重名 / 未知角色 → 让模型看见人话
+            return ToolResult.failure(f"建工位失败：{e}")
+        extra = f"，压缩阈值 {params['compact_threshold']}" if "compact_threshold" in params else ""
+        return ToolResult.success(f"window created: {w.id} ({w.name}){extra}", window_id=w.id)
 
     tools.append(FnTool("window_create",
         "Create an employee window (workstation). Omit `model`/`llm_profile` unless the user "
         "asked for a specific model: empty means the new window inherits the same model the "
-        "admin itself runs on, which is the desired default.",
+        "admin itself runs on, which is the desired default. `compact_threshold` (0.3~0.95) is "
+        "how full the context may get before the app compacts it: ask the user when they care "
+        "about cost/context, otherwise leave it empty (= inherit the global default).",
         _props(name=_p("string", "window name", True), role=_p("string", "role, default worker_programmer"),
                workspace=_p("string", "workspace path", True),
                model=_p("string", "model override; leave empty to inherit the admin's model"),
                mode=_p("string", "BUILD|PLAN|AUTO, default BUILD"),
-               llm_profile=_p("string", "named LLM config set to use (empty = inherit)")),
+               llm_profile=_p("string", "named LLM config set to use (empty = inherit)"),
+               compact_threshold=_p("number", "context compaction threshold 0.3~0.95 (empty = inherit)"),
+               max_context_tokens=_p("integer", "context window override in tokens (empty = inherit)")),
         window_create, "write"))
 
     async def window_list(args: dict, ctx: ToolContext) -> ToolResult:
@@ -152,13 +166,33 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         need(W, "windows")
         fields = {k: v for k, v in args.items()
                   if k in ("name", "model", "mode", "llm_profile") and v is not None and v != ""}
-        w = W.update(args["window_id"], **fields)
+        # 压缩阈值/上下文上限走工位参数覆盖：与**已有覆盖合并**（不是整包替换）
+        if args.get("compact_threshold") not in (None, "") or \
+                args.get("max_context_tokens") not in (None, ""):
+            try:
+                cur = W.get(args["window_id"])
+                merged = dict(getattr(cur, "params", {}) or {})
+            except Exception:  # noqa: BLE001 — 取不到就当空
+                merged = {}
+            if args.get("compact_threshold") not in (None, ""):
+                merged["compact_threshold"] = args["compact_threshold"]
+            if args.get("max_context_tokens") not in (None, ""):
+                merged["max_context_tokens"] = args["max_context_tokens"]
+            fields["params"] = merged
+        try:
+            w = W.update(args["window_id"], **fields)
+        except ValueError as e:
+            return ToolResult.failure(f"更新失败：{e}")
         return ToolResult.success(f"updated {w.id}: {fields}")
 
-    tools.append(FnTool("window_update", "Update window name/model/mode/llm_profile.",
+    tools.append(FnTool("window_update",
+        "Update window name/model/mode/llm_profile, and optionally compact_threshold (0.3~0.95) "
+        "or max_context_tokens.",
         _props(window_id=_p("string", "window id", True), name=_p("string", "new name"),
                model=_p("string", "new model"), mode=_p("string", "BUILD|PLAN|AUTO"),
-               llm_profile=_p("string", "named LLM config set")),
+               llm_profile=_p("string", "named LLM config set"),
+               compact_threshold=_p("number", "context compaction threshold 0.3~0.95"),
+               max_context_tokens=_p("integer", "context window in tokens")),
         window_update, "write"))
 
     for action, verb in (("window_pause", "pause"), ("window_resume", "resume"), ("window_delete", "delete")):

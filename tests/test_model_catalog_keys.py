@@ -176,7 +176,7 @@ def test_api_never_echoes_the_key_and_options_carry_presets(tmp_path, monkeypatc
 def test_frontend_has_the_one_form_onboarding_path():
     js = (REPO / "dogbuddy/web/static/js/views-models.js").read_text(encoding="utf-8")
     for hook in ("mdl-f-presets", "mdl-f-key", "mdl-f-test", "mdl-f-fetch",
-                 "mdl-f-model-list", "has_api_key", "api_key_switched"):
+                 "mdl-f-select", "has_api_key", "api_key_switched"):
         assert hook in js, f"模型页缺少接入要素：{hook}"
     html = (REPO / "dogbuddy/web/static/index.html").read_text(encoding="utf-8")
     assert 'id="mdl-add"' in html and 'id="mdl-import"' in html

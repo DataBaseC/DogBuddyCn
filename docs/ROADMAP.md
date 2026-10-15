@@ -756,3 +756,25 @@ owner 报："拉取列表无法选择，只能选第一个。"
   现在拉取也支持 `model_ref`（服务端取该条目的地址与密钥），与 `test_llm` 同口径。
 - 测试：`tests/test_model_picker.py`（4 条）——`model_ref` 参数口径、未知条目 404、
   "不许自动填第一个"、四个弹窗都要有真下拉。
+
+---
+
+## 12. 第五轮：模型上下文 / 建员工时的压缩阈值 / 管理员的模型（2026-10-15 晚，`0.10.12`）
+
+owner 的三条口径：
+
+> - 模型拉取应该采用服务商默认的上下文
+> - 然后管理员建立员工时会指定压缩阈值
+> - 我还想设置管理员的模型
+
+落地成这样：
+
+| 诉求 | 实现 |
+|---|---|
+| **上下文跟服务商走** | `llm/models.py` 新增 `fetch_model_meta()`：从各家网关的 `context_length` / `context_window` / `max_model_len` / `max_input_tokens`、以及嵌套的 `top_provider` / `meta` 里读上下文；`/api/settings/models` 多返回 `details: [{id, context_window}]`。**服务商没给就留 `0`（= 继承），绝不替它编一个数**——实测 SiliconFlow 的 `/v1/models` 只回 `id/object/created/owned_by`。拉取后在下拉里选中模型会自动把上下文填进表单；导入（`/api/models/import`）只补"还没有值"的条目，**用户手填过的一律不覆盖**；`activate()` 只在该条目有值时改运行时上下文 |
+| **建员工时指定压缩阈值** | 控制台「新建工位」加 `压缩阈值 0.3~0.95` + `上下文上限`（留空=继承）；`POST /api/windows` 已有 `params`；**校验放进 L3**（`WindowManager._check_params`，越界 → 400，避免 `compact_threshold: 5` 让它"永不压缩"却看不出来）；管理员用对话建员工时 `window_create` / `window_update` 也能带这个参数（更新是**合并**已有覆盖，不是整包替换） |
+| **管理员的模型** | 管理员没有工位 → 它的模型就是运行时全局配置，"设为当前"就是给它换模型。所以：`/api/admin/chat/usage` 增加 `model` / `base_url` / `provider`；**对话页顶部显示「模型：xxx」+「换模型」按钮**；模型管理页把「当前生效」改成「**管理员当前模型**」、按钮改成「**设为管理员模型**」，并写明"工位没单独指定模型时继承它"；设置页的兜底卡片只留地址/密钥/参数 + "去模型管理页换模型" |
+
+测试：`tests/test_context_window_and_threshold.py`（10 条）覆盖上下文字段解析、导入不编数/不覆盖、
+`activate` 保留全局、建工位带阈值（API + agent 工具 + 越界报错）、管理员模型可见可换（含 SSE/前端接线）。
+基线 **513 passed / 4 skipped**。

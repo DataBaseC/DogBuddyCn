@@ -32,14 +32,26 @@
 
   function refreshUsage(convId) {
     var host = usageHost();
-    if (!host) return Promise.resolve();
     var id = convId || state.sender;
-    if (id) host.setAttribute('data-conv-id', id);
+    if (host) host.setAttribute('data-conv-id', id);
     return A.adminChatUsage(id).then(function (u) {
+      u = u || {};
+      /* 管理员模型：管理员没有工位，它的模型就是运行时全局模型，
+         在「模型管理」页点「设为当前」即可更换——这里直接显示给人看 */
+      var badge = U.$('#chat-model');
+      if (badge) {
+        badge.textContent = '模型：' + (u.model || '(未设置)');
+        badge.setAttribute('title', '管理员当前模型：' + (u.model || '(未设置)') +
+          (u.base_url ? ' · ' + u.base_url : '') + '（在模型管理页点「设为当前」更换）');
+      }
+      if (!host) return;
       /* 异步回来时若已切换对话，丢弃这次结果 */
       if (host.getAttribute('data-conv-id') !== id) return;
-      host.innerHTML = U.usageHTML(u || {}, { label: '管理员上下文' });
+      host.innerHTML = U.usageHTML(u, { label: '管理员上下文' });
     }).catch(function () {
+      var badge2 = U.$('#chat-model');
+      if (badge2) badge2.textContent = '模型：—';
+      if (!host) return;
       if (host.getAttribute('data-conv-id') !== id) return;
       host.innerHTML = '<div class="ctx-usage-top"><span class="ctx-usage-label">' +
         U.icon('activity', 'sm') + '管理员上下文</span>' +
@@ -265,6 +277,14 @@
 
     var rf = U.$('#chat-refresh');
     if (rf) rf.addEventListener('click', load);
+
+    var mg = U.$('#chat-model-go');
+    if (mg) {
+      mg.addEventListener('click', function () {
+        if (global.App && global.App.go) global.App.go('models');
+        else U.toast('info', '请点左侧「模型管理」');
+      });
+    }
 
     var rs = U.$('#chat-reset');
     if (rs) rs.addEventListener('click', reset);

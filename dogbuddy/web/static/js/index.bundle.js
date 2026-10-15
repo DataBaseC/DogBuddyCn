@@ -1808,8 +1808,7 @@
           (w.resolved_model && !w.model ? '（当前 ' + U.esc(w.resolved_model) + '）' : '') + '">' +
           '<button class="btn btn-soft btn-sm" id="model-fetch" type="button">拉取模型</button></div>' +
           '<select class="select mono" id="model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
-          '<div class="hint">留空即跟随管理员使用的模型；填了则此工位单独使用该模型。</div>' +
-          '<datalist id="model-options"></datalist></div>' +
+          '<div class="hint">留空即跟随管理员使用的模型；填了则此工位单独使用该模型。</div></div>' +
           '<div class="field"><span class="field-label">模式</span>' +
           '<select class="select" id="mode-input">' +
           ['BUILD', 'PLAN', 'CHAT', 'REVIEW'].map(function (m) {
@@ -1850,13 +1849,7 @@
           fetchBtn.textContent = '拉取中…';
           var profileSel = document.getElementById('model-profile');
           A.settings.models('', '', '', profileSel ? profileSel.value : '').then(function (r) {
-            var dl = document.getElementById('model-options');
-            if (dl) {
-              dl.innerHTML = (r.models || []).map(function (m) {
-                return '<option value="' + U.esc(m) + '"></option>';
-              }).join('');
-            }
-            /* 全量进下拉：datalist 会按输入框已有文字过滤，只靠它会出现"只能选一个" */
+            /* 全量进下拉（datalist 会按输入框已有文字过滤，所以不再用它） */
             U.fillModelSelect('model-select', r.models || [], 'model-input');
             if (r.error) U.toast('warn', '拉取模型失败：' + r.error);
             else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
@@ -1895,6 +1888,17 @@
           '<div class="field"><span class="field-label">LLM 配置套</span>' +
           '<select class="select" id="nw-profile"><option value="">默认</option></select>' +
           '<div class="hint">空 = 跟随全局默认配置套</div></div>' +
+          '</div>' +
+          '<div class="set-two">' +
+          '<div class="field"><span class="field-label">压缩阈值（0.3 ~ 0.95）</span>' +
+          '<input class="input num" id="win-threshold" type="number" min="0.3" max="0.95" step="0.05"' +
+          ' placeholder="留空 = 继承全局（默认 0.8）">' +
+          '<div class="hint">上下文用到这个比例就自动压缩。按员工的活来定：' +
+          '长任务/贵模型可以调高（0.85）省压缩，短任务可以调低（0.6）省上下文开销。</div></div>' +
+          '<div class="field"><span class="field-label">上下文上限（tokens，可选）</span>' +
+          '<input class="input num" id="win-maxctx" type="number" min="2000" step="1000"' +
+          ' placeholder="留空 = 用模型的默认上下文">' +
+          '<div class="hint">默认跟着模型走（模型页里填的上下文窗口）；只有这个工位要特殊对待时才填。</div></div>' +
           '</div>',
         buttons: [
           { label: '取消', cls: 'btn-ghost' },
@@ -1919,6 +1923,20 @@
               var model = body.querySelector('#nw-model').value.trim();
               if (ws) payload.workspace_path = ws;
               if (model) payload.model = model;
+              /* v0.10.12：管理员建员工时明确指定压缩阈值（可选，越界后端会 400） */
+              var thrRaw = body.querySelector('#win-threshold').value.trim();
+              var ctxRaw = body.querySelector('#win-maxctx').value.trim();
+              var params = {};
+              if (thrRaw !== '') {
+                var thr = Number(thrRaw);
+                if (!isFinite(thr) || thr < 0.3 || thr > 0.95) {
+                  U.toast('warn', '压缩阈值要在 0.3 ~ 0.95 之间');
+                  return false;
+                }
+                params.compact_threshold = thr;
+              }
+              if (ctxRaw !== '') params.max_context_tokens = Number(ctxRaw);
+              if (Object.keys(params).length) payload.params = params;
               A.windows.create(payload).then(function () {
                 U.toast('success', '工位已创建');
                 Windows.load();
@@ -1984,14 +2002,26 @@
 
   function refreshUsage(convId) {
     var host = usageHost();
-    if (!host) return Promise.resolve();
     var id = convId || state.sender;
-    if (id) host.setAttribute('data-conv-id', id);
+    if (host) host.setAttribute('data-conv-id', id);
     return A.adminChatUsage(id).then(function (u) {
+      u = u || {};
+      /* 管理员模型：管理员没有工位，它的模型就是运行时全局模型，
+         在「模型管理」页点「设为当前」即可更换——这里直接显示给人看 */
+      var badge = U.$('#chat-model');
+      if (badge) {
+        badge.textContent = '模型：' + (u.model || '(未设置)');
+        badge.setAttribute('title', '管理员当前模型：' + (u.model || '(未设置)') +
+          (u.base_url ? ' · ' + u.base_url : '') + '（在模型管理页点「设为当前」更换）');
+      }
+      if (!host) return;
       /* 异步回来时若已切换对话，丢弃这次结果 */
       if (host.getAttribute('data-conv-id') !== id) return;
-      host.innerHTML = U.usageHTML(u || {}, { label: '管理员上下文' });
+      host.innerHTML = U.usageHTML(u, { label: '管理员上下文' });
     }).catch(function () {
+      var badge2 = U.$('#chat-model');
+      if (badge2) badge2.textContent = '模型：—';
+      if (!host) return;
       if (host.getAttribute('data-conv-id') !== id) return;
       host.innerHTML = '<div class="ctx-usage-top"><span class="ctx-usage-label">' +
         U.icon('activity', 'sm') + '管理员上下文</span>' +
@@ -2217,6 +2247,14 @@
 
     var rf = U.$('#chat-refresh');
     if (rf) rf.addEventListener('click', load);
+
+    var mg = U.$('#chat-model-go');
+    if (mg) {
+      mg.addEventListener('click', function () {
+        if (global.App && global.App.go) global.App.go('models');
+        else U.toast('info', '请点左侧「模型管理」');
+      });
+    }
 
     var rs = U.$('#chat-reset');
     if (rs) rs.addEventListener('click', reset);
@@ -2758,7 +2796,7 @@
     cardLLM: function (llm) {
       return '<div class="card set-card" data-group="llm">' +
         '<div class="set-card-head"><span class="set-card-icon">' + U.icon('cpu', 'sm') + '</span>' +
-        '<div><h3>LLM 接入</h3><p>模型服务商 · 地址 · 密钥 · 温度与上下文</p></div></div>' +
+        '<div><h3>LLM 兜底配置</h3><p>服务商 · 地址 · 兜底密钥 · 参数 —— <b>管理员用的模型、以及每个模型的上下文，都在「模型管理」页</b></p></div></div>' +
         '<div class="set-card-body">' +
         '<div class="field"><span class="field-label">服务商 Provider</span>' +
         '<select class="select" id="set-provider">' +
@@ -2769,15 +2807,13 @@
         '<input class="input mono" id="set-base-url" value="' + U.esc(llm.base_url || '') + '" placeholder="https://api.openai.com/v1"></div>' +
         '<div class="field"><span class="field-label">API Key' + (llm.api_key ? '（已保存：' + U.esc(llm.api_key) + '，留空保持不变）' : '') + '</span>' +
         '<input class="input mono" id="set-api-key" type="password" placeholder="sk-…"></div>' +
-        '<div class="field"><span class="field-label">模型</span>' +
-        '<div style="display:flex;gap:8px">' +
-        '<input class="input mono" id="set-model" list="set-model-options" value="' + U.esc(llm.model || '') + '" placeholder="gpt-4o-mini">' +
-        '<button class="btn btn-soft btn-sm" id="set-fetch-models" type="button">拉取模型</button></div>' +
-        '<select class="select mono" id="set-model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
-        '<datalist id="set-model-options"></datalist></div>' +
+        '<div class="set-row" style="border:0;padding-top:2px;gap:10px">' +
+        '<span class="hint">管理员当前模型：<b class="mono">' + U.esc(llm.model || '(未设置)') + '</b> · ' +
+        '换模型请到「模型管理」页点「设为管理员模型」（每个模型可自带密钥与上下文）</span>' +
+        '<button class="btn btn-soft btn-sm" id="set-goto-models" type="button">打开模型管理</button></div>' +
         '<div class="set-row" style="border:0;padding-top:2px">' +
-        '<button class="btn btn-soft btn-sm" id="set-test-llm" type="button">' + U.icon('zap', 'sm') + '测试连接</button>' +
-        '<span class="hint" id="set-test-result">将测试连通性并做一次聊天往返</span></div>' +
+        '<button class="btn btn-soft btn-sm" id="set-test-llm" type="button">' + U.icon('zap', 'sm') + '测试兜底配置</button>' +
+        '<span class="hint" id="set-test-result">只测「地址 + 密钥」能否连上并列出模型，不做对话</span></div>' +
         '<button class="adv-toggle" id="set-adv-toggle" type="button">高级参数' + U.icon('chevron-d', 'sm') + '</button>' +
         '<div class="hidden" id="set-adv">' +
         '<div class="set-two">' +
@@ -2942,104 +2978,17 @@
           if (adv) adv.classList.toggle('hidden');
         });
       }
-      /* 拉取模型 */
-      var fetchBtn = document.getElementById('set-fetch-models');
-      if (fetchBtn) {
-        fetchBtn.addEventListener('click', function () {
-          var provider = document.getElementById('set-provider').value;
-          var baseUrl = document.getElementById('set-base-url').value.trim();
-          var apiKey = document.getElementById('set-api-key').value.trim();
-          fetchBtn.disabled = true;
-          fetchBtn.textContent = '拉取中…';
-          A.settings.models(provider, baseUrl, apiKey).then(function (r) {
-            var dl = document.getElementById('set-model-options');
-            if (dl) {
-              dl.innerHTML = (r.models || []).map(function (m) {
-                return '<option value="' + U.esc(m) + '"></option>';
-              }).join('');
-            }
-            /* 全量进下拉（datalist 会按输入框已有文字过滤，见 ui.js fillModelSelect 注释） */
-            U.fillModelSelect('set-model-select', r.models || [], 'set-model');
-            if (r.error) U.toast('warn', '拉取失败：' + r.error);
-            else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
-          }).catch(function (e) {
-            U.toast('error', '拉取失败：' + e.message);
-          }).then(function () {
-            fetchBtn.disabled = false;
-            fetchBtn.textContent = '拉取模型';
-          });
+      /* 模型本身在「模型管理」页维护：这里只留"去那边"的入口 + 兜底配置连通性测试 */
+      var gotoModels = document.getElementById('set-goto-models');
+      if (gotoModels) {
+        gotoModels.addEventListener('click', function () {
+          if (global.App && global.App.go) global.App.go('models');
         });
       }
-      /* 测试连接 */
       var testBtn = document.getElementById('set-test-llm');
       if (testBtn) {
         testBtn.addEventListener('click', function () {
           Settings.runTest(testBtn, document.getElementById('set-test-result'));
-        });
-      }
-      /* 退避预览 */
-      ['set-rbase', 'set-rmax', 'set-rbackoff'].forEach(function (id) {
-        var node = document.getElementById(id);
-        if (node) node.addEventListener('input', Settings.renderBackoff);
-        if (node) node.addEventListener('change', Settings.renderBackoff);
-      });
-      Settings.renderBackoff();
-      /* 保存按钮 */
-      U.$$('[data-save]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          Settings.saveGroup(btn.getAttribute('data-save'));
-        });
-      });
-      /* 白名单 */
-      var add = document.getElementById('wl-add');
-      if (add) {
-        add.addEventListener('click', function () {
-          var qq = document.getElementById('wl-qq').value.trim();
-          var name = document.getElementById('wl-name').value.trim();
-          var role = document.getElementById('wl-role').value;
-          if (!qq) { U.toast('warn', '请输入 QQ 号'); return; }
-          A.whitelist.add(qq, name, role).then(function () {
-            U.toast('success', '已添加白名单：' + qq + '（' + role + '）');
-            Settings.load();
-          }).catch(function (e) { U.toast('error', e.message); });
-        });
-      }
-      U.$$('[data-wl-del]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          var qq = btn.getAttribute('data-wl-del');
-          UI.confirm({ title: '移出白名单', danger: true, okLabel: '移除', text: '确定将 ' + qq + ' 移出白名单？' })
-            .then(function (ok) {
-              if (!ok) return;
-              A.whitelist.remove(qq).then(function () {
-                U.toast('success', '已移除');
-                Settings.load();
-              }).catch(function (e) { U.toast('error', e.message); });
-            });
-        });
-      });
-      /* 角色下拉（行内改角色 → 以同 qq_id 重新提交） */
-      U.$$('.wl-role').forEach(function (sel) {
-        sel.addEventListener('change', function () {
-          var qq = sel.getAttribute('data-wl-role');
-          var name = sel.getAttribute('data-wl-name');
-          sel.disabled = true;
-          A.whitelist.add(qq, name, sel.value).then(function () {
-            U.toast('success', '角色已更新：' + qq + ' → ' + sel.value);
-            Settings.load();
-          }).catch(function (e) {
-            U.toast('error', '角色更新失败：' + e.message);
-            Settings.load();
-          });
-        });
-      });
-      /* 锁定 */
-      var lock = document.getElementById('set-lock');
-      if (lock) {
-        lock.addEventListener('click', function () {
-          UI.confirm({ title: '锁定控制台', okLabel: '锁定', text: '将清除本机登录态并返回登录界面。' })
-            .then(function (ok) {
-              if (ok) global.App.logout();
-            });
         });
       }
     },
@@ -3067,11 +3016,11 @@
       var p = document.getElementById('set-provider');
       var b = document.getElementById('set-base-url');
       var k = document.getElementById('set-api-key');
-      var m = document.getElementById('set-model');
       if (p) payload.provider = p.value;
       if (b && b.value.trim()) payload.base_url = b.value.trim();
       if (k && k.value.trim()) payload.api_key = k.value.trim();
-      if (m && m.value.trim()) payload.model = m.value.trim();
+      /* 不传模型：这里测的是"兜底配置能不能连上 + 能列出多少模型"；
+         按模型测连接在模型管理页（那条可以自带密钥） */
       if (btn) { btn.disabled = true; btn.textContent = '测试中…'; }
       if (out) out.textContent = '正在测试连接…';
       A.settings.testLLM(payload).then(function (r) {
@@ -3105,7 +3054,6 @@
           var payload = {
             provider: document.getElementById('set-provider').value,
             base_url: document.getElementById('set-base-url').value.trim(),
-            model: document.getElementById('set-model').value.trim(),
             temperature: Number(document.getElementById('set-temperature').value),
             max_context_tokens: Number(document.getElementById('set-max-ctx').value),
             compact_threshold: Number(document.getElementById('set-compact').value),
@@ -3287,10 +3235,7 @@
       } else if (state.step === 4) {
         inner += '<div class="field"><span class="field-label">默认模型</span>' +
           '<input class="input mono" id="wz-model" list="wz-model-options" value="' + U.esc(state.model) + '" placeholder="选择或输入模型名">' +
-          '<select class="select mono" id="wz-model-select" style="margin-top:6px"><option value="">（点上面「拉取模型」后在这里选）</option></select>' +
-          '<datalist id="wz-model-options">' + state.models.map(function (m) {
-            return '<option value="' + U.esc(m) + '"></option>';
-          }).join('') + '</datalist></div>' +
+          '<select class="select mono" id="wz-model-select" style="margin-top:6px"><option value="">（点上面「拉取模型」后在这里选）</option></select></div>' +
           (state.models.length ? '<p class="hint">来自上一步拉取的模型列表，共 ' + state.models.length + ' 个。</p>'
             : '<p class="hint">还没有拉取模型列表，可直接手输模型名。</p>');
       } else if (state.step === 5) {
@@ -3660,8 +3605,7 @@
         '<div style="display:flex;gap:8px">' +
         '<input class="input mono" id="pf-model" list="pf-model-options" value="' + U.esc(src.model || '') + '" placeholder="gpt-4o-mini">' +
         '<button class="btn btn-soft btn-sm" id="pf-fetch-models" type="button">拉取模型</button></div>' +
-        '<select class="select mono" id="pf-model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
-        '<datalist id="pf-model-options"></datalist></div>';
+        '<select class="select mono" id="pf-model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select></div>';
       h += '<div class="field"><span class="field-label">keys（多密钥，逗号分隔，可选）</span>' +
         '<input class="input mono" id="pf-keys" value="' + U.esc(keysText(src.keys)) + '" placeholder="留空不改动"></div>';
       h += '<div class="set-row" style="border:0;padding-top:2px">' +
@@ -3744,13 +3688,7 @@
               root.querySelector('#pf-api-key').value.trim()
             );
           req.then(function (r) {
-            var dl = root.querySelector('#pf-model-options');
-            if (dl) {
-              dl.innerHTML = (r.models || []).map(function (mm) {
-                return '<option value="' + U.esc(mm) + '"></option>';
-              }).join('');
-            }
-            /* 全量进下拉（datalist 会按输入框已有文字过滤） */
+            /* 全量进下拉（datalist 会按输入框已有文字过滤，所以不再用它） */
             U.fillModelSelect('pf-model-select', r.models || [], 'pf-model');
             if (r.error) U.toast('warn', '拉取失败：' + r.error);
             else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
@@ -4731,12 +4669,15 @@
     var tag = state.summary && state.summary.current_in_catalog ? '' :
       ' <span class="badge badge-amber">未纳入目录</span>';
     return '<div class="card"><div class="card-body mdl-current">' +
-      '<span class="mdl-cur-label">当前生效</span>' +
+      '<span class="mdl-cur-label" title="管理员就是你正在对话的那个 Agent；它在模型管理页点「设为当前」即可更换">管理员当前模型</span>' +
       '<span class="mono mdl-cur-model">' + U.esc(c.model || '(未设置)') + '</span>' + tag +
       '<span class="card-sub mono">' + U.esc(c.base_url || '') + '</span>' +
       '<span class="card-sub">上下文 ' + U.esc(String(c.max_context_tokens || 0)) + ' tokens</span>' +
       '<span class="card-sub">活跃配置套 ' + U.esc(c.active_profile || '(默认)') + '</span>' +
-      '</div></div>';
+      '</div>' +
+      '<div class="card-sub" style="margin-top:6px">下面对话那头（管理员）用的就是这条模型；' +
+      '工位没有单独指定模型时也继承它。点某一行的「设为管理员模型」即可切换。</div>' +
+      '</div>';
   }
 
   function noteCell(m) {
@@ -4772,7 +4713,7 @@
       '<td class="num">' + (m.context_window ? U.esc(String(m.context_window)) : '—') + '</td>' +
       '<td class="mdl-actions">' +
       '<button class="btn btn-soft btn-sm" data-mdl="note" data-id="' + U.esc(m.id) + '">' + U.icon('edit', 'sm') + '备注</button>' +
-      (isCur ? '' : '<button class="btn btn-primary btn-sm" data-mdl="activate" data-id="' + U.esc(m.id) + '">设为当前</button>') +
+      (isCur ? '' : '<button class="btn btn-primary btn-sm" data-mdl="activate" data-id="' + U.esc(m.id) + '" title="管理员与（未单独指定模型的）工位都会用它">设为管理员模型</button>') +
       '<button class="btn btn-ghost btn-sm" data-mdl="toggle" data-id="' + U.esc(m.id) + '">' + (m.enabled ? '停用' : '启用') + '</button>' +
       '<button class="btn btn-danger btn-sm" data-mdl="del" data-id="' + U.esc(m.id) + '">' + U.icon('trash', 'sm') + '</button>' +
       '</td></tr>';
@@ -4863,7 +4804,7 @@
     if (kind === 'activate') {
       return apiModels().activate(id).then(function (r) {
         var res = (r && r.result) || {};
-        U.toast('success', '已切换为 ' + (res.model || id) + '（已写盘，重启后仍生效）');
+        U.toast('success', '管理员模型已切换为 ' + (res.model || id) + '（已写盘，重启后仍生效）');
         return load();
       }).catch(function (e) { U.toast('error', '切换失败：' + e.message); });
     }
@@ -4902,9 +4843,11 @@
 
   function editModel(m, focusNote) {
     var isNew = !m;
+    /* v0.10.12：新条目**不预填 128k**——上下文窗口跟着服务商/模型走，
+       服务商没给就留空（0 = 继承），别替它编一个数。 */
     m = m || { model: '', provider: state.current.provider || 'openai_compat',
                base_url: state.current.base_url || '', note: '', capability: '',
-               context_window: state.current.max_context_tokens || 0, speed: '', cost: '' };
+               context_window: 0, speed: '', cost: '' };
     var keyHint = m.has_api_key
       ? ('已保存 ' + (m.api_key || '********') + '，留空保持不变')
       : '留空 = 用全局密钥（设置页那把）';
@@ -4915,10 +4858,9 @@
         '<div class="field"><span class="field-label">服务商预设（点一下带出地址）</span>' +
         '<div class="mdl-chips" id="mdl-f-presets">' + presetChips() + '</div></div>' +
         '<div class="set-two">' +
-        '<div class="field"><span class="field-label">模型名 *（可点下面「拉取模型列表」选）</span>' +
-        '<input class="input mono" id="mdl-f-model" list="mdl-f-model-list" value="' +
-        U.esc(m.model || '') + '" placeholder="如 deepseek-v4-flash">' +
-        '<datalist id="mdl-f-model-list"></datalist></div>' +
+        '<div class="field"><span class="field-label">模型名 *</span>' +
+        '<input class="input mono" id="mdl-f-model" value="' +
+        U.esc(m.model || '') + '" placeholder="也可以直接在下面的下拉里选"></div>' +
         '<div class="field"><span class="field-label">API 地址（base_url）</span>' +
         '<input class="input mono" id="mdl-f-base" value="' + U.esc(m.base_url || '') +
         '" placeholder="https://…/v1"></div>' +
@@ -4937,10 +4879,10 @@
         '<span class="hint" id="mdl-f-probe-out"></span></div>' +
         /* 拉取结果放进真正的下拉：<datalist> 会**按输入框里已有的文字过滤**，
            所以"自动填第一个"会让下拉里只剩那一个（实测就是这样：99 个只能选到 1 个）。 */
-        '<div class="field" id="mdl-f-picker" style="display:none">' +
+        '<div class="field" id="mdl-f-picker">' +
         '<span class="field-label">从拉取到的列表里选（<span id="mdl-f-count">0</span> 个）</span>' +
-        '<select class="select mono" id="mdl-f-select"><option value="">（选择…）</option></select>' +
-        '<div class="hint">选中后会填进上面的「模型名」；也可以直接在模型名框里输入关键词，用下拉建议。</div></div>' +
+        '<select class="select mono" id="mdl-f-select"><option value="">（点上面「拉取模型列表」后在这里选）</option></select>' +
+        '<div class="hint">这里列的是**全量**模型，选中即填入上面的「模型名」；不拉取也可以手输。</div></div>' +
         '<div class="field"><span class="field-label">备注：能力与限制（建议写清）</span>' +
         '<textarea class="textarea" id="mdl-f-note" rows="3" placeholder="例如：工具调用稳定；429 限速很凶，并发别超 2；中文好；不支持 vision。">' +
         U.esc(m.note || '') + '</textarea></div>' +
@@ -4952,7 +4894,9 @@
         '<input class="input" id="mdl-f-name" value="' + U.esc(m.display_name || '') + '"></div>' +
         '<div class="field"><span class="field-label">上下文窗口（tokens）</span>' +
         '<input class="input" id="mdl-f-ctx" type="number" min="0" value="' +
-        U.esc(String(m.context_window || 0)) + '"></div>' +
+        U.esc(String(m.context_window || 0)) + '" placeholder="0 / 留空 = 用服务商默认">' +
+        '<div class="hint" id="mdl-f-ctx-hint">拉取后如果服务商报了上下文，会自动填在这里；' +
+        '没报就留 0（= 继承全局，不瞎填）。这个值会在「设为当前」时写进模型的运行时上下文。</div></div>' +
         '</div>' +
         '<div class="set-two">' +
         '<div class="field"><span class="field-label">速度档</span>' +
@@ -5038,6 +4982,21 @@
       return out;
     }
 
+    /* 拉取的上下文长度缓存：id → tokens（0 = 服务商没说） */
+    var mdlCtx = {};
+    function applyCtx(name) {
+      var inp = U.$('#mdl-f-ctx');
+      var hint = U.$('#mdl-f-ctx-hint');
+      if (!inp) return;
+      var ctx = Number(mdlCtx[name] || 0);
+      if (ctx > 0) {
+        if (!Number(inp.value)) inp.value = String(ctx);
+        if (hint) hint.textContent = '服务商报的上下文是 ' + ctx + ' tokens（已填入，可改）。';
+      } else if (!Number(inp.value) && hint) {
+        hint.textContent = '这家服务商没给上下文长度 → 留 0 = 继承全局（不替它瞎填）。';
+      }
+    }
+
     var fetchBtn = U.$('#mdl-f-fetch');
     if (fetchBtn) {
       fetchBtn.addEventListener('click', function () {
@@ -5046,24 +5005,32 @@
         A.settings.models(a.provider, a.base_url, a.api_key, undefined, a.model_ref).then(function (r) {
           var list = (r && r.models) || [];
           if (r && r.error) { probeOut('拉取失败：' + r.error, 'err'); return; }
-          /* ① 给输入框留一份建议（供手输过滤） */
-          var dl = U.$('#mdl-f-model-list');
-          if (dl) dl.innerHTML = list.map(function (x) { return '<option value="' + U.esc(x) + '"></option>'; }).join('');
-          /* ② 真正能选的是这个 select：不自动填值，用户点开就是全量列表
-             （实现见 ui.js `fillModelSelect`：datalist 会按输入框文字过滤） */
+          /* 唯一的选择入口：select（全量、不按输入框过滤） */
           U.fillModelSelect('mdl-f-select', list, 'mdl-f-model');
+          /* 服务商愿意给上下文就记下来，选中时自动填进「上下文窗口」 */
+          mdlCtx = {};
+          (r.details || []).forEach(function (d) {
+            if (d && d.id) mdlCtx[d.id] = Number(d.context_window || 0);
+          });
+          var ctxCount = Object.keys(mdlCtx).filter(function (k2) { return mdlCtx[k2] > 0; }).length;
           var cnt = U.$('#mdl-f-count');
           if (cnt) cnt.textContent = String(list.length);
-          var picker = U.$('#mdl-f-picker');
-          if (picker) picker.style.display = list.length ? '' : 'none';
           probeOut(list.length
-            ? ('拉到 ' + list.length + ' 个模型，在下面下拉里选')
+            ? ('拉到 ' + list.length + ' 个模型，在下面下拉里选' +
+               (ctxCount ? '（其中 ' + ctxCount + ' 个服务商给了上下文长度，选中会自动填）'
+                         : '（这家没报上下文长度，条目留 0 = 继承）'))
             : '没拉到模型（检查地址与密钥）', list.length ? 'ok' : 'err');
         }).catch(function (e) { probeOut('拉取失败：' + e.message, 'err'); });
       });
     }
 
-    /* 选中下拉项 → 填进「模型名」输入框（事件在 ui.fillModelSelect 里绑，幂等） */
+    /* 选中下拉项 → 填「模型名」（ui.fillModelSelect 已绑），并顺手带出服务商给的上下文 */
+    var ctxSel = U.$('#mdl-f-select');
+    if (ctxSel) {
+      ctxSel.addEventListener('change', function () {
+        if (ctxSel.value) applyCtx(ctxSel.value);
+      });
+    }
 
     var testBtn = U.$('#mdl-f-test');
     if (testBtn) {

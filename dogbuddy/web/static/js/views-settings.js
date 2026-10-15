@@ -79,7 +79,7 @@
     cardLLM: function (llm) {
       return '<div class="card set-card" data-group="llm">' +
         '<div class="set-card-head"><span class="set-card-icon">' + U.icon('cpu', 'sm') + '</span>' +
-        '<div><h3>LLM 接入</h3><p>模型服务商 · 地址 · 密钥 · 温度与上下文</p></div></div>' +
+        '<div><h3>LLM 兜底配置</h3><p>服务商 · 地址 · 兜底密钥 · 参数 —— <b>管理员用的模型、以及每个模型的上下文，都在「模型管理」页</b></p></div></div>' +
         '<div class="set-card-body">' +
         '<div class="field"><span class="field-label">服务商 Provider</span>' +
         '<select class="select" id="set-provider">' +
@@ -90,15 +90,13 @@
         '<input class="input mono" id="set-base-url" value="' + U.esc(llm.base_url || '') + '" placeholder="https://api.openai.com/v1"></div>' +
         '<div class="field"><span class="field-label">API Key' + (llm.api_key ? '（已保存：' + U.esc(llm.api_key) + '，留空保持不变）' : '') + '</span>' +
         '<input class="input mono" id="set-api-key" type="password" placeholder="sk-…"></div>' +
-        '<div class="field"><span class="field-label">模型</span>' +
-        '<div style="display:flex;gap:8px">' +
-        '<input class="input mono" id="set-model" list="set-model-options" value="' + U.esc(llm.model || '') + '" placeholder="gpt-4o-mini">' +
-        '<button class="btn btn-soft btn-sm" id="set-fetch-models" type="button">拉取模型</button></div>' +
-        '<select class="select mono" id="set-model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
-        '<datalist id="set-model-options"></datalist></div>' +
+        '<div class="set-row" style="border:0;padding-top:2px;gap:10px">' +
+        '<span class="hint">管理员当前模型：<b class="mono">' + U.esc(llm.model || '(未设置)') + '</b> · ' +
+        '换模型请到「模型管理」页点「设为管理员模型」（每个模型可自带密钥与上下文）</span>' +
+        '<button class="btn btn-soft btn-sm" id="set-goto-models" type="button">打开模型管理</button></div>' +
         '<div class="set-row" style="border:0;padding-top:2px">' +
-        '<button class="btn btn-soft btn-sm" id="set-test-llm" type="button">' + U.icon('zap', 'sm') + '测试连接</button>' +
-        '<span class="hint" id="set-test-result">将测试连通性并做一次聊天往返</span></div>' +
+        '<button class="btn btn-soft btn-sm" id="set-test-llm" type="button">' + U.icon('zap', 'sm') + '测试兜底配置</button>' +
+        '<span class="hint" id="set-test-result">只测「地址 + 密钥」能否连上并列出模型，不做对话</span></div>' +
         '<button class="adv-toggle" id="set-adv-toggle" type="button">高级参数' + U.icon('chevron-d', 'sm') + '</button>' +
         '<div class="hidden" id="set-adv">' +
         '<div class="set-two">' +
@@ -263,104 +261,17 @@
           if (adv) adv.classList.toggle('hidden');
         });
       }
-      /* 拉取模型 */
-      var fetchBtn = document.getElementById('set-fetch-models');
-      if (fetchBtn) {
-        fetchBtn.addEventListener('click', function () {
-          var provider = document.getElementById('set-provider').value;
-          var baseUrl = document.getElementById('set-base-url').value.trim();
-          var apiKey = document.getElementById('set-api-key').value.trim();
-          fetchBtn.disabled = true;
-          fetchBtn.textContent = '拉取中…';
-          A.settings.models(provider, baseUrl, apiKey).then(function (r) {
-            var dl = document.getElementById('set-model-options');
-            if (dl) {
-              dl.innerHTML = (r.models || []).map(function (m) {
-                return '<option value="' + U.esc(m) + '"></option>';
-              }).join('');
-            }
-            /* 全量进下拉（datalist 会按输入框已有文字过滤，见 ui.js fillModelSelect 注释） */
-            U.fillModelSelect('set-model-select', r.models || [], 'set-model');
-            if (r.error) U.toast('warn', '拉取失败：' + r.error);
-            else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
-          }).catch(function (e) {
-            U.toast('error', '拉取失败：' + e.message);
-          }).then(function () {
-            fetchBtn.disabled = false;
-            fetchBtn.textContent = '拉取模型';
-          });
+      /* 模型本身在「模型管理」页维护：这里只留"去那边"的入口 + 兜底配置连通性测试 */
+      var gotoModels = document.getElementById('set-goto-models');
+      if (gotoModels) {
+        gotoModels.addEventListener('click', function () {
+          if (global.App && global.App.go) global.App.go('models');
         });
       }
-      /* 测试连接 */
       var testBtn = document.getElementById('set-test-llm');
       if (testBtn) {
         testBtn.addEventListener('click', function () {
           Settings.runTest(testBtn, document.getElementById('set-test-result'));
-        });
-      }
-      /* 退避预览 */
-      ['set-rbase', 'set-rmax', 'set-rbackoff'].forEach(function (id) {
-        var node = document.getElementById(id);
-        if (node) node.addEventListener('input', Settings.renderBackoff);
-        if (node) node.addEventListener('change', Settings.renderBackoff);
-      });
-      Settings.renderBackoff();
-      /* 保存按钮 */
-      U.$$('[data-save]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          Settings.saveGroup(btn.getAttribute('data-save'));
-        });
-      });
-      /* 白名单 */
-      var add = document.getElementById('wl-add');
-      if (add) {
-        add.addEventListener('click', function () {
-          var qq = document.getElementById('wl-qq').value.trim();
-          var name = document.getElementById('wl-name').value.trim();
-          var role = document.getElementById('wl-role').value;
-          if (!qq) { U.toast('warn', '请输入 QQ 号'); return; }
-          A.whitelist.add(qq, name, role).then(function () {
-            U.toast('success', '已添加白名单：' + qq + '（' + role + '）');
-            Settings.load();
-          }).catch(function (e) { U.toast('error', e.message); });
-        });
-      }
-      U.$$('[data-wl-del]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          var qq = btn.getAttribute('data-wl-del');
-          UI.confirm({ title: '移出白名单', danger: true, okLabel: '移除', text: '确定将 ' + qq + ' 移出白名单？' })
-            .then(function (ok) {
-              if (!ok) return;
-              A.whitelist.remove(qq).then(function () {
-                U.toast('success', '已移除');
-                Settings.load();
-              }).catch(function (e) { U.toast('error', e.message); });
-            });
-        });
-      });
-      /* 角色下拉（行内改角色 → 以同 qq_id 重新提交） */
-      U.$$('.wl-role').forEach(function (sel) {
-        sel.addEventListener('change', function () {
-          var qq = sel.getAttribute('data-wl-role');
-          var name = sel.getAttribute('data-wl-name');
-          sel.disabled = true;
-          A.whitelist.add(qq, name, sel.value).then(function () {
-            U.toast('success', '角色已更新：' + qq + ' → ' + sel.value);
-            Settings.load();
-          }).catch(function (e) {
-            U.toast('error', '角色更新失败：' + e.message);
-            Settings.load();
-          });
-        });
-      });
-      /* 锁定 */
-      var lock = document.getElementById('set-lock');
-      if (lock) {
-        lock.addEventListener('click', function () {
-          UI.confirm({ title: '锁定控制台', okLabel: '锁定', text: '将清除本机登录态并返回登录界面。' })
-            .then(function (ok) {
-              if (ok) global.App.logout();
-            });
         });
       }
     },
@@ -388,11 +299,11 @@
       var p = document.getElementById('set-provider');
       var b = document.getElementById('set-base-url');
       var k = document.getElementById('set-api-key');
-      var m = document.getElementById('set-model');
       if (p) payload.provider = p.value;
       if (b && b.value.trim()) payload.base_url = b.value.trim();
       if (k && k.value.trim()) payload.api_key = k.value.trim();
-      if (m && m.value.trim()) payload.model = m.value.trim();
+      /* 不传模型：这里测的是"兜底配置能不能连上 + 能列出多少模型"；
+         按模型测连接在模型管理页（那条可以自带密钥） */
       if (btn) { btn.disabled = true; btn.textContent = '测试中…'; }
       if (out) out.textContent = '正在测试连接…';
       A.settings.testLLM(payload).then(function (r) {
@@ -426,7 +337,6 @@
           var payload = {
             provider: document.getElementById('set-provider').value,
             base_url: document.getElementById('set-base-url').value.trim(),
-            model: document.getElementById('set-model').value.trim(),
             temperature: Number(document.getElementById('set-temperature').value),
             max_context_tokens: Number(document.getElementById('set-max-ctx').value),
             compact_threshold: Number(document.getElementById('set-compact').value),
@@ -608,10 +518,7 @@
       } else if (state.step === 4) {
         inner += '<div class="field"><span class="field-label">默认模型</span>' +
           '<input class="input mono" id="wz-model" list="wz-model-options" value="' + U.esc(state.model) + '" placeholder="选择或输入模型名">' +
-          '<select class="select mono" id="wz-model-select" style="margin-top:6px"><option value="">（点上面「拉取模型」后在这里选）</option></select>' +
-          '<datalist id="wz-model-options">' + state.models.map(function (m) {
-            return '<option value="' + U.esc(m) + '"></option>';
-          }).join('') + '</datalist></div>' +
+          '<select class="select mono" id="wz-model-select" style="margin-top:6px"><option value="">（点上面「拉取模型」后在这里选）</option></select></div>' +
           (state.models.length ? '<p class="hint">来自上一步拉取的模型列表，共 ' + state.models.length + ' 个。</p>'
             : '<p class="hint">还没有拉取模型列表，可直接手输模型名。</p>');
       } else if (state.step === 5) {

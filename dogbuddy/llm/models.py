@@ -30,8 +30,29 @@ def _candidate_urls(base_url: str) -> list[str]:
     return out
 
 
-async def fetch_model_list(provider: str, base_url: str, api_key: str = "") -> list[str]:
-    """Return model ids/names, sorted. Raises ModelFetchError with a readable message."""
+#: 各家 OpenAI 兼容网关给"上下文长度"起的字段名（能读到哪个用哪个）
+_CONTEXT_FIELDS = ("context_length", "context_window", "max_context_len", "max_model_len",
+                   "max_input_tokens", "max_context_tokens")
+
+
+def _context_of(item: dict) -> int:
+    """从一条模型记录里读上下文长度（读不到返回 0 = 服务商没说）。"""
+    for key in _CONTEXT_FIELDS:
+        v = item.get(key)
+        if isinstance(v, (int, float)) and v > 0:
+            return int(v)
+    for parent in ("top_provider", "meta", "details", "config"):
+        sub = item.get(parent)
+        if isinstance(sub, dict):
+            for key in _CONTEXT_FIELDS:
+                v = sub.get(key)
+                if isinstance(v, (int, float)) and v > 0:
+                    return int(v)
+    return 0
+
+
+async def _fetch_items(provider: str, base_url: str, api_key: str = "") -> list[dict]:
+    """原始模型记录（OpenAI 兼容：`data`/`models`；Ollama：`/api/tags`）。"""
     provider = (provider or "openai_compat").lower()
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -48,8 +69,7 @@ async def fetch_model_list(provider: str, base_url: str, api_key: str = "") -> l
                     resp = await client.get(f"{u}/api/tags")
                     if resp.status_code == 200:
                         data = resp.json()
-                        names = [m.get("name", "") for m in data.get("models", [])]
-                        return sorted(n for n in names if n)
+                        return [m for m in (data.get("models") or []) if isinstance(m, dict)]
                     last_err = f"HTTP {resp.status_code}"
                 except httpx.HTTPError as e:
                     last_err = str(e)
@@ -61,10 +81,9 @@ async def fetch_model_list(provider: str, base_url: str, api_key: str = "") -> l
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data.get("data") or data.get("models") or []
-                    names = [m.get("id") or m.get("name") or "" for m in items if isinstance(m, dict)]
-                    names = sorted(n for n in names if n)
-                    if names:
-                        return names
+                    items = [m for m in items if isinstance(m, dict)]
+                    if items:
+                        return items
                     last_err = "endpoint returned an empty model list"
                 elif resp.status_code in (401, 403):
                     raise ModelFetchError("authentication failed — check api_key")
@@ -73,6 +92,29 @@ async def fetch_model_list(provider: str, base_url: str, api_key: str = "") -> l
             except httpx.HTTPError as e:
                 last_err = str(e)
     raise ModelFetchError(f"models endpoint unreachable: {last_err}")
+
+
+async def fetch_model_meta(provider: str, base_url: str, api_key: str = "") -> list[dict[str, Any]]:
+    """带上下文长度的模型列表：`[{"id": ..., "context_window": int}]`，按 id 排序。
+
+    注意：**不是每家网关都给**（实测 SiliconFlow 的 `/v1/models` 只有
+    `id/object/created/owned_by`）。所以 `context_window = 0` 的含义是
+    "服务商没说"——调用方必须把它当"继承/未知"，**不能瞎填一个数**。
+    """
+    items = await _fetch_items(provider, base_url, api_key)
+    out: list[dict[str, Any]] = []
+    for it in items:
+        name = str(it.get("id") or it.get("name") or "").strip()
+        if not name:
+            continue
+        out.append({"id": name, "context_window": _context_of(it)})
+    out.sort(key=lambda m: m["id"])
+    return out
+
+
+async def fetch_model_list(provider: str, base_url: str, api_key: str = "") -> list[str]:
+    """Return model ids/names, sorted. Raises ModelFetchError with a readable message."""
+    return [m["id"] for m in await fetch_model_meta(provider, base_url, api_key)]
 
 
 async def test_connection(provider: str, base_url: str, api_key: str = "",

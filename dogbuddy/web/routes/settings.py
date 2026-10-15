@@ -202,28 +202,38 @@ def router(svc, auth_deps) -> APIRouter:
 
         `model_ref`：按**目录条目**自带的 provider/base_url/密钥去拉（条目自己的密钥不会出接口，
         所以只能服务端取）。这与 `test_llm` 的 `model_ref` 是同一套口径。
+
+        返回值里 `details` 是 `[{id, context_window}]`：**服务商愿意给就给**（有的网关只回
+        id/object/created/owned_by，实测 SiliconFlow 就是），给不了 `context_window=0` 表示
+        "服务商没说"——前端据此把条目的上下文留空（继承），**不要替服务商编一个数**。
         """
         entry = None
         if model_ref:
             entry = svc.db.get_model(model_ref)
             if entry is None:
                 raise HTTPException(status_code=404, detail=f"模型不存在：{model_ref}")
+        async def _meta(p: str | None, b: str | None, k: str | None) -> list[dict]:
+            """带上下文的拉取；服务对象没有新方法时退回旧口径（context_window=0 = 未知）。"""
+            fn = getattr(svc.config, "fetch_models_meta", None)
+            if fn is not None:
+                return await fn(p, b, k)
+            names = await svc.config.fetch_models(p, b, k)
+            return [{"id": n, "context_window": 0} for n in names]
+
         try:
             if entry is not None:
-                models = await svc.config.fetch_models(
+                details = await _meta(
                     provider or entry.get("provider") or None,
                     base_url or entry.get("base_url") or None,
                     api_key if api_key is not None else (entry.get("api_key") or None))
-                return {"models": models, "error": ""}
-            if profile:
+            elif profile:
                 section = cfg.llm_for(profile)
-                models = await svc.config.fetch_models(section.provider, section.base_url,
-                                                       section.api_key or api_key)
+                details = await _meta(section.provider, section.base_url, section.api_key or api_key)
             else:
-                models = await svc.config.fetch_models(provider, base_url, api_key)
+                details = await _meta(provider, base_url, api_key)
         except Exception as e:  # noqa: BLE001 — readable error to the console
-            return {"models": [], "error": str(e)}
-        return {"models": models, "error": ""}
+            return {"models": [], "details": [], "error": str(e)}
+        return {"models": [m["id"] for m in details], "details": details, "error": ""}
 
     @r.post("/settings/test_llm", dependencies=auth_deps)
     async def test_llm(body: LLMProbeIn) -> dict:
