@@ -670,5 +670,70 @@ bash scripts/verify_frontend_guards.sh   # 前端三种绕过手法各自被抓�
 教训写进这里是因为它满足"静默 + 数据损坏"两个条件：跑一次测试就毁掉用户凭据，
 而且只有对比文件内容才发现。
 
+---
+
+## 10. 首次真正上生产（2026-10-15 当天，0.10.7 → 0.10.8 → 0.10.9）
+
+前两轮修复一直卡在"没有凭据、服务停着"。当天拿到**面板 Agent Token** 后，
+本地三次改动全部上线并逐条验证。生产现状：`/opt/dogbuddy` = GitHub `main` = 本地，
+`schema_version=12`，单个面板托管进程。
+
+### 10.1 部署通道（实测有效，已写进 `运维/README.md`）
+
+面板的 Agent API 是真正的入口——**它等价于服务器 root**：
+
+```bash
+POST http://192.168.1.2:8787/api/terminal/exec
+X-Agent-Token: <面板 Agent Token>
+{"command":"id","cwd":"/","timeout":60}   →  {"code":0,"stdout":"uid=0(root)…"}
+```
+
+流程：`git diff --binary` → gzip+base64（55KB 补丁 → 8KB）→ 分片 `printf` 追加到
+`/tmp/dbc.b64` → `sha256sum -c` → `git apply` → `compileall` → `git commit` →
+`git push origin HEAD:refs/heads/main`（服务器有 SSH deploy key，**GitHub 顺带同步**）→
+`git rev-parse HEAD > VERSION` → **kill 进程让面板 `restart=always` 拉起** →
+轮询 `/healthz` 断言版本号与 `schema_version`。
+
+三个坑（都真踩过，见 `运维/README.md` §3）：
+**① 别用 `serverpanel --apps restart` 重启**（外部进程启动会把应用变成游离进程，
+面板再拉一个 → `[Errno 98] address already in use` → 启动/退出码3/再启动 死循环，
+日志看起来像"升级失败"）；**② 长命令别塞 argv**（Windows 侧 `Argument list too long`），
+命令写文件走 stdin；**③ SIGTERM 曾经不退**（见 10.3）。
+
+### 10.2 `0.10.8`：面板 Agent Token 明文泄露（部署当天顺手撞见的 P0）
+
+`GET /api/settings` 里 `"panel": cfg.panel.model_dump()` → 面板 `agent_token` **明文**返回，
+前端还把它渲染进 `<input value=...>`。而那个 token 能在服务器上以 root 执行任意命令
+（10.1 就是用它）。即"任何拿到控制台 web token 的人 = 拿到服务器 root"。
+
+同时发现第二个真缺陷：`PUT /api/settings` 对 `api_key`/`keys` **没有掩码判断**，
+前端把 `********abcd` 原样回传时会把**真密钥覆盖掉**（实测复现）→ LLM 静默认证失败；
+配置套 `_apply_llm` 同样中招。
+
+修法：`config.py` 提供唯一掩码口径 `mask_secret()` / `is_masked_secret()`；
+`_panel_dump()` 掩码 agent token；`PUT` 全面"空或掩码 = 保持不变"；
+前端 Agent Token 改密码框 + "留空保持不变"（不再预填）。新增
+`tests/test_secret_masking.py`（5 条）。
+
+### 10.3 `0.10.9`：关停无界 → SIGTERM 卡死 → 面板重启循环
+
+实测：`kill`（SIGTERM）后进程一直不退（`State=S`，`epoll_wait`），必须 `kill -9`；
+它不退就一直占着 `:8100`，守护拉起的新进程 `[Errno 98]` 秒退 → 面板"启动/退出码3/再启动"循环。
+
+修法：`DogBuddyApp.stop()` 每一步有 `SHUTDOWN_STEP_TIMEOUT=8s` 上限（超时只记日志、继续清理；
+WAL 库不怕强退）＋ 抽出 `build_uvicorn_config()` 加 `timeout_graceful_shutdown=10`（第二道保险）。
+新增 `tests/test_shutdown_bounded.py`（4 条）。**生产实测**：SIGTERM 后 **1s 释放端口、11s 进程退出**，
+面板随后干净拉起单个新进程（此前是"永不退出"）。
+
+### 10.4 未修（留给下一任）
+
+- SSE 的 `GET /api/events?token=<web token>`（EventSource 不能带自定义头）会让 **web token 进访问日志**；
+  要么日志层对该路由 query 脱敏，要么改成一次性短票换 Cookie。
+- 模型额度 `429 429003` 仍在——所有"真跑一轮"的验证依然做不了（本轮验证的都是
+  启动/接口/进程/迁移这些**不需要模型**的部分）。
+
+测试基线：**497 passed / 4 skipped**。
+
+
 
 
