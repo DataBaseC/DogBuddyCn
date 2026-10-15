@@ -419,7 +419,11 @@ class AdminService:
             job_lines.append(f"- {j.name}({j.id}) win={j.window_id} sched={j.schedule_raw} "
                              f"enabled={j.enabled} next={j.next_run_at} fails={j.fail_count}")
         runs = self.jobs.runs(limit=5)
-        run_lines = [f"- {r['status']} {r['started_at']} {r['summary'][:80]}" for r in runs]
+        # v0.10.19：`summary` 可能是 NULL（任务是"没事可报"或被人为清过），
+        # 直接 `r['summary'][:80]` 会 TypeError: 'NoneType' object is not subscriptable
+        # —— 表现就是"主管查全局进度"这个核心工具整个挂掉（圆桌测试里实测到）。
+        run_lines = [f"- {r.get('status')} {r.get('started_at')} "
+                     f"{str(r.get('summary') or '')[:80]}" for r in runs]
         text = ("## Windows\n" + ("\n".join(lines) or "(none)") +
                 "\n## Jobs\n" + ("\n".join(job_lines) or "(none)") +
                 "\n## Recent runs\n" + ("\n".join(run_lines) or "(none)"))
