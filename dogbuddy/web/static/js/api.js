@@ -116,6 +116,11 @@
     adminChat: function (text, sender) {
       return request('POST', '/api/admin/chat', { text: text, conversation: sender || 'default' });
     },
+    /* GET /api/admin/chat/usage?conversation= → {context_tokens, max_context_tokens, ratio, threshold, tokens, estimated}
+       管理员会话不落 windows 表，所以**不能**走 /api/windows/<id>/usage（会 404）。 */
+    adminChatUsage: function (sender) {
+      return request('GET', '/api/admin/chat/usage' + qs({ conversation: sender || 'default' }));
+    },
     adminChatReset: function (sender) {
       return request('POST', '/api/admin/chat/reset', { sender: sender || 'console' });
     },

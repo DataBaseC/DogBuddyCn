@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -154,6 +154,7 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS models(
       id TEXT PRIMARY KEY, provider TEXT DEFAULT '', model TEXT NOT NULL,
       base_url TEXT DEFAULT '', display_name TEXT DEFAULT '',
+      api_key TEXT DEFAULT '',
       note TEXT DEFAULT '', capability TEXT DEFAULT '',
       context_window INTEGER DEFAULT 0, speed TEXT DEFAULT '', cost TEXT DEFAULT '',
       enabled INTEGER DEFAULT 1, is_default INTEGER DEFAULT 0,
@@ -306,6 +307,22 @@ def _migrate_v11(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v12(conn: sqlite3.Connection) -> None:
+    """`models.api_key`（2026-10-15）：模型条目**自带密钥**。
+
+    以前目录条目只有 provider/base_url，密钥始终取全局 `llm.api_key`：
+    于是"设为当前"换到**另一家服务商**的模型时，用的还是上一家的 key（401），
+    用户只能再回设置页手改——这就是"新增模型太不方便"的根因。
+    条目自带 key 后，切模型 = 连密钥一起切。
+
+    注意：密钥只落在本地库（0600），**任何 API 响应都只回掩码**（见 ModelService）。
+    """
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(models)").fetchall()}
+    if "api_key" not in existing:
+        conn.execute("ALTER TABLE models ADD COLUMN api_key TEXT DEFAULT ''")
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -321,6 +338,7 @@ _MIGRATIONS: dict[int, Any] = {
     9: _migrate_v9,
     10: _migrate_v10,
     11: _migrate_v11,
+    12: _migrate_v12,
 }
 
 
@@ -1439,7 +1457,7 @@ class Database:
                            detail=r["detail"], created_at=r["created_at"]) for r in rows]
 
     # ------------------------------------------------- models (模型管理页, v5)
-    _MODEL_FIELDS = ("provider", "model", "base_url", "display_name", "note",
+    _MODEL_FIELDS = ("provider", "model", "base_url", "display_name", "api_key", "note",
                      "capability", "context_window", "speed", "cost",
                      "enabled", "is_default", "source")
 

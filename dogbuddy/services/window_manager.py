@@ -47,7 +47,14 @@ def _run_status(result: Any) -> str:
       done / max_iterations → ok（跑到上限不是失败）
       rate_limited          → rate_limited（限速等待，不是失败）
       其余（error 等）       → failed
+
+    v11：真实 runner 返回的是 `RunnerResult`（既没有 `stop_reason` 也没有 `ok`，
+    只有 `status`），上面两条分支都命中不了 → **恒判 failed**，于是每次 cron
+    都多出一行"假失败"，仪表盘的运行次数翻倍、成功率被腰斩。所以先认 `status`。
     """
+    status = str(getattr(result, "status", "") or "")
+    if status in ("ok", "failed", "rate_limited"):
+        return status
     stop = str(getattr(result, "stop_reason", "") or "")
     if stop:
         return {"done": "ok", "max_iterations": "ok",
@@ -443,7 +450,9 @@ class WindowManager:
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         rt.queue.submit(TaskItem(prompt=prompt, job_id=job_id, urgent=False,
                                  kind=kind or "prompt", llm_profile=llm_profile or "",
-                                 meta={"future": future}))
+                                 # 调用方（CronScheduler）已经开好 job_runs 行并负责收尾，
+                                 # 运行时不要重复开行（见 `_execute` 的同一处判断）
+                                 meta={"future": future, "run_owned_by_caller": True}))
         timeout = self._wait_timeout(window_id)
         try:
             result = await asyncio.wait_for(future, timeout=timeout)
@@ -556,9 +565,14 @@ class WindowManager:
         else:
             rt.current_task_label = task.prompt[:80]
             self._set_status(w.id, "running")
-            # T2.7: every scheduled/manual job run lands in job_runs (was cron-only)
+            # T2.7: every scheduled/manual job run lands in job_runs (was cron-only).
+            # v11：**cron 路径的账本由调度器持有**（scheduler.py 已 start_run 并负责
+            # 写 ok/rate_limited/timeout/failed），这里再写一行就是"一次触发两本账"：
+            # 运行历史显示两条相邻记录、仪表盘次数翻倍、成功率被那条永远不可能是
+            # timeout 的运行时行拉低。所以调用方已持有时不再开行。
             run_id = None
-            if task.job_id and hasattr(self.db, "start_run"):
+            if (task.job_id and not task.meta.get("run_owned_by_caller")
+                    and hasattr(self.db, "start_run")):
                 try:
                     run_id = self.db.start_run(task.job_id, w.id).id
                 except Exception:  # noqa: BLE001 — bookkeeping never breaks a run

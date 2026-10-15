@@ -243,6 +243,39 @@
       '</div>';
   }
 
+  /* ---------------- 上下文用量条（工位详情 / 管理员对话共用） ---------------- */
+  function fmtInt(n) {
+    n = Number(n) || 0;
+    return n.toLocaleString('en-US');
+  }
+
+  /**
+   * 用量条 HTML：ratio 填充，超过 threshold 变橙，超过 0.95 变红。
+   * 约定字段：`{context_tokens, max_context_tokens, ratio, threshold, estimated}`
+   * @param {Object} u 后端 usage 响应
+   * @param {Object=} opts `{label}` 覆盖标题文案
+   * @returns {string} 用量条 HTML
+   */
+  function usageHTML(u, opts) {
+    u = u || {};
+    opts = opts || {};
+    var ratio = Math.max(0, Math.min(1, Number(u.ratio) || 0));
+    var level = ratio > 0.95 ? 'crit'
+      : (Number(u.threshold) > 0 && ratio > Number(u.threshold) ? 'warn' : '');
+    var pct = Math.round(ratio * 100);
+    return '<div class="ctx-usage-top">' +
+      '<span class="ctx-usage-label">' + icon('activity', 'sm') +
+      esc(opts.label || '上下文用量') + '</span>' +
+      '<span class="ctx-usage-text num">' + (u.estimated ? '≈' : '') + fmtInt(u.context_tokens) +
+      ' / ' + fmtInt(u.max_context_tokens) + ' tokens</span>' +
+      '</div>' +
+      '<div class="ctx-usage-track"><div class="ctx-usage-fill ' + level +
+      '" style="width:' + pct + '%"></div></div>' +
+      '<div class="ctx-usage-foot"><span>' + pct + '%</span>' +
+      '<span class="hint">压缩阈值 ' + Math.round((Number(u.threshold) || 0) * 100) + '%' +
+      (u.estimated ? ' · 粗估' : '') + '</span></div>';
+  }
+
   /* ---------------- 防抖 ---------------- */
   function debounce(fn, ms) {
     var t = null;
@@ -278,6 +311,7 @@
     parseTime: parseTime, fmtTime: fmtTime, fmtClock: fmtClock, fmtDate: fmtDate,
     relTime: relTime, countdown: countdown, fmtSize: fmtSize,
     toast: toast, modal: modal, confirm: confirm, closeTopModal: closeTopModal,
-    skeleton: skeleton, empty: empty, debounce: debounce, highlightCode: highlightCode
+    skeleton: skeleton, empty: empty, debounce: debounce, highlightCode: highlightCode,
+    fmtInt: fmtInt, usageHTML: usageHTML
   };
 })(window);

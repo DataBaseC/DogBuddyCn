@@ -54,6 +54,31 @@ def _approval_verdict(answer: str) -> bool | None:
     return None
 
 
+def _usage_ints(resp: Any) -> dict[str, int]:
+    """LLM 响应里的 usage → 三个整数（缺项/非数字一律补 0）。
+
+    真实网关会塞 `prompt_tokens_details` 这类嵌套对象，所以不能假设都是数字。
+    """
+    raw = getattr(resp, "usage", None) or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        try:
+            val = int(raw.get(key) or 0)
+        except (TypeError, ValueError):
+            val = 0
+        out[key] = val
+    return out
+
+
+def _response_tokens(resp: Any) -> int:
+    """本轮调用的**账本 token**：优先 total_tokens，缺了就用 prompt+completion。"""
+    u = _usage_ints(resp)
+    total = u.get("total_tokens") or (u.get("prompt_tokens", 0) + u.get("completion_tokens", 0))
+    return max(0, int(total))
+
+
 @dataclass
 class AgentResult:
     content: str = ""
@@ -136,9 +161,15 @@ class AgentLoop:
                                   f"{errors.action_hint(e, assume_tool_args=False)}")
                 break
 
+            # v11：记账与"上下文占用"是两个口径，都在这里落地
+            #   tokens       → 本轮 total_tokens，供账本页/用量条显示累计花费
+            #   note_usage() → 本轮 prompt_tokens，供压缩器判断"上下文有多满"
+            tokens = _response_tokens(resp)
+            self._note_usage(resp)
+
             if not resp.tool_calls:
                 result.content = resp.content or ""
-                self.session.append("assistant", result.content)
+                self.session.append("assistant", result.content, tokens=tokens)
                 result.stop_reason = "done"
                 break
 
@@ -148,7 +179,7 @@ class AgentLoop:
                  "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)}}
                 for tc in resp.tool_calls
             ]
-            self.session.append("assistant", resp.content or "",
+            self.session.append("assistant", resp.content or "", tokens=tokens,
                                 meta={"tool_calls": llm_tool_calls})
             for tc in resp.tool_calls:
                 result.tool_calls += 1
@@ -179,6 +210,19 @@ class AgentLoop:
         return result
 
     # ------------------------------------------------------- C1 瞬态续跑
+    def _note_usage(self, resp: Any) -> None:
+        """把本轮 usage 里的 `prompt_tokens` 记到会话上（= 上下文占用）。
+
+        记账失败绝不能影响对话本身，所以整段吞异常。
+        """
+        note = getattr(self.session, "note_usage", None)
+        if not callable(note):
+            return
+        try:
+            note(getattr(resp, "usage", None))
+        except Exception:  # noqa: BLE001 — 只影响用量显示，不能影响对话
+            logger.debug("note_usage failed", exc_info=True)
+
     async def _chat(self, messages: list, schemas: list,
                     on_delta: Callable[[str], None] | None) -> Any:
         if on_delta is not None:

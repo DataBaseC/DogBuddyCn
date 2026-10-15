@@ -6,7 +6,7 @@
 <title>DogBuddyCn · 控制台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z' fill='%234f8cff'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/assets/css/base.css?v=4d2d49ea4b">
-<link rel="stylesheet" href="/assets/css/views.css?v=a10b1185dc">
+<link rel="stylesheet" href="/assets/css/views.css?v=adecb67470">
 </head>
 <body>
 
@@ -287,6 +287,8 @@
           </div>
         </div>
         <div class="card chat-card">
+          <!-- 上下文用量（管理员会话挂在合成窗口 admin:<id>，走 /api/admin/chat/usage） -->
+          <div class="ctx-usage" id="chat-usage" data-conv-id=""></div>
           <div class="chat-log" id="chat-log"></div>
           <div class="chat-input">
             <textarea id="chat-text" rows="2" placeholder="例如：每天早上 8 点推进 XX 项目的待办，完成后简要汇报。（Enter 发送，Shift+Enter 换行）"></textarea>
@@ -478,6 +480,6 @@
 <div id="toast-root" class="toast-root"></div>
 
 <!-- 页面只加载 bundle：源文件顺序见 tools/bundle-order.json，由 tools/rebuild-bundles.py 拼接 -->
-<script src="/assets/js/index.bundle.js?v=c703df1de1"></script>
+<script src="/assets/js/index.bundle.js?v=e1d61d2739"></script>
 </body>
 </html>

@@ -562,7 +562,7 @@ python scripts/deploy_bundle.py --bundle dist/dogbuddy-<ver>.tar.gz \
 | **别用 PowerShell 的 `Invoke-RestMethod -Body <字符串>` 传中文** | WinPS 5.1 按 Latin-1 发送，中文全变 `?` 且服务端"看起来成功"→ 数据静默损坏（实测模型备注被写成 `??????;429 ????,???? 2;???`）。改用：本地 UTF-8 文件 + `-InFile`，或 base64 落地后 `curl --data-binary @file`。**验证**：读回字段打印 `ascii(v)`，能见 `\u5de5\u5177` 才对；见到真 `?` 就是被截断。产品自身 API 用 UTF-8 完全正常 |
 | **也别用 PowerShell 调 `curl.exe -d "<JSON>"`** | WinPS 5.1 把参数交给原生程序时**不转义内嵌双引号**，`{"name":"x"}` 会变成 `{name:x}`，服务端报 `json_invalid / Expecting property name enclosed in double quotes`（实测创建群组时踩到）。**推荐姿势**：把验证脚本整段通过面板 `bash` 执行（那里 `-d '{...}'` 由 bash 解析，一切正常），或先把 body 写进文件再 `curl --data-binary @file`（`-F` 上传文件同理，`Invoke-RestMethod -Form` 在 5.1 不存在） |
 | `manage.py update` 不为前端做构建 | 改了 `web/static/**` 必须本地跑 `tools/rebuild-bundles.py` 再提交，否则 bundle/指纹过期（有 `--check` 守卫；⚠️ 仓库里**没有 `.github/`**，`--check` 目前只在本地/手工流程里生效，尚未挂 CI） |
-| **升级"看起来成功"但其实回滚了** | 2026-10-14 实测踩到：面板托管的应用被 kill 后，**旧进程仍占着 :8100 在应答**，新进程起不来；`manage.py update` 的健康检查读到的是旧版本号（`version=0.7.0` 而非 `0.7.1`），于是**自动回滚代码**——日志里只有一句 `已完成: version=...` 且 exit=0，很容易看漏。**判断方法**：`curl /healthz` 看 `version` 与 `build` 是否等于刚推的 commit；**处理**：确认旧进程已退出（`ps aux | grep dogbuddy`）后**再跑一次** `manage.py update` 即可（第二次会成功）。这是回滚保护在起作用，不是 bug，但会造成"我明明升级了却没变" |
+| **升级"看起来成功"但其实回滚了** | 2026-10-14 实测踩到：面板托管的应用被 kill 后，**旧进程仍占着 :8100 在应答**，新进程起不来；`manage.py update` 的健康检查读到的是旧版本号（`version=0.7.0` 而非 `0.7.1`），于是**自动回滚代码**——日志里只有一句 `已完成: version=...` 且 exit=0，很容易看漏。**判断方法**：`curl /healthz` 看 `version` 与 `build` 是否等于刚推的 commit；**处理**：确认旧进程已退出（`ps aux | grep dogbuddy`）后**再跑一次** `manage.py update` 即可（第二次会成功）。这是回滚保护在起作用，不是 bug，但会造成"我明明升级了却没变"。**⚠️ 0.10.6 更正**：其中一半其实是**诊断本身错了**——"重启机制不可用"被写成"新版本起不来"，从而回滚了一份正确代码；而游离旧进程冒充新版本那次是**假 success**。现已改为 `_probe()` 记录现场 + **pid 身份断言**（同一 pid → `restart-noop`，不回滚）+ 终态必写，详见 §8 |
 
 ---
 
@@ -599,3 +599,76 @@ bash scripts/verify_frontend_guards.sh   # 前端三种绕过手法各自被抓�
 ```
 
 判据：新测试在变异下**必须变红**，恢复后**必须全绿**。两个脚本都会自证这一点。
+
+---
+
+## 8. 第二轮修复批次（2026-10-15，`0.10.6`）
+
+背景：B1~B11 上线后现场又暴露四类问题（其中两类是 owner 亲自报的）。本轮**不依赖模型额度**
+（额度 429 仍卡着所有"真跑一轮"的验证），因此全部可本地复现 + 单测钉死。
+
+| 组 | 问题 | 修法 |
+|---|---|---|
+| **上下文口径** | `messages.tokens` 一个列被两种语义共用：账本要"累计花费"、压缩器要"当前占用"。`loop.py` 两处 `append("assistant", …)` **都不传 tokens** → 恒 0 → 用量条恒 0、**压缩永不触发**（比显示为 0 严重得多） | 新增 `WindowSession.last_prompt_tokens` / `note_usage()` / `context_tokens()`；assistant 消息记 `total_tokens`（账本+显示），压缩器与用量条改用**最近一次调用的 `prompt_tokens`**（拿不到则按字符粗估并标注"粗估"），**绝不回落 `SUM(tokens)`** |
+| **管理员用量入口** | 管理员会话挂在**内存里的合成窗口** `admin:<cid>`（不写 windows 表），唯一用量端点 `GET /api/windows/{id}/usage` 对它必然 404 → 管理员侧界面上零元素 | 新增 `GET /api/admin/chat/usage?conversation=`（合成会话 + `db.sum_tokens("admin:<id>")`，**不依赖 windows 表**）；`usageHTML()` 抽到 `ui.js` 由工位/对话共用；`views-chat.js` 在加载/发送/切换对话后刷新 |
+| **一次触发两本账** | cron 路径 `scheduler.py` 开行A、运行时 `window_manager.py` 又开行B，两行互不知情 → 历史两条相邻记录、仪表盘次数翻倍、成功率被那条**永远不可能变 timeout** 的行拉低 | cron 路径标记 `run_owned_by_caller`，运行时不再开行（调度器仍负责 ok/rate_limited/**timeout**/failed）；手动/`run_now` 路径维持"运行时开行" |
+| **`_run_status` 认 `status`** | 真实 runner 返回 `RunnerResult`（无 `stop_reason`/`ok`，只有 `status`）→ 两条分支都命中不了 → **每次执行都记成 failed**（假失败） | 先认 `result.status ∈ {ok, failed, rate_limited}`，保留原 `stop_reason`/`ok` 分支（老测试全绿） |
+| **`task_timeout` 无效** | 不在 `AppConfig.WINDOW_PARAM_KEYS` → `effective_params()` 静默丢弃 → `_wait_timeout()` 永远返回 1800s；控制台参数面板也没有这个字段（"看着设了、实际无效"） | 加进白名单 + 基础默认值 1800.0 + `views-params.js` FIELDS 入口（单轮等待上限） |
+| **升级诊断不诚实** | ① 缺 `DOGBUDDY_PANEL_PASSWORD` 时"重启机制不可用"被当成"新版本有毛病"→ **回滚掉正确代码**；② 游离进程占端口 → 健康检查读到旧进程却报 `success`（假成功）；③ 一堆提前 return 让结果文件永远停在 `running` | `_panel_restart()` 返回 `(ok, reason)`；新增 `_probe()`（不过滤版本）与 `_observed()` 记录现场；**重启前后 pid 相同即判 `restart-noop`（不回滚、不写 VERSION 戳）**；失败时区分"无人应答"与"旧进程还在应答"；`_finalize_result()` 保证任何退出路径落终态（`failed`/`noop`）；`self_version` 对 `success` 且版本未变追加告警 |
+
+测试：新增 `tests/test_context_usage.py`、`test_run_bookkeeping.py`、`test_update_diagnostics.py`
+（18 条），**总基线 476 passed / 4 skipped**；压缩器口径与 assistant 记账两处变异各自被新测试抓住
+（把 `compactor._used_tokens` 换回 `token_usage()`、或去掉 `tokens=` → 立刻红）。
+
+未做（留给下一任，理由见 `HANDOVER.md §11`）：模型额度 429（owner 侧）、worker 限速可见化、
+退避记忆把 600s 首等持久化、部署通道"不依赖外部守护"的正解（面板密码注入 vs agent-token 路线）。
+
+---
+
+## 9. 第三轮：模型接入"一条表单"（2026-10-15，`0.10.7`，schema 12）
+
+背景：owner 报"我怎么新增 llm 模型，太不方便了吧"。实测痛点有两条，第二条是**真缺陷**：
+
+| 问题 | 说明 |
+|---|---|
+| 目录条目**没有密钥** | `models` 表只有 provider/base_url，密钥永远取全局 `llm.api_key`。于是"设为当前"换到**另一家服务商**的模型时，带着上一家的 key 去请求（401），只能再回设置页手改——切模型 ≠ 切成一套可用配置 |
+| 表单太重 | 新增模型要一次填 9 个字段（provider 还要手打），没有"填地址+密钥→拉列表选一个→测通→保存"的直线路径；拉取导入也不接受密钥 |
+
+修法（**schema v12，新增 `models.api_key`**）：
+
+| 层 | 改动 |
+|---|---|
+| L5 | `SCHEMA_VERSION 11 → 12`；`_migrate_v12` 给 `models` 补 `api_key`（老库自动升级，幂等）；`_MODEL_FIELDS` 加该列 |
+| L2 | `ModelService.upsert/update` 接受密钥（**留空或回传掩码 = 保持原值**）；`activate()` 把条目自带密钥一起写进运行时配置并落盘，返回 `api_key_switched`；`catalog()` 一律回 `mask_key()`；`import_fetched` 把"用哪把 key 拉的列表"记在新条目上；新增 `PROVIDER_PRESETS`（8 个常见服务商，只预填地址） |
+| L1 | `ModelIn/ModelPatch` 加 `api_key`；`GET /api/models/options` 回 `providers` 预设；`POST /api/settings/test_llm` 支持 `model_ref`（按目录条目自带密钥测连接） |
+| L4/前端 | 模型页表单重做：服务商预设一键带入 → 模型名（可拉取列表选）→ 地址 → **API Key**（密码框）→「拉取模型列表 / 测试连接」→ 保存并可**勾选"保存后立即设为当前"**；备注与高级字段折叠；列表加"自带密钥 / 用全局密钥"徽标；导入弹窗也能带密钥 |
+
+**安全口径**：密钥只落本地库（与 config.yaml 同级 0600），**任何接口只回掩码**（`********` + 末 4 位，
+且长度 < 12 的短 key 连末 4 位都不给）；`PATCH` 回传掩码会被识别为"未修改"，不会把掩码存成真密钥；
+审计日志只记"自带/全局"，不记密钥值。
+
+测试：`tests/test_model_catalog_keys.py`（9 条）覆盖 v11→v12 迁移、掩码不回传、掩码回传不覆盖、
+`activate` 连密钥一起切且落盘、HTTP 层不回明文、预设枚举、前端接入要素。**基线 485 passed / 4 skipped**。
+
+⚠️ **运维后果**：生产库一旦升到 schema 12，**回滚到 0.10.5/0.10.6 会 `SchemaTooNewError` 拒绝启动**
+（这是 fail-fast 的设计，不是 bug）。部署 0.10.7 前请先确认不需要回滚，或先备份 `/var/lib/dogbuddy/dogbuddy.db`。
+
+### 9.1 同日发现并修掉的事故：`pytest` 会覆盖**真实用户配置**
+
+本地部署试用时发现 `%LOCALAPPDATA%\dogbuddy\config.yaml` 的内容是测试垃圾
+（`base_url: http://invalid.local/v1`、`model: fake`、`data_dir: <pytest 临时目录>`）。
+根因：`tests/test_web_api.py::test_settings_profiles_crud` 打
+`/api/settings/profiles/cheap` → `persist()` → `save_config()`，而它**没有隔离
+`DOGBUDDY_CONFIG`** → 写到平台默认配置路径，把用户真实的 LLM 配置（含密钥）静默覆盖。
+
+修法：`tests/conftest.py` 加 autouse fixture，把 `DOGBUDDY_CONFIG`（Windows 下连带
+`LOCALAPPDATA`，因为 `default_data_dir()` 读它）钉到每个测试自己的 `tmp_path`；
+新增 `tests/test_config_isolation.py`（3 条）复现事故路径并断言落点在 tmp 内、
+真实配置字节不变。**自证**：去掉 fixture 后这 3 条立刻变红（实测），恢复后全绿。
+基线 **488 passed / 4 skipped**。
+
+教训写进这里是因为它满足"静默 + 数据损坏"两个条件：跑一次测试就毁掉用户凭据，
+而且只有对比文件内容才发现。
+
+
+

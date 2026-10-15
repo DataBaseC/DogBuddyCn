@@ -147,9 +147,12 @@ class AppConfig(BaseModel):
     # ---- per-window parameter resolution (Batch 1 / ROADMAP T1.1) ----
     #: every parameter a window may override; anything else in window.params is ignored
     #: `trust` (T4.2): "normal" | "elevated" — elevated may run allowlisted danger
+    #: `task_timeout`（v11）：cron 单轮等待上限。**此前漏在这个白名单里**，于是
+    #: 通过 API/项目层设的 task_timeout 会被 `effective_params()` 静默丢弃，
+    #: `WindowManager._wait_timeout()` 永远退回 1800s —— 用户设的 15s 形同无效。
     WINDOW_PARAM_KEYS: ClassVar[tuple[str, ...]] = (
         "max_context_tokens", "compact_threshold", "temperature",
-        "request_timeout", "max_iterations", "retry", "trust")
+        "request_timeout", "max_iterations", "task_timeout", "retry", "trust")
 
     def effective_params(self, window: Any = None, profile: str | None = None,
                          project: Any = None) -> dict[str, Any]:
@@ -179,6 +182,9 @@ class AppConfig(BaseModel):
             "request_timeout": getattr(section, "request_timeout",
                                        self.llm.request_timeout),
             "max_iterations": self.max_iterations,
+            # 与 WindowManager.CRON_WAIT_TIMEOUT 对齐：超时只代表"这轮不再等"，
+            # 任务继续在后台跑，不会计失败。
+            "task_timeout": 1800.0,
             "retry": retry_dump,
             "trust": "normal",
         }

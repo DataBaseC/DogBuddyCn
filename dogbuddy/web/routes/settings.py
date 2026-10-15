@@ -69,6 +69,7 @@ class LLMProbeIn(BaseModel):
     api_key: str | None = None  # None → reuse the saved key
     model: str | None = None
     profile: str | None = None  # probe through a named profile instead of ad-hoc params
+    model_ref: str | None = None  # probe through a **catalog entry** (自带密钥的那条)
 
 
 class ProfileIn(BaseModel):
@@ -189,6 +190,16 @@ def router(svc, auth_deps) -> APIRouter:
     @r.post("/settings/test_llm", dependencies=auth_deps)
     async def test_llm(body: LLMProbeIn) -> dict:
         """Connectivity check (+ optional real chat round-trip when model is given)."""
+        if body.model_ref:
+            # 按目录条目测：用它自带的 base_url/密钥（掩码不会回传，所以只能服务端取）
+            entry = svc.db.get_model(body.model_ref)
+            if entry is None:
+                raise HTTPException(status_code=404, detail=f"模型不存在：{body.model_ref}")
+            return await svc.config.test_llm(
+                body.provider or entry.get("provider") or None,
+                body.base_url or entry.get("base_url") or None,
+                body.api_key if body.api_key is not None else (entry.get("api_key") or None),
+                body.model or entry.get("model") or None)
         if body.profile:
             section = cfg.llm_for(body.profile)
             return await svc.config.test_llm(body.provider or section.provider,

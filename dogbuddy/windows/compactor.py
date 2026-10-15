@@ -53,11 +53,27 @@ class Compactor:
         return current_tokens >= self.threshold * max_tokens
 
     async def maybe_compact(self, session: Any) -> Compaction | None:
-        """Compact when over threshold. Returns the Compaction record if one happened."""
-        used = session.token_usage()
+        """Compact when over threshold. Returns the Compaction record if one happened。
+
+        判据必须用**上下文占用**（最近一次调用的 prompt_tokens），不能用累计花费
+        （`session.token_usage()` 是 `SUM(tokens)`）：长寿命工位的累计花费只会一直涨，
+        用它判压缩 = 会话越老越容易触发压缩，把上下文压碎。
+        """
+        used = self._used_tokens(session)
         if not self.should_compress(used):
             return None
         return await self.compact_now(session)
+
+    @staticmethod
+    def _used_tokens(session: Any) -> int:
+        """上下文占用的取值口径，带兜底：老 session 对象没有 `context_tokens()`。"""
+        ctx = getattr(session, "context_tokens", None)
+        if callable(ctx):
+            try:
+                return int(ctx())
+            except Exception:  # noqa: BLE001 — 拿不到占用时退回累计值，绝不阻断压缩路径
+                logger.debug("context_tokens() failed", exc_info=True)
+        return int(session.token_usage())
 
     async def compact_now(self, session: Any) -> Compaction:
         messages = session.recent(400)

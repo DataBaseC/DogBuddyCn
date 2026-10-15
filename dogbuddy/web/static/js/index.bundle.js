@@ -249,6 +249,39 @@
       '</div>';
   }
 
+  /* ---------------- 上下文用量条（工位详情 / 管理员对话共用） ---------------- */
+  function fmtInt(n) {
+    n = Number(n) || 0;
+    return n.toLocaleString('en-US');
+  }
+
+  /**
+   * 用量条 HTML：ratio 填充，超过 threshold 变橙，超过 0.95 变红。
+   * 约定字段：`{context_tokens, max_context_tokens, ratio, threshold, estimated}`
+   * @param {Object} u 后端 usage 响应
+   * @param {Object=} opts `{label}` 覆盖标题文案
+   * @returns {string} 用量条 HTML
+   */
+  function usageHTML(u, opts) {
+    u = u || {};
+    opts = opts || {};
+    var ratio = Math.max(0, Math.min(1, Number(u.ratio) || 0));
+    var level = ratio > 0.95 ? 'crit'
+      : (Number(u.threshold) > 0 && ratio > Number(u.threshold) ? 'warn' : '');
+    var pct = Math.round(ratio * 100);
+    return '<div class="ctx-usage-top">' +
+      '<span class="ctx-usage-label">' + icon('activity', 'sm') +
+      esc(opts.label || '上下文用量') + '</span>' +
+      '<span class="ctx-usage-text num">' + (u.estimated ? '≈' : '') + fmtInt(u.context_tokens) +
+      ' / ' + fmtInt(u.max_context_tokens) + ' tokens</span>' +
+      '</div>' +
+      '<div class="ctx-usage-track"><div class="ctx-usage-fill ' + level +
+      '" style="width:' + pct + '%"></div></div>' +
+      '<div class="ctx-usage-foot"><span>' + pct + '%</span>' +
+      '<span class="hint">压缩阈值 ' + Math.round((Number(u.threshold) || 0) * 100) + '%' +
+      (u.estimated ? ' · 粗估' : '') + '</span></div>';
+  }
+
   /* ---------------- 防抖 ---------------- */
   function debounce(fn, ms) {
     var t = null;
@@ -284,7 +317,8 @@
     parseTime: parseTime, fmtTime: fmtTime, fmtClock: fmtClock, fmtDate: fmtDate,
     relTime: relTime, countdown: countdown, fmtSize: fmtSize,
     toast: toast, modal: modal, confirm: confirm, closeTopModal: closeTopModal,
-    skeleton: skeleton, empty: empty, debounce: debounce, highlightCode: highlightCode
+    skeleton: skeleton, empty: empty, debounce: debounce, highlightCode: highlightCode,
+    fmtInt: fmtInt, usageHTML: usageHTML
   };
 })(window);
 
@@ -406,6 +440,11 @@
     },
     adminChat: function (text, sender) {
       return request('POST', '/api/admin/chat', { text: text, conversation: sender || 'default' });
+    },
+    /* GET /api/admin/chat/usage?conversation= → {context_tokens, max_context_tokens, ratio, threshold, tokens, estimated}
+       管理员会话不落 windows 表，所以**不能**走 /api/windows/<id>/usage（会 404）。 */
+    adminChatUsage: function (sender) {
+      return request('GET', '/api/admin/chat/usage' + qs({ conversation: sender || 'default' }));
     },
     adminChatReset: function (sender) {
       return request('POST', '/api/admin/chat/reset', { sender: sender || 'console' });
@@ -1904,6 +1943,28 @@
     return state.conversations.filter(function (c) { return c.id === state.sender; })[0] || null;
   }
 
+  /* ---------------- 上下文用量（管理员会话） ----------------
+     管理员会话挂在内存里的合成窗口 `admin:<对话 id>`，**不在 windows 表**里，
+     所以必须走 /api/admin/chat/usage；早期版本没有这个端点，界面上也就一直什么都看不到。 */
+  function usageHost() { return U.$('#chat-usage'); }
+
+  function refreshUsage(convId) {
+    var host = usageHost();
+    if (!host) return Promise.resolve();
+    var id = convId || state.sender;
+    if (id) host.setAttribute('data-conv-id', id);
+    return A.adminChatUsage(id).then(function (u) {
+      /* 异步回来时若已切换对话，丢弃这次结果 */
+      if (host.getAttribute('data-conv-id') !== id) return;
+      host.innerHTML = U.usageHTML(u || {}, { label: '管理员上下文' });
+    }).catch(function () {
+      if (host.getAttribute('data-conv-id') !== id) return;
+      host.innerHTML = '<div class="ctx-usage-top"><span class="ctx-usage-label">' +
+        U.icon('activity', 'sm') + '管理员上下文</span>' +
+        '<span class="hint">用量暂时取不到</span></div>';
+    });
+  }
+
   /* ---------------- 渲染 ---------------- */
   function renderSenders() {
     var sel = U.$('#chat-sender');
@@ -2036,6 +2097,7 @@
     }).then(function (res) {
       state.messages = (res && res.messages) || [];
       render();
+      refreshUsage(state.sender);
     }).catch(function (e) {
       U.toast('error', '加载对话失败：' + (e && e.message ? e.message : e));
     });
@@ -2058,6 +2120,7 @@
       state.messages = (res && res.messages) || state.messages;
       setBusy(false);
       render();
+      refreshUsage(state.sender);
     }).catch(function (e) {
       state.messages = state.messages.filter(function (m) { return m !== optimistic; });
       var msg = (e && e.message) ? e.message : String(e);
@@ -2110,6 +2173,7 @@
         setSender(sel.value);
         state.messages = [];
         render();
+        refreshUsage(sel.value);
         A.adminChatMessages(state.sender, 200).then(function (res) {
           state.messages = (res && res.messages) || [];
           render();
@@ -4652,7 +4716,10 @@
       (isCur ? ' <span class="badge badge-green">当前</span>' : '') +
       (m.enabled ? '' : ' <span class="badge badge-grey">已停用</span>') + '</div>' +
       '<div class="card-sub mono">' + U.esc(m.id) + '</div></td>' +
-      '<td>' + U.esc(m.provider || '') + '<div class="card-sub mono">' + U.esc(m.base_url || '—') + '</div></td>' +
+      '<td>' + U.esc(m.provider || '') + '<div class="card-sub mono">' + U.esc(m.base_url || '—') + '</div>' +
+      (m.has_api_key
+        ? '<span class="badge badge-green" title="该条目自带密钥，「设为当前」时会一起切换">自带密钥</span>'
+        : '<span class="badge badge-grey" title="跟设置页里的全局密钥共用">用全局密钥</span>') + '</td>' +
       '<td>' + noteCell(m) + '</td>' +
       '<td>' + caps(m) + '</td>' +
       '<td class="num">' + (m.context_window ? U.esc(String(m.context_window)) : '—') + '</td>' +
@@ -4768,46 +4835,87 @@
       '" placeholder="也可以手动输入，逗号分隔"></div>';
   }
 
+  /* ---------------- 新增/编辑模型（v12：一条表单就能从零接入一家服务商） ----------------
+     以前的表单要求手打 provider、手打地址、9 个字段一次填完，而且**没有密钥栏**——
+     跨服务商换模型时用的还是全局那把 key（401），只能再回设置页手改。
+     现在：预设一键带入地址 → 填密钥 → 拉取模型列表选名字 → 测试连接 → 保存。 */
+  function presetChips() {
+    return (state.options.providers || []).map(function (p) {
+      return '<button type="button" class="chip chip-btn" data-preset="' + U.esc(p.provider) +
+        '" data-url="' + U.esc(p.url) + '">' + U.esc(p.label) + '</button>';
+    }).join(' ') || '<span class="card-sub">（无预设）</span>';
+  }
+
+  function probeOut(msg, kind) {
+    var el = U.$('#mdl-f-probe-out');
+    if (!el) return;
+    el.className = 'hint' + (kind === 'ok' ? ' form-ok' : (kind === 'err' ? ' form-error' : ''));
+    el.textContent = msg || '';
+  }
+
   function editModel(m, focusNote) {
     var isNew = !m;
     m = m || { model: '', provider: state.current.provider || 'openai_compat',
                base_url: state.current.base_url || '', note: '', capability: '',
                context_window: state.current.max_context_tokens || 0, speed: '', cost: '' };
+    var keyHint = m.has_api_key
+      ? ('已保存 ' + (m.api_key || '********') + '，留空保持不变')
+      : '留空 = 用全局密钥（设置页那把）';
     U.modal({
       title: isNew ? '新增模型' : ('模型：' + (m.display_name || m.model)),
       wide: true,
       body:
+        '<div class="field"><span class="field-label">服务商预设（点一下带出地址）</span>' +
+        '<div class="mdl-chips" id="mdl-f-presets">' + presetChips() + '</div></div>' +
         '<div class="set-two">' +
-        '<div class="field"><span class="field-label">模型名 *</span>' +
-        '<input class="input mono" id="mdl-f-model" value="' + U.esc(m.model || '') + '" placeholder="如 deepseek-v4-flash"></div>' +
-        '<div class="field"><span class="field-label">显示名（可选）</span>' +
-        '<input class="input" id="mdl-f-name" value="' + U.esc(m.display_name || '') + '" placeholder="给管理员看的名字"></div>' +
+        '<div class="field"><span class="field-label">模型名 *（可点下面「拉取模型列表」选）</span>' +
+        '<input class="input mono" id="mdl-f-model" list="mdl-f-model-list" value="' +
+        U.esc(m.model || '') + '" placeholder="如 deepseek-v4-flash">' +
+        '<datalist id="mdl-f-model-list"></datalist></div>' +
+        '<div class="field"><span class="field-label">API 地址（base_url）</span>' +
+        '<input class="input mono" id="mdl-f-base" value="' + U.esc(m.base_url || '') +
+        '" placeholder="https://…/v1"></div>' +
         '</div>' +
         '<div class="set-two">' +
+        '<div class="field"><span class="field-label">API Key</span>' +
+        '<input class="input mono" id="mdl-f-key" type="password" value="" placeholder="' +
+        U.esc(keyHint) + '"></div>' +
         '<div class="field"><span class="field-label">provider</span>' +
-        '<input class="input mono" id="mdl-f-provider" value="' + U.esc(m.provider || 'openai_compat') + '"></div>' +
-        '<div class="field"><span class="field-label">API 地址（留空=用全局）</span>' +
-        '<input class="input mono" id="mdl-f-base" value="' + U.esc(m.base_url || '') + '"></div>' +
+        '<input class="input mono" id="mdl-f-provider" value="' +
+        U.esc(m.provider || 'openai_compat') + '"></div>' +
         '</div>' +
-        '<div class="field"><span class="field-label">备注：能力与限制 *（最重要的一栏）</span>' +
-        '<textarea class="textarea" id="mdl-f-note" rows="4" placeholder="例如：工具调用稳定；429 限速很凶，并发别超 2；中文好；不支持 vision；上下文 128k 但实际 32k 后明显变笨。">' +
-        U.esc(m.note || '') + '</textarea>' +
-        '<div class="hint">写给未来的自己/管理员看：擅长什么、不能干什么、限速与坑。</div></div>' +
+        '<div class="mdl-probe-row">' +
+        '<button class="btn btn-soft btn-sm" id="mdl-f-fetch" type="button">' + U.icon('refresh', 'sm') + '拉取模型列表</button>' +
+        '<button class="btn btn-soft btn-sm" id="mdl-f-test" type="button">' + U.icon('activity', 'sm') + '测试连接</button>' +
+        '<span class="hint" id="mdl-f-probe-out"></span></div>' +
+        '<div class="field"><span class="field-label">备注：能力与限制（建议写清）</span>' +
+        '<textarea class="textarea" id="mdl-f-note" rows="3" placeholder="例如：工具调用稳定；429 限速很凶，并发别超 2；中文好；不支持 vision。">' +
+        U.esc(m.note || '') + '</textarea></div>' +
         chipInput('mdl-f-cap', m.capability, state.options.capabilities, '能力标签') +
+        '<details class="mdl-adv"' + (focusNote ? '' : '') + '>' +
+        '<summary>更多字段（显示名 / 上下文 / 速度 / 成本）</summary>' +
         '<div class="set-two">' +
+        '<div class="field"><span class="field-label">显示名（可选）</span>' +
+        '<input class="input" id="mdl-f-name" value="' + U.esc(m.display_name || '') + '"></div>' +
         '<div class="field"><span class="field-label">上下文窗口（tokens）</span>' +
-        '<input class="input" id="mdl-f-ctx" type="number" min="0" value="' + U.esc(String(m.context_window || 0)) + '"></div>' +
+        '<input class="input" id="mdl-f-ctx" type="number" min="0" value="' +
+        U.esc(String(m.context_window || 0)) + '"></div>' +
+        '</div>' +
+        '<div class="set-two">' +
         '<div class="field"><span class="field-label">速度档</span>' +
         '<select class="select" id="mdl-f-speed">' + (state.options.speeds || ['']).map(function (s) {
           return '<option value="' + U.esc(s) + '"' + (s === (m.speed || '') ? ' selected' : '') + '>' +
             U.esc(s || '（未填）') + '</option>';
         }).join('') + '</select></div>' +
-        '</div>' +
         '<div class="field"><span class="field-label">成本档</span>' +
         '<select class="select" id="mdl-f-cost">' + (state.options.costs || ['']).map(function (s) {
           return '<option value="' + U.esc(s) + '"' + (s === (m.cost || '') ? ' selected' : '') + '>' +
             U.esc(s || '（未填）') + '</option>';
-        }).join('') + '</select></div>',
+        }).join('') + '</select></div>' +
+        '</div></details>' +
+        (isNew
+          ? '<label class="mdl-chk"><input type="checkbox" id="mdl-f-activate" checked> 保存后立即设为当前模型</label>'
+          : ''),
       buttons: [
         { label: '取消', cls: 'btn-ghost' },
         {
@@ -4824,16 +4932,92 @@
               speed: body.querySelector('#mdl-f-speed').value,
               cost: body.querySelector('#mdl-f-cost').value
             };
+            /* 密钥：只在真的录入了新值时才发（掩码/空 = 保持原样，服务端也拦一道） */
+            var typed = body.querySelector('#mdl-f-key').value.trim();
+            if (typed) payload.api_key = typed;
             if (!payload.model) { U.toast('warn', '模型名不能为空'); return false; }
+            var wantActivate = isNew && body.querySelector('#mdl-f-activate') &&
+              body.querySelector('#mdl-f-activate').checked;
             var p = isNew ? apiModels().create(payload) : apiModels().update(m.id, payload);
-            p.then(function () {
+            p.then(function (r) {
               U.toast('success', isNew ? '已加入目录' : '已保存');
-              return load();
-            }).catch(function (e) { U.toast('error', e.message); });
+              var saved = (r && r.model) || {};
+              if (wantActivate && saved.id) {
+                return apiModels().activate(saved.id).then(function (a) {
+                  var res = (a && a.result) || {};
+                  U.toast('success', '已切换为 ' + (res.model || payload.model) +
+                    (res.api_key_switched ? '（已同时切换为该模型自带的密钥）' : '（沿用全局密钥）'));
+                });
+              }
+              return null;
+            }).then(function () { return load(); })
+              .catch(function (e) { U.toast('error', e.message); });
           }
         }
       ]
     });
+
+    /* 预设：一键带入 provider + 地址 */
+    var presets = U.$('#mdl-f-presets');
+    if (presets) {
+      U.$$('[data-preset]', presets).forEach(function (b) {
+        b.addEventListener('click', function () {
+          var prov = U.$('#mdl-f-provider');
+          var base = U.$('#mdl-f-base');
+          if (prov) prov.value = b.getAttribute('data-preset') || 'openai_compat';
+          if (base) base.value = b.getAttribute('data-url') || '';
+          U.$$('[data-preset]', presets).forEach(function (x) { x.classList.remove('chip-on'); });
+          b.classList.add('chip-on');
+        });
+      });
+    }
+
+    /* 读当前表单（拉取/测试共用） */
+    function formArgs() {
+      var out = {
+        provider: (U.$('#mdl-f-provider') || {}).value || '',
+        base_url: (U.$('#mdl-f-base') || {}).value.trim(),
+        model: (U.$('#mdl-f-model') || {}).value.trim()
+      };
+      var typed = (U.$('#mdl-f-key') || {}).value;
+      if (typed && typed.trim()) out.api_key = typed.trim();
+      else if (!isNew && m.has_api_key) out.model_ref = m.id;   /* 用条目里已保存的那把 */
+      return out;
+    }
+
+    var fetchBtn = U.$('#mdl-f-fetch');
+    if (fetchBtn) {
+      fetchBtn.addEventListener('click', function () {
+        var a = formArgs();
+        probeOut('拉取中…');
+        A.settings.models(a.provider, a.base_url, a.api_key).then(function (r) {
+          var list = (r && r.models) || [];
+          if (r && r.error) { probeOut('拉取失败：' + r.error, 'err'); return; }
+          var dl = U.$('#mdl-f-model-list');
+          if (dl) dl.innerHTML = list.map(function (x) { return '<option value="' + U.esc(x) + '"></option>'; }).join('');
+          var mi = U.$('#mdl-f-model');
+          if (mi && !mi.value && list.length) mi.value = list[0];
+          probeOut('拉到 ' + list.length + ' 个模型（点模型名输入框可选）', 'ok');
+        }).catch(function (e) { probeOut('拉取失败：' + e.message, 'err'); });
+      });
+    }
+
+    var testBtn = U.$('#mdl-f-test');
+    if (testBtn) {
+      testBtn.addEventListener('click', function () {
+        var a = formArgs();
+        if (!a.model) { U.toast('warn', '先填模型名再测'); return; }
+        probeOut('连接中…');
+        A.settings.testLLM(a).then(function (r) {
+          var ok = r && r.ok !== false && !r.error;
+          probeOut((ok ? '✅ 通了' : '❌ 失败') +
+            (r && r.latency_ms ? ' · ' + r.latency_ms + 'ms' : '') +
+            (r && r.model_count ? ' · 该服务商 ' + r.model_count + ' 个模型' : '') +
+            (r && r.error ? ' · ' + r.error : ''), ok ? 'ok' : 'err');
+        }).catch(function (e) { probeOut('测试失败：' + e.message, 'err'); });
+      });
+    }
+
     // 标签 chip 交互
     var chips = U.$('#mdl-f-cap-chips');
     var input = U.$('#mdl-f-cap');
@@ -4856,11 +5040,16 @@
     U.modal({
       title: '拉取并导入模型',
       body: '<div class="card-sub" style="margin-bottom:10px">从当前（或指定）LLM 服务商拉取模型列表，' +
-        '批量加入目录。<b>已存在条目的备注不会被覆盖。</b></div>' +
-        '<div class="field"><span class="field-label">provider（留空=用当前）</span>' +
-        '<input class="input mono" id="mdl-i-provider" value=""></div>' +
+        '批量加入目录。<b>已存在条目的备注不会被覆盖。</b>带密钥拉取时，新条目会记下这把密钥，' +
+        '这样跨服务商也能直接「设为当前」。</div>' +
+        '<div class="field"><span class="field-label">服务商预设</span>' +
+        '<div class="mdl-chips" id="mdl-i-presets">' + presetChips() + '</div></div>' +
         '<div class="field"><span class="field-label">API 地址（留空=用当前）</span>' +
-        '<input class="input mono" id="mdl-i-base" value=""></div>',
+        '<input class="input mono" id="mdl-i-base" value=""></div>' +
+        '<div class="field"><span class="field-label">API Key（留空=用全局密钥）</span>' +
+        '<input class="input mono" id="mdl-i-key" type="password" value="" placeholder="另一家服务商就填这里"></div>' +
+        '<div class="field"><span class="field-label">provider（留空=用当前）</span>' +
+        '<input class="input mono" id="mdl-i-provider" value=""></div>',
       buttons: [
         { label: '取消', cls: 'btn-ghost' },
         {
@@ -4870,6 +5059,8 @@
               provider: body.querySelector('#mdl-i-provider').value.trim(),
               base_url: body.querySelector('#mdl-i-base').value.trim()
             };
+            var key = body.querySelector('#mdl-i-key').value.trim();
+            if (key) payload.api_key = key;
             apiModels().import(payload).then(function (r) {
               var res = (r && r.result) || {};
               U.toast('success', '拉取 ' + (res.fetched || 0) + ' 个，新增 ' + ((res.added || []).length) +
@@ -4880,6 +5071,19 @@
         }
       ]
     });
+    var presets = U.$('#mdl-i-presets');
+    if (presets) {
+      U.$$('[data-preset]', presets).forEach(function (b) {
+        b.addEventListener('click', function () {
+          var prov = U.$('#mdl-i-provider');
+          var base = U.$('#mdl-i-base');
+          if (prov) prov.value = b.getAttribute('data-preset') || '';
+          if (base) base.value = b.getAttribute('data-url') || '';
+          U.$$('[data-preset]', presets).forEach(function (x) { x.classList.remove('chip-on'); });
+          b.classList.add('chip-on');
+        });
+      });
+    }
   }
 
   function ensureBound() {
@@ -4947,6 +5151,9 @@
     { key: 'max_iterations', label: '迭代上限', unit: '轮', type: 'int',
       min: 1, max: 200, step: 1,
       hint: '单次任务最多工具迭代轮数（1 ~ 200）' },
+    { key: 'task_timeout', label: '单轮等待上限', unit: '秒', type: 'float',
+      min: 30, max: 86400, step: 30,
+      hint: 'cron 触发后等待单轮结束的上限（默认 1800）；超时不算失败，任务继续在后台跑' },
     { key: 'retry.max_retries', label: '重试次数', unit: '次', type: 'int',
       min: 0, max: 50, step: 1,
       hint: '限速 / 失败后的最大重试次数（0 ~ 50）' },
@@ -5146,11 +5353,13 @@
   var usageWinId = null;
 
   /**
-   * 用量条 HTML：ratio 填充，超过 threshold 变橙，超过 0.95 变红。
+   * 用量条 HTML —— 实现已抽到 `ui.js`（`U.usageHTML`），供对话视图共用；
+   * 这里保留本地包装是为了兼容旧调用点与老 bundle。
    * @param {Object} u GET /api/windows/{id}/usage 的响应
    * @returns {string} 用量条 HTML
    */
   function usageHTML(u) {
+    if (typeof U.usageHTML === 'function') return U.usageHTML(u);
     var ratio = Math.max(0, Math.min(1, Number(u.ratio) || 0));
     var level = ratio > 0.95 ? 'crit'
       : (Number(u.threshold) > 0 && ratio > Number(u.threshold) ? 'warn' : '');

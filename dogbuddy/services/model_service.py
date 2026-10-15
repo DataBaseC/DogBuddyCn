@@ -26,6 +26,39 @@ CAPABILITY_TAGS = ("工具调用", "推理", "代码", "长上下文", "中文�
 SPEED_LEVELS = ("", "很快", "快", "中", "慢", "很慢")
 COST_LEVELS = ("", "免费", "低", "中", "高")
 
+#: 掩码前缀——**凡是要出接口的密钥都必须过这里**
+MASK = "********"
+
+#: 常见服务商预设（模型管理页的"一键填入"）。**只预填 base_url/provider，不预填密钥。**
+PROVIDER_PRESETS: tuple[dict[str, str], ...] = (
+    {"label": "SenseNova（商汤）", "provider": "openai_compat",
+     "url": "https://token.sensenova.cn/v1"},
+    {"label": "DeepSeek", "provider": "openai_compat", "url": "https://api.deepseek.com/v1"},
+    {"label": "OpenAI", "provider": "openai_compat", "url": "https://api.openai.com/v1"},
+    {"label": "Moonshot Kimi", "provider": "openai_compat", "url": "https://api.moonshot.cn/v1"},
+    {"label": "阿里百炼 DashScope", "provider": "openai_compat",
+     "url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+    {"label": "硅基流动", "provider": "openai_compat", "url": "https://api.siliconflow.cn/v1"},
+    {"label": "Ollama 本地", "provider": "ollama", "url": "http://127.0.0.1:11434"},
+    {"label": "自定义 / 中转站", "provider": "openai_compat", "url": ""},
+)
+
+
+def mask_key(key: str | None) -> str:
+    """`sk-abcdef123456` → `********3456`。空 key 回空串。
+
+    短 key 连尾巴都不给看：4 位尾巴对 5~8 位的 key 等于泄露大半。
+    """
+    k = (key or "").strip()
+    if not k:
+        return ""
+    return MASK + (k[-4:] if len(k) >= 12 else "")
+
+
+def is_masked(value: str | None) -> bool:
+    """前端回传掩码时表示"没改密钥"，不能把它当成新密钥存下去。"""
+    return bool(value) and str(value).strip().startswith(MASK)
+
 
 def make_model_id(provider: str, model: str) -> str:
     """稳定、可读、**路径安全**的 id：`<provider>_<model>`。
@@ -63,7 +96,14 @@ class ModelService:
         for r in rows:
             r["is_current"] = bool(r.get("model") and r["model"] == current.get("model")
                                    and (not r.get("base_url") or r["base_url"] == current.get("base_url")))
+            r.update(self._public(r))
         return rows
+
+    @staticmethod
+    def _public(entry: dict[str, Any]) -> dict[str, Any]:
+        """出接口的形状：**永不回传明文密钥**，只回掩码 + 是否自带。"""
+        raw = entry.get("api_key") or ""
+        return {"api_key": mask_key(raw), "has_api_key": bool(raw.strip())}
 
     def current(self) -> dict[str, Any]:
         """当前实际生效的模型（运行时配置，可能与目录里的 is_default 不同步）。"""
@@ -94,19 +134,31 @@ class ModelService:
         provider = str(fields.get("provider") or "openai_compat").strip()
         mid = str(fields.get("id") or "").strip() or make_model_id(provider, model)
         entry = {k: v for k, v in fields.items() if v is not None}
+        entry.pop("_was", None)
+        existed = self.db.get_model(mid) is not None
         entry["id"] = mid
         entry["model"] = model or mid
         entry.setdefault("provider", provider)
+        # 密钥：留空 = 保持不变；回传掩码 = 保持不变（前端会把掩码原样回传）
+        key = str(entry.get("api_key") or "").strip()
+        if not key or is_masked(key):
+            entry.pop("api_key", None)
+        else:
+            entry["api_key"] = key
         if "enabled" in entry:
             entry["enabled"] = 1 if entry["enabled"] else 0
         saved = self.db.upsert_model(entry)
-        self.db.audit("web", "model:upsert", f"{mid} ({'新建' if not fields.get('_was') else '更新'})")
-        return saved
+        self.db.audit("web", "model:upsert",
+                      f"{mid} ({'更新' if existed else '新建'}) key={'自带' if saved.get('api_key') else '全局'}")
+        return {**saved, **self._public(saved)}
 
     def update(self, model_id: str, **fields: Any) -> dict[str, Any]:
         if self.db.get_model(model_id) is None:
             raise KeyError(f"模型不存在：{model_id}")
         patch = {k: v for k, v in fields.items() if v is not None}
+        # 密钥留空/回传掩码 → 保持原值（不能把 ********abcd 存成真密钥）
+        if "api_key" in patch and (not str(patch["api_key"]).strip() or is_masked(patch["api_key"])):
+            patch.pop("api_key")
         if patch.get("enabled") is not None:
             patch["enabled"] = 1 if patch["enabled"] else 0
         if patch.get("context_window") is not None:
@@ -117,7 +169,7 @@ class ModelService:
         saved = self.db.upsert_model({"id": model_id, **patch})
         changed = ", ".join(k for k in patch if k not in ("id",))
         self.db.audit("web", "model:update", f"{model_id} fields=[{changed}]")
-        return saved
+        return {**saved, **self._public(saved)}
 
     def remove(self, model_id: str) -> bool:
         ok = self.db.delete_model(model_id)
@@ -126,7 +178,11 @@ class ModelService:
         return ok
 
     def activate(self, model_id: str) -> dict[str, Any]:
-        """把目录里的一条**真正生效**：写入运行时配置并落盘。"""
+        """把目录里的一条**真正生效**：写入运行时配置并落盘。
+
+        v12：条目自带的密钥也一起切过去——否则跨服务商切模型会带着上一家的 key
+        去请求（401），用户还得回设置页手改。
+        """
         entry = self.db.get_model(model_id)
         if entry is None:
             raise KeyError(f"模型不存在：{model_id}")
@@ -140,6 +196,10 @@ class ModelService:
         if entry.get("base_url"):
             cfg.llm.base_url = entry["base_url"]
         cfg.llm.model = entry["model"]
+        key_switched = False
+        if (entry.get("api_key") or "").strip():
+            cfg.llm.api_key = entry["api_key"].strip()
+            key_switched = True
         cw = int(entry.get("context_window") or 0)
         if cw > 0:
             cfg.llm.max_context_tokens = cw
@@ -152,9 +212,11 @@ class ModelService:
                 logger.warning("persist after model activate failed", exc_info=True)
         self.db.audit("web", "model:activate",
                       f"{model_id} → provider={cfg.llm.provider} model={cfg.llm.model} "
-                      f"ctx={cfg.llm.max_context_tokens} saved={saved}")
+                      f"ctx={cfg.llm.max_context_tokens} key={'自带' if key_switched else '沿用全局'} "
+                      f"saved={saved}")
         return {"activated": model_id, "model": entry["model"],
                 "provider": cfg.llm.provider, "base_url": cfg.llm.base_url,
+                "api_key_switched": key_switched,
                 "max_context_tokens": cfg.llm.max_context_tokens, "saved_to": saved}
 
     # ------------------------------------------------------------- 导入
@@ -174,9 +236,13 @@ class ModelService:
             mid = make_model_id(used_provider, name)
             entry = existing.get(mid)
             if entry is None:
-                self.db.upsert_model({"id": mid, "provider": used_provider, "model": name,
-                                      "base_url": used_base, "source": "fetched",
-                                      "enabled": 1, "display_name": name})
+                new_entry: dict[str, Any] = {"id": mid, "provider": used_provider, "model": name,
+                                             "base_url": used_base, "source": "fetched",
+                                             "enabled": 1, "display_name": name}
+                # 用哪把 key 拉的列表，新条目就带上哪把（跨服务商导入后可直接"设为当前"）
+                if (api_key or "").strip():
+                    new_entry["api_key"] = api_key.strip()
+                self.db.upsert_model(new_entry)
                 added.append(name)
             else:
                 patch: dict[str, Any] = {"id": mid, "provider": used_provider, "base_url": used_base}

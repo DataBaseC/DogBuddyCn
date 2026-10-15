@@ -116,7 +116,11 @@ def router(svc, auth_deps) -> APIRouter:
 
     @r.get("/windows/{window_id}/usage", dependencies=auth_deps)
     def window_usage(window_id: str) -> dict:
-        """Context-usage snapshot for the console bar (T1.1)."""
+        """Context-usage snapshot for the console bar (T1.1).
+
+        `context_tokens` = **当前上下文占用**（最近一次调用的 prompt_tokens，拿不到则粗估），
+        不是累计花费；`tokens` 才是累计花费（账本口径）。压缩阈值也是按前者判的。
+        """
         w = svc.windows.get(window_id)
         if w is None:
             raise HTTPException(status_code=404, detail="window not found")
@@ -124,8 +128,12 @@ def router(svc, auth_deps) -> APIRouter:
         st = svc.windows.status(w.id)
         max_tokens = p.get("max_context_tokens", 0) or 0
         used = 0
+        estimated = True
         try:
-            used = int(svc.sessions._rt(w.id).session.token_usage())
+            rt_session = svc.sessions._rt(w.id).session
+            ctx = getattr(rt_session, "context_tokens", None)
+            used = int(ctx() if callable(ctx) else rt_session.token_usage())
+            estimated = bool(getattr(rt_session, "context_tokens_estimated", False))
         except Exception:  # noqa: BLE001 — usage bar degrades to zeros, never 500s
             pass
         ratio = (used / max_tokens) if max_tokens else 0.0
@@ -134,6 +142,7 @@ def router(svc, auth_deps) -> APIRouter:
                 "max_context_tokens": max_tokens,
                 "ratio": round(min(ratio, 1.0), 4),
                 "threshold": p.get("compact_threshold", 0.0),
+                "estimated": estimated,
                 "tokens": st.get("tokens", 0)}
 
     @r.delete("/windows/{window_id}", dependencies=auth_deps)

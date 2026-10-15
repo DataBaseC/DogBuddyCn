@@ -25,6 +25,28 @@
     return state.conversations.filter(function (c) { return c.id === state.sender; })[0] || null;
   }
 
+  /* ---------------- 上下文用量（管理员会话） ----------------
+     管理员会话挂在内存里的合成窗口 `admin:<对话 id>`，**不在 windows 表**里，
+     所以必须走 /api/admin/chat/usage；早期版本没有这个端点，界面上也就一直什么都看不到。 */
+  function usageHost() { return U.$('#chat-usage'); }
+
+  function refreshUsage(convId) {
+    var host = usageHost();
+    if (!host) return Promise.resolve();
+    var id = convId || state.sender;
+    if (id) host.setAttribute('data-conv-id', id);
+    return A.adminChatUsage(id).then(function (u) {
+      /* 异步回来时若已切换对话，丢弃这次结果 */
+      if (host.getAttribute('data-conv-id') !== id) return;
+      host.innerHTML = U.usageHTML(u || {}, { label: '管理员上下文' });
+    }).catch(function () {
+      if (host.getAttribute('data-conv-id') !== id) return;
+      host.innerHTML = '<div class="ctx-usage-top"><span class="ctx-usage-label">' +
+        U.icon('activity', 'sm') + '管理员上下文</span>' +
+        '<span class="hint">用量暂时取不到</span></div>';
+    });
+  }
+
   /* ---------------- 渲染 ---------------- */
   function renderSenders() {
     var sel = U.$('#chat-sender');
@@ -157,6 +179,7 @@
     }).then(function (res) {
       state.messages = (res && res.messages) || [];
       render();
+      refreshUsage(state.sender);
     }).catch(function (e) {
       U.toast('error', '加载对话失败：' + (e && e.message ? e.message : e));
     });
@@ -179,6 +202,7 @@
       state.messages = (res && res.messages) || state.messages;
       setBusy(false);
       render();
+      refreshUsage(state.sender);
     }).catch(function (e) {
       state.messages = state.messages.filter(function (m) { return m !== optimistic; });
       var msg = (e && e.message) ? e.message : String(e);
@@ -231,6 +255,7 @@
         setSender(sel.value);
         state.messages = [];
         render();
+        refreshUsage(sel.value);
         A.adminChatMessages(state.sender, 200).then(function (res) {
           state.messages = (res && res.messages) || [];
           render();

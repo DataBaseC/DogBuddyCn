@@ -18,6 +18,7 @@ class ModelIn(BaseModel):
     provider: str | None = None
     model: str | None = None
     base_url: str | None = None
+    api_key: str | None = None           # 条目自带密钥（留空=沿用全局）；响应只回掩码
     display_name: str | None = None
     note: str | None = None            # 能力与限制备注（核心）
     capability: str | None = None
@@ -39,6 +40,7 @@ class ModelPatch(BaseModel):
     base_url: str | None = None
     provider: str | None = None
     model: str | None = None
+    api_key: str | None = None           # 留空或回传掩码 = 不改密钥
 
 
 class ImportIn(BaseModel):
@@ -66,9 +68,11 @@ def router(svc, auth_deps) -> APIRouter:
     @r.get("/models/options", dependencies=auth_deps)
     def options() -> dict:
         """给前端渲染下拉/标签用的枚举。"""
-        from ...services.model_service import CAPABILITY_TAGS, COST_LEVELS, SPEED_LEVELS
+        from ...services.model_service import (CAPABILITY_TAGS, COST_LEVELS,
+                                               PROVIDER_PRESETS, SPEED_LEVELS)
         return {"capabilities": list(CAPABILITY_TAGS),
-                "speeds": list(SPEED_LEVELS), "costs": list(COST_LEVELS)}
+                "speeds": list(SPEED_LEVELS), "costs": list(COST_LEVELS),
+                "providers": [dict(p) for p in PROVIDER_PRESETS]}
 
     @r.post("/models", dependencies=auth_deps)
     def create_model(body: ModelIn) -> dict:

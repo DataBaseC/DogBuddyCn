@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dogbuddy import __version__  # noqa: E402
 from dogbuddy.config import default_data_dir, load_config, config_path  # noqa: E402
-from dogbuddy.updater import write_result  # noqa: E402
+from dogbuddy.updater import read_result, write_result  # noqa: E402
 
 IS_WINDOWS = sys.platform == "win32"
 TMP = Path(tempfile.gettempdir())
@@ -406,6 +406,24 @@ def _pip_install(app_dir: Path) -> int:
         return 1
 
 
+def _probe(host: str, port: int, timeout: float = 3.0) -> dict | None:
+    """一次**不带版本过滤**的 /healthz 探测：端口后面到底是谁。
+
+    刻意不判版本：`端口有人应答` 与 `新代码在应答` 是两个问题，
+    把两者混为一谈正是"游离旧进程冒充升级成功"的存活条件。
+    """
+    if not port:
+        return None
+    if host in ("", "0.0.0.0", "::", "::0"):
+        host = "127.0.0.1"
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 - 重启期间连不上是常态
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _health(host: str, port: int, expect_version: str | None = None,
             tries: int = HEALTH_TRIES, delay: float = HEALTH_DELAY) -> dict | None:
     """Poll /healthz until it reports `expect_version` (or just answers, if None)."""
@@ -414,24 +432,32 @@ def _health(host: str, port: int, expect_version: str | None = None,
     url = f"http://{host}:{port}/healthz"
     last: dict | None = None
     for i in range(tries):
-        try:
-            with urllib.request.urlopen(url, timeout=3) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+        data = _probe(host, port)
+        if data is not None:
             last = data
             if expect_version is None or data.get("version") == expect_version:
                 return data
-        except Exception:  # noqa: BLE001 - connection refused while restarting is normal
-            pass
         if i + 1 < tries:
             time.sleep(delay)
     if last is not None:
-        print(f"    /healthz 在跑但版本不符: got={last.get('version')} expect={expect_version}")
+        print(f"    /healthz 在跑但版本不符: got={last.get('version')} expect={expect_version} "
+              f"pid={last.get('pid')}")
     else:
         print(f"    /healthz 无响应（{url}，{tries} 次尝试）")
     return None
 
 
-def _panel_restart() -> bool:
+def _observed(health: dict | None, before_pid: int | None = None) -> dict:
+    """把健康检查的现场记进结果文件（人工排障只看这一份 JSON 就够）。"""
+    out: dict = {"before_pid": before_pid}
+    if isinstance(health, dict):
+        for key in ("pid", "version", "build", "uptime_s", "schema_version"):
+            if health.get(key) is not None:
+                out[key] = health.get(key)
+    return out
+
+
+def _panel_restart() -> tuple[bool, str]:
     """Restart through the AegisServerPanel managed-app API.
 
     The panel's `/api/panel/apps/{id}/restart` route is guarded by
@@ -439,18 +465,25 @@ def _panel_restart() -> bool:
     enough**, it returns 401. So this only fires when a session is available
     (`DOGBUDDY_PANEL_PASSWORD`), and `_kill_app_processes` is the default path
     for agent-token deployments.
+
+    Returns `(ok, reason)`. 失败原因必须能区分——初版把"缺 app_id / 缺密码 /
+    没有 base / 登录 401"全部塌缩成一个 `False`，于是调用方既没法告警，
+    也没法把"重启机制不可用"和"新代码起不来"分开，最后把一次**本来成功**的
+    升级判成失败并回滚（生产实测复现两次）。
     """
     app_id = os.environ.get("DOGBUDDY_PANEL_APP_ID", "")
     password = os.environ.get("DOGBUDDY_PANEL_PASSWORD", "")
-    if not app_id or not password:
-        return False
+    if not app_id:
+        return False, "no_app_id"
+    if not password:
+        return False, "no_panel_password"
     try:
         cfg = load_config(DEFAULT_CONFIG)
     except Exception:  # noqa: BLE001
         cfg = None
     base = os.environ.get("DOGBUDDY_PANEL_URL") or (cfg.panel.base_url if cfg else "")
     if not base:
-        return False
+        return False, "no_panel_base_url"
 
     import http.cookiejar
 
@@ -469,10 +502,31 @@ def _panel_restart() -> bool:
         with opener.open(req, timeout=30) as resp:
             ok = 200 <= resp.status < 300
         print(f"    已请求面板重启托管应用 {app_id}: {'ok' if ok else 'failed'}")
-        return ok
+        return (True, "panel_restart_requested") if ok else (False, "panel_restart_http_error")
     except Exception as e:  # noqa: BLE001
         print(f"    面板重启失败: {e}")
-        return False
+        return False, f"panel_restart_error: {e}"
+
+
+def _report_port_owner(host: str, port: int) -> None:
+    """只读报告：端口后面是谁、与 pid 文件是否一致。**不 kill、不处置。**
+
+    处置是人的决定（fail-closed）；这里只保证"游离进程并存"这件事不再是隐形的。
+    """
+    if not port:
+        return
+    body = _probe(host, port)
+    if body is None:
+        print(f"    端口 {port}: 无人应答（服务未运行）")
+        return
+    pid = body.get("pid")
+    print(f"    端口 {port}: pid={pid} version={body.get('version')} "
+          f"uptime={body.get('uptime_s')}s schema={body.get('schema_version')}")
+    file_pid = _read_pid()
+    if file_pid and pid and int(file_pid) != int(pid):
+        print(f"    警告: {PID_FILE} 记的是 pid={file_pid}，端口上却是 pid={pid} —— "
+              f"疑似 manage.py 起的游离进程与外部守护进程并存；"
+              f"此时面板重启不会生效，升级会'假成功'", file=sys.stderr)
 
 
 def _kill_app_processes(app_dir: Path | None = None) -> int:
@@ -522,9 +576,16 @@ def _restart_service(args: argparse.Namespace, host: str = "", port: int = 0) ->
             _health(host, port, expect_version=None, tries=15, delay=1.0)
         return rc
 
-    if _panel_restart():
-        print("==> 已委托面板重启")
+    ok, reason = _panel_restart()
+    if ok:
+        print(f"==> 已委托面板重启（{reason}）")
         return 0
+    if os.environ.get("DOGBUDDY_PANEL_APP_ID"):
+        # 这里的告警很重要：外部守护存在却重启不了时，下面的兜底会自己起一个
+        # 守护不认识的进程，而健康检查随后可能读到**旧进程**，把失败/成功都判错。
+        print(f"警告: 面板重启不可用（{reason}）——退回 kill+等守护；"
+              f"若守护没在 20s 内拉起，manage.py 会自己起一个面板不知道的进程，"
+              f"请事后核对 /healthz 的 pid", file=sys.stderr)
 
     if not IS_WINDOWS and Path("/run/systemd/system").is_dir():
         print(f"==> systemctl restart {SERVICE_NAME}")
@@ -817,6 +878,22 @@ def _update_bundle(args: argparse.Namespace, app_dir: Path, stamp: str) -> int:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _diagnose_unhealthy(observed: dict | None, expect_version: str | None) -> str:
+    """把"健康检查失败"说成一句人话：是**没人应答**，还是**旧进程还在应答**。
+
+    初版两种情况都只说"新版本未通过健康检查"，于是"重启机制不可用"被误读成
+    "新代码有问题"，进而回滚掉一份本来正确的代码。
+    """
+    if not observed:
+        return "端口无人应答（不是版本不对，是服务没起来）"
+    pid = observed.get("pid")
+    got = observed.get("version")
+    if expect_version and got != expect_version:
+        return (f"应答的是**旧进程**：pid={pid} version={got}，期望 {expect_version}"
+                f"（= 重启没有生效，不是新代码起不来）")
+    return f"端口由 pid={pid} version={got} 应答，但未达到期望状态"
+
+
 def _finish(app_dir: Path, args: argparse.Namespace, stamp: str, rollback) -> int:
     """Restart, assert the new version, and roll back when it does not come up."""
     new_version = _installed_version(app_dir)
@@ -838,6 +915,8 @@ def _finish(app_dir: Path, args: argparse.Namespace, stamp: str, rollback) -> in
         return 0
 
     print(f"==> 重启服务（新版本 {new_version or '未知'}）")
+    before = _probe(host, port)
+    before_pid = before.get("pid") if before else None
     if _restart_service(args, host, port) != 0:
         print("错误: 重启命令返回非 0", file=sys.stderr)
 
@@ -845,7 +924,9 @@ def _finish(app_dir: Path, args: argparse.Namespace, stamp: str, rollback) -> in
     health = _health(host, port, expect_version=new_version or None,
                      tries=args.health_tries, delay=args.health_delay)
     if health is None:
-        print("新版本未通过健康检查，回滚中…", file=sys.stderr)
+        observed_body = _probe(host, port)
+        why = _diagnose_unhealthy(observed_body, new_version)
+        print(f"新版本未通过健康检查：{why}；回滚中…", file=sys.stderr)
         rollback()
         _restart_service(args, host, port)
         rolled = _health(host, port, expect_version=None,
@@ -854,22 +935,44 @@ def _finish(app_dir: Path, args: argparse.Namespace, stamp: str, rollback) -> in
             print("错误: 回滚后健康检查仍失败！请立即查看日志排查。", file=sys.stderr)
             write_result(data_dir, status="rollback-failed", ok=False, previous=previous,
                          version=new_version, rolled_back_to="",
-                         detail="rollback did not come up either — manual intervention needed",
+                         observed=_observed(observed_body, before_pid),
+                         detail=f"{why} | rollback did not come up either — manual intervention needed",
                          source=_source_label(args))
             return 1
         print(f"已回滚并恢复运行（版本 {rolled.get('version')}）", file=sys.stderr)
         write_result(data_dir, status="rolled-back", ok=False, previous=previous,
                      version=new_version, rolled_back_to=rolled.get("version", ""),
-                     detail="new version failed the health check; previous code restored and healthy",
+                     observed=_observed(observed_body, before_pid),
+                     detail=f"{why} | previous code restored and healthy",
+                     source=_source_label(args))
+        return 1
+
+    # 身份断言：同一个 pid 还在服务 → **重启没生效**（游离进程占着端口 / 守护没接住）。
+    # 只看 version 会被骗：没 bump 版本号的一次发布，旧进程也会"版本相符"，
+    # 于是升级报成功，而真正跑的仍是旧代码（上次线上就是这么假的）。
+    health_pid = health.get("pid")
+    if before_pid is not None and health_pid is not None and int(health_pid) == int(before_pid):
+        print(f"错误: 重启没有生效 —— /healthz 仍是重启前的 pid={health_pid}"
+              f"（version={health.get('version')}）。代码已在磁盘上，但运行的还是旧进程；"
+              f"多半有游离进程占着端口。**未回滚**（代码本身没问题），"
+              f"请先处置游离进程再重启。", file=sys.stderr)
+        write_result(data_dir, status="restart-noop", ok=False, previous=previous,
+                     version=health.get("version", new_version),
+                     schema_version=health.get("schema_version"),
+                     observed=_observed(health, before_pid),
+                     detail="restart did not take effect: the same pid is still serving the port "
+                            "(stray or unsupervised process). Code on disk is upgraded and NOT "
+                            "rolled back; fix the supervisor, then restart.",
                      source=_source_label(args))
         return 1
 
     stamp_value = _write_version_stamp(app_dir)
     print(f"==> 升级完成: version={health.get('version')} build={stamp_value} "
-          f"schema={health.get('schema_version')}")
+          f"schema={health.get('schema_version')} pid={health_pid}")
     write_result(data_dir, status="success", ok=True, previous=previous,
                  version=health.get("version", new_version), build=stamp_value,
                  schema_version=health.get("schema_version"), source=_source_label(args),
+                 observed=_observed(health, before_pid),
                  detail="healthy after restart")
     return 0
 
@@ -925,22 +1028,49 @@ def cmd_update(args: argparse.Namespace) -> int:
         print("    --check 模式：不执行任何变更。")
         return 0
 
-    write_result(_data_dir(args.config), status="running", ok=False, previous=current,
+    data_dir = _data_dir(args.config)
+    _report_port_owner(cfg.web.host, cfg.web.port)
+    write_result(data_dir, status="running", ok=False, previous=current,
                  version="", source=_source_label(args), detail="upgrade in progress")
 
+    rc = 1
     try:
         with _update_lock(app_dir):
             if not args.no_backup:
                 _backup_config(args.config, stamp)
             if args.from_bundle or args.from_url:
-                return _update_bundle(args, app_dir, stamp)
-            return _update_git(args, app_dir, stamp)
+                rc = _update_bundle(args, app_dir, stamp)
+            else:
+                rc = _update_git(args, app_dir, stamp)
     except RuntimeError as e:
         print(f"错误: {e}", file=sys.stderr)
-        return 1
+        rc = 1
     except (urllib.error.URLError, OSError) as e:
         print(f"错误: {e}", file=sys.stderr)
-        return 1
+        rc = 1
+    except Exception as e:  # noqa: BLE001 — subprocess.TimeoutExpired 不属于上面两类，
+        # 漏出去结果文件会永远停在 running（管理工具/界面一直显示"升级中"）
+        print(f"错误: 未预期的升级异常（{type(e).__name__}: {e}）", file=sys.stderr)
+        rc = 1
+    _finalize_result(data_dir, args, current, rc)
+    return rc
+
+
+def _finalize_result(data_dir: Path, args: argparse.Namespace, current: str, rc: int) -> None:
+    """**任何**退出路径都要落一个终态：`running` 只允许在升级进行中存在。
+
+    初版有一堆提前 return（仓库脏 / fetch 失败 / 已是最新 / schema 降级 / 依赖失败）
+    直接返回，结果文件就永远停在 `running`——界面显示"升级中"，而进程早退出了。
+    """
+    res = read_result(data_dir) or {}
+    if res.get("status") != "running":
+        return
+    if rc == 0:
+        status, detail = "noop", "no changes were applied (already up to date)"
+    else:
+        status, detail = "failed", "update aborted before reaching the health check"
+    write_result(data_dir, status=status, ok=False, previous=current, version="",
+                 detail=detail, source=_source_label(args))
 
 
 # --------------------------------------------------------------------------- cli

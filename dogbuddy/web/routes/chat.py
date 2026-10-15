@@ -123,6 +123,46 @@ def router(svc, auth_deps) -> APIRouter:
         return {"conversation": cid, "sender": cid,
                 "messages": svc.admin.history(cid, limit)}
 
+    @r.get("/admin/chat/usage", dependencies=auth_deps)
+    def chat_usage(conversation: str | None = None, sender: str | None = None) -> dict:
+        """管理员的上下文用量（用户亲自报的"上下文一直显示 0"）。
+
+        **不依赖 `windows` 表**：管理员会话挂在合成窗口 `admin:<cid>`，只存在于内存
+        （`AdminService.session_for()`），走 `GET /api/windows/admin:<cid>/usage`
+        必然 404 —— 这正是修复前的现状。
+        """
+        cid = _conv_id(conversation, sender)
+        cfg = getattr(svc, "app_config", None)
+        llm = getattr(cfg, "llm", None)
+        try:
+            max_tokens = int(getattr(llm, "max_context_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            max_tokens = 0
+        try:
+            threshold = float(getattr(llm, "compact_threshold", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            threshold = 0.0
+
+        session = svc.admin.session_for(cid)
+        used = 0
+        try:
+            used = int(session.context_tokens())
+        except Exception:  # noqa: BLE001 — 用量条降级为 0，绝不 500
+            pass
+        spent = 0
+        try:
+            spent = int(svc.db.sum_tokens(f"admin:{cid}"))
+        except Exception:  # noqa: BLE001
+            pass
+        ratio = (used / max_tokens) if max_tokens else 0.0
+        return {"conversation": cid,
+                "context_tokens": used,
+                "max_context_tokens": max_tokens,
+                "ratio": round(min(ratio, 1.0), 4),
+                "threshold": threshold,
+                "tokens": spent,
+                "estimated": bool(getattr(session, "context_tokens_estimated", True))}
+
     @r.post("/admin/chat", dependencies=auth_deps)
     async def chat(body: ChatIn) -> dict:
         text = (body.text or "").strip()

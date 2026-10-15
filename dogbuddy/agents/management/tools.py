@@ -426,6 +426,13 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
                 extra=("（" + str(lu.get("detail")) + "）") if lu.get("detail") else ""))
         else:
             lines.append("上次升级: 无记录")
+        if lu and lu.get("status") == "success" and lu.get("version") \
+                and lu.get("version") == (lu.get("previous") or ""):
+            # 版本号没变却报 success：要么这次发布确实没 bump 版本，要么**重启没生效**
+            # （游离进程占着端口时，健康检查读到的就是旧进程）。如实提示，不要报喜。
+            seen = lu.get("observed") or {}
+            lines.append("注意: 升级后版本号与升级前相同——若本次发布本应改版本号，"
+                         f"很可能是重启没生效，请核对 /healthz 的 pid（本次观测 pid={seen.get('pid')}）")
         remote = info.get("remote")
         if isinstance(remote, dict):
             if not remote.get("ok"):

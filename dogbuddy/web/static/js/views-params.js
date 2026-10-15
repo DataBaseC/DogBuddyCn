@@ -43,6 +43,9 @@
     { key: 'max_iterations', label: '迭代上限', unit: '轮', type: 'int',
       min: 1, max: 200, step: 1,
       hint: '单次任务最多工具迭代轮数（1 ~ 200）' },
+    { key: 'task_timeout', label: '单轮等待上限', unit: '秒', type: 'float',
+      min: 30, max: 86400, step: 30,
+      hint: 'cron 触发后等待单轮结束的上限（默认 1800）；超时不算失败，任务继续在后台跑' },
     { key: 'retry.max_retries', label: '重试次数', unit: '次', type: 'int',
       min: 0, max: 50, step: 1,
       hint: '限速 / 失败后的最大重试次数（0 ~ 50）' },
@@ -242,11 +245,13 @@
   var usageWinId = null;
 
   /**
-   * 用量条 HTML：ratio 填充，超过 threshold 变橙，超过 0.95 变红。
+   * 用量条 HTML —— 实现已抽到 `ui.js`（`U.usageHTML`），供对话视图共用；
+   * 这里保留本地包装是为了兼容旧调用点与老 bundle。
    * @param {Object} u GET /api/windows/{id}/usage 的响应
    * @returns {string} 用量条 HTML
    */
   function usageHTML(u) {
+    if (typeof U.usageHTML === 'function') return U.usageHTML(u);
     var ratio = Math.max(0, Math.min(1, Number(u.ratio) || 0));
     var level = ratio > 0.95 ? 'crit'
       : (Number(u.threshold) > 0 && ratio > Number(u.threshold) ? 'warn' : '');
