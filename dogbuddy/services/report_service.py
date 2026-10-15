@@ -119,7 +119,12 @@ class ReportService:
             self._fail_streak[wid] = 0
             await self._deliver(event, "detailed", critical=True)
             return
-        # 普通失败：有主管就交给主管（他要能重派/兜底）；没主管才闭嘴（原行为）
+        # v0.10.16：**人工/对话派单**的失败不能静默。用户正等着这个工位的结果，
+        # 一次失败对他就是"活没干成"——必须带上错误码告诉他（定时任务仍按连败降噪）。
+        if event.payload.get("manual"):
+            await self._deliver(event, "brief", critical=False)
+            return
+        # 普通失败（定时任务）：有主管就交给主管（他要能重派/兜底）；没主管才闭嘴
         if self._route_up(event, wid):
             return
         logger.info("job failed (streak %d, no alert yet): %s", streak, event.payload)
@@ -212,7 +217,9 @@ class ReportService:
         if event.type == WORKER_QUESTION:
             return f"员工提问：{p.get('question', '')}"
         if event.type == JOB_FAILED:
-            return f"任务「{name}」失败：{str(p.get('summary', ''))[:500]}"
+            code = str(p.get("error_code") or "").strip()
+            code_txt = f" [{code}]" if code else ""
+            return f"任务「{name}」失败{code_txt}：{str(p.get('error') or p.get('summary', ''))[:500]}"
         if event.type == JOB_COMPLETED:
             return f"任务「{name}」完成：{str(p.get('summary', ''))[:500]}"
         return f"{event.type}: {str(p)[:300]}"
@@ -303,7 +310,12 @@ class ReportService:
             return f"⚠️ 需要确认（{name}）：{p.get('reason', '')}。回复“确认放行”可继续。"
         if kind == JOB_FAILED:
             tail = f"（已连续失败 {p.get('fail_count')} 次，任务自动暂停）" if p.get("auto_paused") else ""
-            return f"❌ 任务「{name}」失败{tail}：{str(p.get('summary', ''))[:200]}"
+            code = str(p.get("error_code") or "").strip()
+            code_txt = f" [{code}]" if code else ""
+            body = str(p.get("error") or p.get("summary", ""))
+            if strategy == "brief":
+                body = body[:160]
+            return f"❌ 任务「{name}」失败{tail}{code_txt}：{body[:400]}"
         if kind == JOB_COMPLETED:
             if strategy == "brief":
                 return f"✅ 任务「{name}」完成：{str(p.get('summary', ''))[:120]}"

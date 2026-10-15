@@ -828,3 +828,11 @@ owner 的三条反馈：
 | **掉线还显示"正在输入"** | ①LLM 失败落库的是 **system** 消息，而前端只认新的 **assistant** 消息 → 死等到 180s 超时；②限速徽标只有"亮"没有"灭" | ①`AgentResult.error_code/error_detail` → `RunnerResult.error_code` → `window_manager._emit_run_finished()` 发 `window.run_finished`（终态+错误码+错误文本），前端收到**立刻**收起气泡并按错误码弹提示；②轮询兜底也认终态 system（`[LLM error/`、`[限速暂停]`），但**瞬态重试的 `[LLM 瞬态失败…继续重试]` 不算**（否则重试期间气泡就没了）；③`main._on_run_finished` 清掉 `_rate_limit` 并广播 `rate_limit.status{waiting:false}` |
 
 测试：`tests/test_stream_and_model_binding.py`（9 条）+ 前端结构断言。基线 **540 passed / 4 skipped**。
+
+### 14.1 补一刀：人工派单**失败**也要汇报（`0.10.16`）
+
+0.10.14 让"员工干完活"汇报给用户，但**失败那一路被静默了**：`ReportService._on_job_failed`
+只在"自动暂停"或"连败 ≥3 次"时才触达人，单次失败只写日志（对定时任务是降噪，
+对**用户正等着结果的人工派单**就是"掉线了没人告诉我"）。
+现在：`payload.manual=True` 的失败**立即按 brief 汇报**（模板里带 `[错误码]` + 人话），
+定时任务仍按连败降噪；给主管看的原文也带上错误码。
