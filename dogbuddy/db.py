@@ -1475,6 +1475,21 @@ class Database:
             row = self._conn.execute("SELECT * FROM models WHERE id=?", (model_id,)).fetchone()
         return dict(row) if row else None
 
+    def get_model_by_name(self, model: str) -> dict[str, Any] | None:
+        """按**模型名**找目录条目（工位只存模型名，不带条目 id）。
+
+        多条同名（不同 provider）时优先启用的、其次最近更新的——因为工位选的
+        就是"这个名字的模型"，取一条能用的比报错重要。
+        """
+        name = (model or "").strip()
+        if not name:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM models WHERE model=? "
+                "ORDER BY COALESCE(enabled,1) DESC, updated_at DESC LIMIT 1", (name,)).fetchone()
+        return dict(row) if row else None
+
     def upsert_model(self, entry: dict[str, Any]) -> dict[str, Any]:
         """按 id 新增或更新。**未提供的字段保持原值**（PATCH 语义）。"""
         model_id = str(entry.get("id") or "").strip()

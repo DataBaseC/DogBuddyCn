@@ -89,6 +89,10 @@ class AgentResult:
     pending_questions: list[str] = field(default_factory=list)
     transient_retries: int = 0   # C1：本轮的瞬态续跑次数
     loop_guards: int = 0         # C2：本轮的熔断次数
+    # v0.10.15：失败必须带**错误码**上路。原来只把 `[LLM error/xxx]` 写进会话文本，
+    # 控制台既没有码也没有终态，用户看到的是"一直正在输入"（owner 实测）。
+    error_code: str = ""         # errors.ErrorClass.value（如 network / auth / rate_limit）
+    error_detail: str = ""       # 给人看的一句话
 
 
 class AgentLoop:
@@ -146,6 +150,9 @@ class AgentLoop:
                     f"（{getattr(e.severity, 'value', 'banned')} 档）；"
                     f"本轮暂停，不是失败，稍后会自动重试。")
                 result.stop_reason = "rate_limited"
+                result.error_code = "rate_limit_paused"
+                result.error_detail = (f"服务端要求等待 {e.wait_seconds:.0f} 秒"
+                                       f"（{getattr(e.severity, 'value', 'banned')} 档）")
                 result.content = (f"限速暂停（非失败）：服务端要求等待约 "
                                   f"{e.wait_seconds / 60:.0f} 分钟，任务已挂起等待重试。")
                 break
@@ -157,6 +164,8 @@ class AgentLoop:
                 logger.exception("LLM chat failed (%s)", cls.value)
                 self.session.append("system", f"[LLM error/{cls.value}] {errors.describe(e)}")
                 result.stop_reason = "error"
+                result.error_code = str(getattr(cls, "value", cls))
+                result.error_detail = errors.describe(e)
                 result.content = (f"LLM 调用失败（{cls.value}）：{e}。"
                                   f"{errors.action_hint(e, assume_tool_args=False)}")
                 break

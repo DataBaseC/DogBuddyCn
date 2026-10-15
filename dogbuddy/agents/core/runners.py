@@ -51,6 +51,10 @@ class RunnerResult:
     notify: bool = False
     notify_text: str = ""
     notify_level: str = "info"
+    # v0.10.15：失败的原因码（errors.ErrorClass.value）；ok 时为空。
+    # 控制台靠它显示"掉线/限流/鉴权"这类可读结论，而不是干等一个转圈。
+    error_code: str = ""
+    error_detail: str = ""
 
 
 @runtime_checkable
@@ -94,8 +98,11 @@ class PromptRunner:
             notify=bool(notify),
             notify_text=(notify or {}).get("text", ""),
             notify_level=(notify or {}).get("level", "info"),
+            error_code=getattr(result, "error_code", "") or "",
+            error_detail=getattr(result, "error_detail", "") or "",
             meta={"iterations": result.iterations, "tool_calls": result.tool_calls,
                   "stop_reason": result.stop_reason,
+                  "error_code": getattr(result, "error_code", "") or "",
                   **({"reschedule_reason": extra["reschedule_reason"]}
                      if extra.get("reschedule_reason") else {})})
 

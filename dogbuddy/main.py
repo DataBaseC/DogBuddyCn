@@ -94,6 +94,9 @@ class DogBuddyApp:
         self.profiles = LLMProfileRegistry(config, on_wait_hook=self._on_llm_wait,
                                            retry_memory=self.retry_memory,
                                            on_severity_hook=self._on_llm_severity)
+        # v0.10.15：工位从模型目录里选的模型，用条目自己的 provider/base_url/密钥
+        # （否则"换了个模型"其实还是打到 profile 那个端点，换服务商时必然 401/404）
+        self.profiles.model_lookup = self.db.get_model_by_name
         # callable accepting an optional profile and returning a *provider*.
         # Binding `profiles.factory` here (v1.3) returned a lambda instead of a
         # provider → every real LLM call failed with
@@ -181,6 +184,8 @@ class DogBuddyApp:
         # and nobody would ever answer. The admin decides what to do with them.
         self.bus.subscribe(WORKER_QUESTION, self._on_worker_question)
         self.bus.subscribe(CONFIRM_REQUEST, self._on_worker_confirm)
+        # v0.10.15：运行终态 → 清掉"限速等待中"（它以前只会亮，不会灭）
+        self.bus.subscribe("window.run_finished", self._on_run_finished)
         self.report = ReportService(
             bus=self.bus, notifiers=self.notifiers, llm_factory=self.llm_factory,
             default_strategy=self.config_svc.get("report.default_strategy", "brief"))
@@ -323,6 +328,24 @@ class DogBuddyApp:
                             payload={"attempt": attempt, "delay": delay, "profile": profile}))
         # T8.8: 记下最近一次等待时长，供迭代速度计算"模型越慢→迭代越慢"
         self._last_rate_limit_wait = float(delay or 0.0)
+
+    def _on_run_finished(self, event: Any) -> None:
+        """一次运行结束 → 清掉"限速等待中"徽标。
+
+        v0.10.15：这个徽标以前只有"开始等待"没有"结束"。模型掉线/重试耗尽之后，
+        顶部一直挂着"限速等待中"，而任务其实早就不在了（owner 实测）。终态事件一到就清。
+        """
+        if not self._rate_limit.get("waiting"):
+            return
+        self._rate_limit = {"waiting": False, "attempt": 0, "window_id": ""}
+        self._last_rate_limit_wait = 0.0
+        try:
+            self.bus.emit(Event(type="rate_limit.status",
+                                payload={"attempt": 0, "delay": 0,
+                                         "profile": "", "waiting": False,
+                                         "reason": (event.payload or {}).get("error_code", "")}))
+        except Exception:  # noqa: BLE001
+            logger.debug("rate_limit clear emit failed", exc_info=True)
 
     def _on_llm_severity(self, profile: str, severity: Any, delay: float,
                          exc: Any = None) -> None:

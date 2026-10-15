@@ -46,6 +46,10 @@ class LLMProfileRegistry:
         self.on_wait_hook = on_wait_hook
         self.retry_memory = retry_memory
         self.on_severity_hook = on_severity_hook
+        # v0.10.15：工位从模型目录里选模型时，条目自带的 provider/base_url/密钥要生效。
+        # 否则"选了一个配置好的模型"只是换了个名字，请求还是打到 profile 那个端点
+        # （换个服务商的模型时会 404/401，还很难看出原因）。
+        self.model_lookup: Callable[[str], Any] | None = None
         # keyed by (profile, model): a per-window model override must not mutate a
         # shared provider, or one window's model would leak into every other one
         self._cache: dict[tuple[str, str], Any] = {}
@@ -89,6 +93,21 @@ class LLMProfileRegistry:
         with "'function' object has no attribute 'chat'".
         """
         return self.get(profile, model, overrides)
+
+    def _entry_for(self, model: str) -> dict | None:
+        """模型目录里按模型名找条目（没有 lookup 或找不到 → None）。"""
+        if not model or self.model_lookup is None:
+            return None
+        try:
+            entry = self.model_lookup(model)
+        except Exception:  # noqa: BLE001 — 目录查询失败不能挡住 LLM 调用
+            logger.debug("model lookup failed for %r", model, exc_info=True)
+            return None
+        if not entry:
+            return None
+        if hasattr(entry, "keys"):        # sqlite3.Row 也走这条
+            return dict(entry)
+        return None
 
     def invalidate(self, profile: str | None = None) -> None:
         """Drop cached provider(s) after a config edit."""
@@ -136,11 +155,20 @@ class LLMProfileRegistry:
                                         on_severity=on_severity)
         temperature = ovr.get("temperature", section.temperature)
         timeout = ovr.get("request_timeout", section.request_timeout)
-        if (section.provider or "").lower() == "ollama":
+        # v0.10.15：工位从**模型目录**里挑的模型，用条目自己的端点与密钥。
+        # 目录条目的字段都是"可空"：空就退回 profile —— 绝不用空串覆盖已配好的值。
+        entry = self._entry_for(effective_model)
+        provider_name = str((entry or {}).get("provider") or section.provider or "")
+        base_url = str((entry or {}).get("base_url") or section.base_url or "")
+        api_key = str((entry or {}).get("api_key") or section.api_key or "")
+        if entry is not None:
+            logger.debug("模型目录条目生效：model=%s provider=%s base_url=%s",
+                         effective_model, provider_name, base_url)
+        if provider_name.lower() == "ollama":
             return OllamaProvider(
-                base_url=section.ollama_base_url or section.base_url,
+                base_url=section.ollama_base_url or base_url,
                 model=effective_model, retry=retry)
         return OpenAICompatProvider(
-            base_url=section.base_url, api_key=section.api_key, model=effective_model,
+            base_url=base_url, api_key=api_key, model=effective_model,
             keys=section.keys, temperature=temperature,
             timeout=timeout, retry=retry)

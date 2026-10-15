@@ -191,14 +191,20 @@
       if (node && node.parentNode) node.parentNode.removeChild(node);
       return;
     }
-    var html = '<div class="chat-msg chat-bot" id="chat-stream-bubble">' +
-      '<div class="chat-meta"><span class="chat-who">管理员</span>' +
-      '<span class="chat-time">正在输入…</span></div>' +
-      '<div class="chat-body">' + U.esc(stream.text).replace(/\n/g, '<br>') +
-      '<span class="stream-caret"></span></div></div>';
-    if (node) node.outerHTML = html;
-    else log.insertAdjacentHTML('beforeend', html);
-    log.scrollTop = log.scrollHeight;
+    /* v0.10.15：增量更新（只改文本节点），不再每个 delta 重建 DOM —— 消除闪动 */
+    if (!node) {
+      log.insertAdjacentHTML('beforeend',
+        '<div class="chat-msg chat-bot" id="chat-stream-bubble">' +
+        '<div class="chat-meta"><span class="chat-who">管理员</span>' +
+        '<span class="chat-time">正在输入…</span></div>' +
+        '<div class="chat-body"><span class="stream-text"></span>' +
+        '<span class="stream-caret"></span></div></div>');
+      node = U.$('#chat-stream-bubble');
+    }
+    var body = node ? node.querySelector('.stream-text') : null;
+    if (body && body.textContent !== stream.text) body.textContent = stream.text;
+    var gap = log.scrollHeight - log.scrollTop - log.clientHeight;
+    if (gap <= 80) log.scrollTop = log.scrollHeight;   // 用户在看上文就别抢滚动条
   }
 
   function onStream(payload) {

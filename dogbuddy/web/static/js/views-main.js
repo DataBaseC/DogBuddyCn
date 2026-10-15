@@ -544,6 +544,10 @@
 
     /** @type {Object.<string, {text: string}>} window_id → 流式缓冲（各窗口互不串屏） */
     streams: {},
+    /** @type {Object.<string, {status: string, code: string}>} 最近一次运行终态（按窗口） */
+    lastRun: {},
+    /** @type {Object.<string, {status: string, code: string}>} 最近一次运行终态（按窗口） */
+    lastRun: {},
     /** @type {number|null} 完成检测轮询定时器 */
     streamTimer: null,
     /** @type {string} 正在观察流式完成的窗口 id */
@@ -575,6 +579,80 @@
     },
 
     /**
+     * SSE `window.run_finished`：一次运行结束（成功/失败/限速暂停）。
+     *
+     * 为什么需要它：以前前端只能靠"轮询有没有新的 assistant 消息"判断结束；
+     * LLM 掉线时落库的是 system 消息 → "正在输入…"一直挂到超时，而且**看不到错误码**
+     * （owner 实测："显示的还是正在输入…但确实掉线了，也没有错误代码"）。
+     * @param {Object} payload {window_id, status, error_code, error}
+     * @returns {void}
+     */
+    onRunFinished: function (payload) {
+      payload = payload || {};
+      var wid = String(payload.window_id || '');
+      if (!wid) return;
+      var status = String(payload.status || 'ok');
+      Windows.lastRun[wid] = { status: status, code: String(payload.error_code || '') };
+      /* 立刻收起流式气泡（不等 180s 轮询超时） */
+      if (Windows.streamWin === wid) Windows.finishStream(wid);
+      else {
+        delete Windows.streams[wid];
+        if (wid === String(Windows.selectedId)) Windows.renderStream();
+      }
+      if (status !== 'ok') {
+        var code = String(payload.error_code || '');
+        var text = String(payload.error || '').trim();
+        U.toast('error', '工位「' + (payload.window_name || wid) + '」运行失败' +
+          (code ? ' [' + code + ']' : '') + (text ? '：' + text.slice(0, 120) : ''));
+      }
+      if (wid === String(Windows.selectedId)) {
+        A.windows.messages(wid, 100).then(function (res) {
+          if (Windows.streamWin === wid) return;
+          Windows.messages = (res && res.messages) || Windows.messages;
+          if (wid === String(Windows.selectedId)) Windows.renderChatOnly();
+        }).catch(function () { /* 忽略 */ });
+        Windows.select(wid);
+      }
+    },
+
+    /**
+     * SSE `window.run_finished`：一次运行结束（成功/失败/限速暂停）。
+     *
+     * 为什么需要它：以前前端只能靠"轮询有没有新的 assistant 消息"判断结束；
+     * LLM 掉线时落库的是 system 消息 → "正在输入…"一直挂到超时，而且**看不到错误码**
+     * （owner 实测："显示的还是正在输入…但确实掉线了，也没有错误代码"）。
+     * @param {Object} payload {window_id, status, error_code, error}
+     * @returns {void}
+     */
+    onRunFinished: function (payload) {
+      payload = payload || {};
+      var wid = String(payload.window_id || '');
+      if (!wid) return;
+      var status = String(payload.status || 'ok');
+      Windows.lastRun[wid] = { status: status, code: String(payload.error_code || '') };
+      /* 立刻收起流式气泡（不等 180s 轮询超时） */
+      if (Windows.streamWin === wid) Windows.finishStream(wid);
+      else {
+        delete Windows.streams[wid];
+        if (wid === String(Windows.selectedId)) Windows.renderStream();
+      }
+      if (status !== 'ok') {
+        var code = String(payload.error_code || '');
+        var text = String(payload.error || '').trim();
+        U.toast('error', '工位「' + (payload.window_name || wid) + '」运行失败' +
+          (code ? ' [' + code + ']' : '') + (text ? '：' + text.slice(0, 120) : ''));
+      }
+      if (wid === String(Windows.selectedId)) {
+        A.windows.messages(wid, 100).then(function (res) {
+          if (Windows.streamWin === wid) return;
+          Windows.messages = (res && res.messages) || Windows.messages;
+          if (wid === String(Windows.selectedId)) Windows.renderChatOnly();
+        }).catch(function () { /* 忽略 */ });
+        Windows.select(wid);
+      }
+    },
+
+    /**
      * 渲染 / 更新 / 移除当前窗口的「正在输入…」流式气泡（追加在对话流末尾）。
      * @returns {void}
      */
@@ -587,14 +665,34 @@
         if (node && node.parentNode) node.parentNode.removeChild(node);
         return;
       }
-      var html = '<div class="msg assistant stream-msg" id="win-stream-bubble">' +
-        '<div class="msg-avatar">AI</div>' +
-        '<div style="min-width:0">' +
-        '<div class="msg-bubble"><span class="stream-tag">正在输入…</span>' +
-        Windows.renderContent(st.text) + '<span class="stream-caret"></span></div>' +
-        '</div></div>';
-      if (node) node.outerHTML = html;
-      else chat.insertAdjacentHTML('beforeend', html);
+      /* v0.10.15：**别整块重建 DOM**。以前每个 delta 都 outerHTML 换一次气泡，
+         浏览器要重排+重绘整块，视口跟着抖 —— owner 的原话是"输出窗口会闪动"。
+         现在只更新一个文本节点（配 CSS white-space: pre-wrap 保留换行）。 */
+      if (!node) {
+        chat.insertAdjacentHTML('beforeend',
+          '<div class="msg assistant stream-msg" id="win-stream-bubble">' +
+          '<div class="msg-avatar">AI</div>' +
+          '<div style="min-width:0">' +
+          '<div class="msg-bubble"><span class="stream-tag">正在输入…</span>' +
+          '<span class="stream-text"></span><span class="stream-caret"></span></div>' +
+          '</div></div>');
+        node = document.getElementById('win-stream-bubble');
+      }
+      var body = node.querySelector('.stream-text');
+      if (body && body.textContent !== st.text) body.textContent = st.text;
+      Windows.stickToBottom(chat);
+    },
+
+    /**
+     * 只有用户本来就贴在底部时才自动滚动（否则等于抢用户的滚动条，
+     * 也是一种"闪"）。历史上滚 → 不动。
+     * @param {HTMLElement} chat 消息容器
+     * @returns {void}
+     */
+    stickToBottom: function (chat) {
+      if (!chat) return;
+      var gap = chat.scrollHeight - chat.scrollTop - chat.clientHeight;
+      if (gap > 80) return;               // 用户在看上面的内容，别打扰
       chat.scrollTop = chat.scrollHeight;
     },
 
@@ -658,9 +756,19 @@
       A.windows.messages(id, 100).then(function (res) {
         if (Windows.streamWin !== id) return;
         var msgs = (res && res.messages) || [];
+        /* v0.10.15：LLM 掉线时 loop 落库的是 **system** 消息（`[LLM error/xxx]`），
+           原来只认 assistant → "正在输入…"会一直挂到 180s 超时。
+           注意：瞬态重试也写 system（`[LLM 瞬态失败 … 继续重试]`）——那不是终态，
+           不能收尾（否则重试期间气泡就没了，看起来像"跑完了"）。 */
         var fresh = msgs.some(function (m) {
-          return String(m.role || '').toLowerCase() === 'assistant' &&
-            !Windows.streamKnown[String(m.id)];
+          if (Windows.streamKnown[String(m.id)]) return false;
+          var role = String(m.role || '').toLowerCase();
+          if (role === 'assistant') return true;
+          if (role === 'system') {
+            var c = String(m.content || '');
+            return c.indexOf('[LLM error/') >= 0 || c.indexOf('[限速暂停]') >= 0;
+          }
+          return false;
         });
         if (fresh) {
           Windows.messages = msgs;
@@ -868,13 +976,15 @@
       U.modal({
         title: '修改模型 / 模式',
         body:
-          '<div class="field"><span class="field-label">模型（可输入，可从已保存配置拉取）</span>' +
-          '<div style="display:flex;gap:8px">' +
-          '<input class="input" id="model-input" list="model-options" value="' + U.esc(w.model || '') + '" placeholder="留空 = 继承管理员模型' +
-          (w.resolved_model && !w.model ? '（当前 ' + U.esc(w.resolved_model) + '）' : '') + '">' +
-          '<button class="btn btn-soft btn-sm" id="model-fetch" type="button">拉取模型</button></div>' +
-          '<select class="select mono" id="model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
-          '<div class="hint">留空即跟随管理员使用的模型；填了则此工位单独使用该模型。</div></div>' +
+          '<div class="field"><span class="field-label">模型（从模型目录里选）</span>' +
+          '<select class="select mono" id="model-select"><option value="">（加载模型目录中…）</option></select>' +
+          '<input class="input mono" id="model-input" value="' + U.esc(w.model || '') + '" placeholder="留空 = 继承管理员模型' +
+          (w.resolved_model && !w.model ? '（当前 ' + U.esc(w.resolved_model) + '）' : '') + '" style="margin-top:6px">' +
+          '<div class="hint">下拉里是**你已经配好的模型**（各带自己的服务商与密钥）；' +
+          '留空即跟随管理员模型。</div></div>' +
+          '<div class="set-row" style="border:0;padding-top:2px">' +
+          '<button class="btn btn-soft btn-sm" id="model-fetch" type="button">从服务商拉取更多</button>' +
+          '<span class="hint" id="model-src"></span></div>' +
           '<div class="field"><span class="field-label">模式</span>' +
           '<select class="select" id="mode-input">' +
           ['BUILD', 'PLAN', 'CHAT', 'REVIEW'].map(function (m) {
@@ -908,6 +1018,41 @@
         ProfilesMod.fillSelect(document.getElementById('model-profile'), w.llm_profile || '', '默认');
       }
       /* 拉取模型（用已保存的配置，可按所选配置套拉取） */
+      /* v0.10.15：打开就能从**模型目录**里选。
+         以前必须先点"拉取模型"，而拉取问的是服务商的**全量**列表（99 个），
+         和"我自己配好的那几个"不是一回事（owner："工位点击修改模型，
+         应该从模型列表里直接选配置好的模型"）。 */
+      var catSel = document.getElementById('model-select');
+      var catInput = document.getElementById('model-input');
+      var catSrc = document.getElementById('model-src');
+      if (catSel && catInput) {
+        A.models.list().then(function (data) {
+          var models = (data && data.models) || [];
+          var cur = (data && data.current) || {};
+          var opts = ['<option value="">（跟随管理员模型' +
+            (cur.model ? '：' + U.esc(cur.model) : '') + '）</option>'];
+          models.filter(function (m) { return m.enabled !== false; })
+            .forEach(function (m) {
+              var label = (m.display_name || m.model) +
+                (m.provider && m.provider !== 'openai_compat' ? ' · ' + m.provider : '') +
+                (m.model === cur.model ? ' · 管理员当前' : '');
+              opts.push('<option value="' + U.esc(m.model) + '"' +
+                (m.model === (w.model || '') ? ' selected' : '') + '>' + U.esc(label) + '</option>');
+            });
+          catSel.innerHTML = opts.join('');
+          if (catSrc) {
+            catSrc.textContent = models.length
+              ? ('目录里 ' + models.length + ' 个模型')
+              : '模型目录是空的 —— 去「模型管理」页拉取或新增';
+          }
+          catSel.addEventListener('change', function () {
+            catInput.value = catSel.value || '';
+          });
+        }).catch(function () {
+          catSel.innerHTML = '<option value="">（目录加载失败，可直接在下面手输）</option>';
+        });
+      }
+
       var fetchBtn = document.getElementById('model-fetch');
       if (fetchBtn) {
         fetchBtn.addEventListener('click', function () {
@@ -1029,6 +1174,8 @@
   if (global.SSE) {
     global.SSE.on('window.status', function (p) { Windows.onWindowStatus(p); });
     global.SSE.on('window.stream', function (p) { Windows.onStream(p); });
+    /* v0.10.15：一次运行结束的终态（有错误码）—— 收到就收起"正在输入…" */
+    global.SSE.on('window.run_finished', function (p) { Windows.onRunFinished(p); });
     global.SSE.on('sse.down', function () { Windows.onSseDown(); });
   }
 })(window);

@@ -810,3 +810,21 @@ owner 报了两件事：
 
 测试：`tests/test_user_reporting.py`（7 条）+ `tests/test_model_catalog_keys.py` 扩 3 条。
 基线 **531 passed / 4 skipped**。
+
+---
+
+## 14. 第七轮：流式不闪 / 工位选模型 / 掉线要有终态（2026-10-15 深夜，`0.10.15`）
+
+owner 的三条反馈：
+
+> 1. 流式输出时，输出窗口会闪动
+> 2. 工位点击修改模型，应该从模型列表里直接选配置好的模型
+> 3. 刚才工位模型掉线了，显示的还是正在输入（上方提示限速等待中），但是确实是掉线了，也没有错误代码
+
+| 反馈 | 根因 | 修法 |
+|---|---|---|
+| **闪动** | 每个 delta 都用 `outerHTML` 替换整块气泡 → 整棵子树重建 + 重排重绘 | 气泡只建一次，之后只更新 `<span class="stream-text">` 的 **textContent**（换行交给 CSS `white-space: pre-wrap`）；并且**只有用户本来就贴在底部时**才自动滚动（`stickToBottom`，gap>80px 就不抢滚动条） |
+| **工位选模型** | 下拉只有点了「拉取模型」才出现，而拉取问的是服务商**全量**列表；选中的只是名字，地址/密钥还来自 profile → 换服务商必然 401/404 | ①弹窗打开即从**模型目录**（`GET /api/models`）填下拉，空选项显示"跟随管理员模型（当前 xxx）"，并标出"管理员当前"；「从服务商拉取更多」保留为次要入口。②`LLMProfileRegistry.model_lookup`（注入 `db.get_model_by_name`）：条目自带 provider/base_url/密钥时**用它建 provider**，空字段退回 profile（绝不拿空串覆盖） |
+| **掉线还显示"正在输入"** | ①LLM 失败落库的是 **system** 消息，而前端只认新的 **assistant** 消息 → 死等到 180s 超时；②限速徽标只有"亮"没有"灭" | ①`AgentResult.error_code/error_detail` → `RunnerResult.error_code` → `window_manager._emit_run_finished()` 发 `window.run_finished`（终态+错误码+错误文本），前端收到**立刻**收起气泡并按错误码弹提示；②轮询兜底也认终态 system（`[LLM error/`、`[限速暂停]`），但**瞬态重试的 `[LLM 瞬态失败…继续重试]` 不算**（否则重试期间气泡就没了）；③`main._on_run_finished` 清掉 `_rate_limit` 并广播 `rate_limit.status{waiting:false}` |
+
+测试：`tests/test_stream_and_model_binding.py`（9 条）+ 前端结构断言。基线 **540 passed / 4 skipped**。

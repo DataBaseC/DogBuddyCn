@@ -1214,3 +1214,9 @@ tr.history-row td { background: rgba(255, 255, 255, 0.02); padding: 0 12px 14px;
    ============================================================ */
 .appr-esc-row { justify-content: space-between; gap: 12px; }
 .appr-offline { margin-top: 8px; color: var(--warn); }
+
+/* P2-9（v0.10.15）：流式输出的**增量文本节点**要保留换行。
+   打字机现在只改 textContent（不再整块重建 DOM，见 views-main.js/renderStream），
+   所以换行必须靠 CSS —— 否则整段挤成一行。 */
+.stream-text { white-space: pre-wrap; word-break: break-word; }
+.chat-body .stream-text { display: inline; }

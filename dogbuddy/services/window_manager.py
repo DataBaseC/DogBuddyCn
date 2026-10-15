@@ -31,7 +31,7 @@ from ..windows.session import WindowSession
 logger = logging.getLogger("dogbuddy.windows.manager")
 
 
-def _ErrorResult(msg: str) -> RunnerResult:  # noqa: N802 — mirrors _to_outcome naming
+def _ErrorResult(msg: str, code: str = "internal") -> RunnerResult:  # noqa: N802
     return RunnerResult(status="failed", summary=msg)
 
 
@@ -524,6 +524,33 @@ class WindowManager:
         return float(self.CRON_WAIT_TIMEOUT)
 
 
+    def _emit_run_finished(self, w: Any, task: Any, result: Any) -> None:
+        """一次运行**结束**（成功/失败/限速暂停）都发终态事件。
+
+        为什么必须发：前端原来只能"轮询有没有新的 assistant 消息"来判断结束。
+        LLM 掉线时 loop 落库的是 **system** 消息（`[LLM error/xxx]`），永远不满足
+        "新的 assistant 消息"，于是"正在输入…"一直挂到 180s 超时——
+        owner 看到的就是这个（"显示的还是正在输入…但确实掉线了，也没有错误代码"）。
+        """
+        if not self.bus:
+            return
+        status = _run_status(result)
+        payload = {
+            "window_id": w.id,
+            "window_name": w.name,
+            "status": status,
+            "stop_reason": str(getattr(result, "meta", {}).get("stop_reason", "") or ""),
+            "error_code": str(getattr(result, "error_code", "") or ""),
+            "error": str(getattr(result, "error_detail", "") or
+                         (getattr(result, "summary", "") if status != "ok" else ""))[:400],
+            "manual": not bool(getattr(task, "job_id", None)),
+            "job_id": getattr(task, "job_id", None) or "",
+        }
+        try:
+            self.bus.emit(Event(type="window.run_finished", payload=payload))
+        except Exception:  # noqa: BLE001 — 终态推送失败不能影响队列
+            logger.debug("run_finished emit failed", exc_info=True)
+
     def _report_manual_run(self, w: Any, task: Any, result: Any) -> None:
         """人工派单跑完 → 发一条完成/失败事件，让汇报链（→主管→管理员→用户）动起来。
 
@@ -644,7 +671,7 @@ class WindowManager:
                     result = await runner.run(task, env)
             except Exception as e:  # noqa: BLE001 — a crashed runner must not kill the queue
                 logger.exception("window %s run failed", w.id)
-                result = _ErrorResult(str(e))
+                result = _ErrorResult(str(e), code="runner_crash")
             finally:
                 if run_id is not None:
                     try:
@@ -668,6 +695,7 @@ class WindowManager:
         # 对话派单跑完后，管理员那边什么都不知道，用户也就永远等不到汇报
         # （owner 原话："两个员工测试完成后，管理员没有向用户做简短汇报"）。
         # 定时任务那一侧由调度器发（task.job_id 非空），这里只补人工那条，避免重复。
+        self._emit_run_finished(w, task, result)
         self._report_manual_run(w, task, result)
 
         if result.pending_questions and self.bus:
