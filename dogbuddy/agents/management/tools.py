@@ -48,7 +48,8 @@ class AdminServices:
                  self_update: Callable[..., dict] | None = None,
                  supervision: Any = None,
                  persist: Callable[[], Any] | None = None,
-                 models: Any = None):
+                 models: Any = None,
+                 groups: Any = None):
         self.windows = windows      # WindowManager: create/list/get/update/pause/resume/delete/status/dispatch
         self.jobs = jobs            # JobManager: create/list/get/update/pause/resume/remove/run_now
         self.sessions = sessions    # SessionManager: get/compress/reset/inject
@@ -63,6 +64,9 @@ class AdminServices:
         self.supervision = supervision
         # v0.10.17：模型目录（管理员只能"选"，不能自己拉/造模型）
         self.models = models
+        # v0.10.20：群组（共享工作频道）——圆桌测试暴露"管理员没有任何 group 工具"，
+        # owner 让建群组时只能退化成"共享工作区+多窗口"土办法（DB 里 0 个群组）。
+        self.groups = groups
         # 配置落盘（审查报告 P1-9）：`profile_save`/`profile_remove` 改的是内存里的
         # app config，**不调 persist 就等于重启即丢**。Web 路由那边是调了的
         # （`web/routes/settings.py`），agent 路径漏了。
@@ -286,11 +290,20 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
                        kind=args.get("kind", "prompt"),
                        report_channel=args.get("report_channel", ""),
                        llm_profile=args.get("llm_profile", ""))
-        return ToolResult.success(f"job created: {job.id} ({job.name}) next={job.next_run_at}", job_id=job.id)
+        # v0.10.20（圆桌实测）：一次性任务被 park 到远期绝对时间（如 2030-01-01）
+        # 后"启用中但永不再跑"。建的时候就警告，别等 owner 在控制台发现。
+        from ...services.job_manager import far_future_warning
+        warn = far_future_warning(job)
+        msg = f"job created: {job.id} ({job.name}) next={job.next_run_at}"
+        if warn:
+            msg += f"\n{warn}"
+        return ToolResult.success(msg, job_id=job.id)
 
     tools.append(FnTool("task_create",
         "Create a scheduled task for a window. schedule formats: '30m', 'every monday 9am', "
-        "'0 9 * * *', ISO timestamp '2026-02-03T14:00:00'.",
+        "'0 9 * * *', ISO timestamp '2026-02-03T14:00:00'. For a one-shot manual run prefer "
+        "'in 30m' or a near-term timestamp — a far-future one-shot never fires by itself "
+        "(use task_run_now to trigger it).",
         _props(window_id=_p("string", "target window id", True), name=_p("string", "task name", True),
                schedule=_p("string", "schedule expression", True),
                prompt=_p("string", "what the employee should do", True),
@@ -302,10 +315,13 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
 
     async def task_list(args: dict, ctx: ToolContext) -> ToolResult:
         need(J, "jobs")
+        from ...services.job_manager import far_future_warning
         rows = []
         for j in J.list(args.get("window_id")):
+            warn = far_future_warning(j)
             rows.append(f"{j.id} | {j.name} | win={j.window_id} | {j.schedule_raw} | "
-                        f"enabled={j.enabled} | next={j.next_run_at} | fails={j.fail_count}")
+                        f"enabled={j.enabled} | next={j.next_run_at} | fails={j.fail_count}"
+                        + (f"\n    {warn}" if warn else ""))
         return ToolResult.success("\n".join(rows) or "(no jobs)")
 
     tools.append(FnTool("task_list", "List scheduled tasks.",
@@ -725,6 +741,102 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         "List the pending approval requests / questions waiting for YOU (the supervisor's inbox).",
         _OBJ, decision_list))
 
+    # -------------------------------------------- 群组（共享工作频道，v0.10.20）
+    # 圆桌测试（2026-10-15）暴露的缺口：管理员**没有任何 group 工具**，owner 说
+    # "建个群组让他们自己聊"时，管理员只能退化成"共享工作区 + 多窗口圆桌"的土办法
+    # （它自己在对话里说明了这一点），于是 DB 里 0 个群组、前端群组页永远空白。
+    # 这里补上四个工具：建/列/加成员/发频道。工人消息在窗口 assign 进组后由
+    # WindowSession.append 自动带 group_id 进频道（T3.1 既有机制）。
+    async def group_create(args: dict, ctx: ToolContext) -> ToolResult:
+        need(svc.groups, "groups")
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return ToolResult.failure("群组名不能为空")
+        try:
+            g = svc.groups.create(
+                name, description=str(args.get("description") or ""),
+                lead_window_id=str(args.get("lead_window") or ""),
+                project_id=str(args.get("project_id") or ""))
+        except ValueError as e:  # 重名等 → 让人看见原因
+            return ToolResult.failure(f"建群组失败：{e}")
+        return ToolResult.success(
+            f"group created: {g.id} ({g.name})。用 group_assign 把工位拉进来，"
+            f"之后他们的会话会自动进入共享频道。", group_id=g.id)
+
+    tools.append(FnTool("group_create",
+        "Create a group (shared work channel) so several windows can collaborate on one "
+        "job. Then use group_assign to add member windows; their session messages then "
+        "flow into the group channel automatically.",
+        _props(name=_p("string", "group name", True),
+               description=_p("string", "what this group is for"),
+               lead_window=_p("string", "lead window id/name (summarizes at the end)"),
+               project_id=_p("string", "attach a project so members share its root dir")),
+        group_create, "write"))
+
+    async def group_list(args: dict, ctx: ToolContext) -> ToolResult:
+        need(svc.groups, "groups")
+        groups = svc.groups.list()
+        if not groups:
+            return ToolResult.success("(还没有群组——用 group_create 建一个)")
+        lines = []
+        for g in groups:
+            try:
+                members = svc.groups.members(g.id)
+            except Exception:  # noqa: BLE001 — 单个群的成员渲染失败不拖垮列表
+                members = []
+            names = "、".join(
+                f"{m['window_name']}{'👑' if m.get('role') == 'lead' else ''}"
+                for m in members) or "（无成员）"
+            lines.append(f"- {g.name} [{g.id}] 成员 {len(members)}：{names}")
+        return ToolResult.success("\n".join(lines), count=len(groups))
+
+    tools.append(FnTool("group_list", "List all groups with their members.",
+                        _OBJ, group_list))
+
+    async def group_assign(args: dict, ctx: ToolContext) -> ToolResult:
+        need(svc.groups, "groups")
+        gref = str(args.get("group_id") or "").strip()
+        win = str(args.get("window") or "").strip()
+        if not gref or not win:
+            return ToolResult.failure("group_id 与 window 都不能为空")
+        try:
+            g = svc.groups.assign(gref, win, role=str(args.get("role") or "member"))
+        except ValueError as e:  # 组不存在 / 工位不存在 → 让人看见原因
+            return ToolResult.failure(f"加成员失败：{e}")
+        return ToolResult.success(
+            f"已把工位 {win} 加入群组 {g.name}（{args.get('role') or 'member'}）。"
+            f"它之后的会话消息会自动进入群共享频道。", group_id=g.id)
+
+    tools.append(FnTool("group_assign",
+        "Add a window to a group as member or lead. From then on the window's session "
+        "messages flow into the group's shared channel (visible in the console 群组 page).",
+        _props(group_id=_p("string", "group id or name", True),
+               window=_p("string", "window id or name", True),
+               role=_p("string", "member|lead (lead summarizes)")),
+        group_assign, "write"))
+
+    async def group_channel_post(args: dict, ctx: ToolContext) -> ToolResult:
+        need(svc.groups, "groups")
+        gref = str(args.get("group_id") or "").strip()
+        text = str(args.get("text") or "").strip()
+        if not gref or not text:
+            return ToolResult.failure("group_id 与 text 都不能为空")
+        try:
+            m = svc.groups.post(gref, str(getattr(ctx, "window_id", "") or "admin"), text)
+        except ValueError as e:
+            return ToolResult.failure(f"发频道失败：{e}")
+        return ToolResult.success(
+            f"已发进群组 {gref} 的共享频道（控制台群组页可见）。",
+            message_id=m["id"])
+
+    tools.append(FnTool("group_channel_post",
+        "Post a message into a group's shared channel — use it to hand conclusions, "
+        "decisions or instructions to the whole group. Members see it in the channel "
+        "and in their next group run's recap.",
+        _props(group_id=_p("string", "group id or name", True),
+               text=_p("string", "message content", True)),
+        group_channel_post, "write"))
+
     return tools
 
 
@@ -750,6 +862,10 @@ PROJECT_TOOLS: frozenset[str] = frozenset({
     "progress_report",
     # T9.6 审批闭环（P1-6）：主管裁决员工升级上来的高危操作
     "approve_decision", "decision_list",
+    # v0.10.20 群组（共享工作频道）：圆桌测试暴露"管理员没有 group 工具"。
+    # 放 project 级 = 主管也能编排自己项目里的群组；运行时 gate 按
+    # group/window 归属 fail-closed（跨项目的工位/群组会被拒）。
+    "group_create", "group_list", "group_assign", "group_channel_post",
 })
 
 

@@ -269,6 +269,15 @@
     var level = ratio > 0.95 ? 'crit'
       : (Number(u.threshold) > 0 && ratio > Number(u.threshold) ? 'warn' : '');
     var pct = Math.round(ratio * 100);
+    /* v0.10.20：缓存命中（DeepSeek 的 prompt_cache_hit/miss_tokens）。
+       服务商没给这些字段时（全 0）不显示这一行，而不是显示假的 0%。 */
+    var cacheHit = Number(u.cache_hit_tokens) || 0;
+    var cacheMiss = Number(u.cache_miss_tokens) || 0;
+    var cacheTotal = cacheHit + cacheMiss;
+    var cacheLine = cacheTotal > 0
+      ? '<span class="hint">缓存命中 ' + Math.round(cacheHit / cacheTotal * 100) + '%' +
+        ' (' + fmtInt(cacheHit) + ' 命中 / ' + fmtInt(cacheMiss) + ' 未命中)</span>'
+      : '';
     return '<div class="ctx-usage-top">' +
       '<span class="ctx-usage-label">' + icon('activity', 'sm') +
       esc(opts.label || '上下文用量') + '</span>' +
@@ -279,7 +288,7 @@
       '" style="width:' + pct + '%"></div></div>' +
       '<div class="ctx-usage-foot"><span>' + pct + '%</span>' +
       '<span class="hint">压缩阈值 ' + Math.round((Number(u.threshold) || 0) * 100) + '%' +
-      (u.estimated ? ' · 粗估' : '') + '</span></div>';
+      (u.estimated ? ' · 粗估' : '') + '</span>' + cacheLine + '</div>';
   }
 
   /**
@@ -2579,9 +2588,14 @@
       }
       host.innerHTML = Jobs.rows.map(function (j) {
         var isSoon = (U.parseTime(j.next_run_at) || 0) - Date.now() < 10 * 60 * 1000;
+        /* v0.10.20（圆桌实测）：一次性任务被 park 到远期绝对时间（如 2030-01-01）后
+           "启用中"但永不再跑。> 30 天的下次运行时间打 ⚠，别让界面撒谎。 */
+        var nextTs = U.parseTime(j.next_run_at) || 0;
+        var isFar = nextTs - Date.now() > 30 * 24 * 3600 * 1000;
         var main =
           '<tr data-job-id="' + U.esc(j.id) + '">' +
-          '<td><b>' + U.esc(j.name) + '</b><div class="tiny muted mono">' + U.esc(j.kind || 'prompt') + '</div></td>' +
+          '<td><b>' + U.esc(j.name) + '</b>' + (isFar ? ' <span title="下次运行在 30 天以上——期间不会自动触发">⚠️</span>' : '') +
+          '<div class="tiny muted mono">' + U.esc(j.kind || 'prompt') + '</div></td>' +
           '<td class="muted">' + U.esc(Jobs.windowName(j.window_id)) + '</td>' +
           '<td><span class="badge badge-grey mono">' + U.esc(j.schedule || '—') + '</span>' +
           '<div class="tiny muted" style="margin-top:3px">' + U.esc(j.schedule_type || '') + '</div></td>' +
@@ -6442,6 +6456,8 @@
                 '<div class="row-actions">' +
                 (m.role === 'lead' ? '' :
                   '<button class="icon-btn" data-act="set-lead" title="设为组长">' + U.icon('arrow-up', 'sm') + '</button>') +
+                (m.exists === false ? '' :
+                  '<button class="icon-btn" data-act="chat" title="查看该成员的会话（他们在这里的发言）">' + U.icon('chat', 'sm') + '</button>') +
                 '<button class="icon-btn danger" data-act="remove" title="移出群组">' + U.icon('trash', 'sm') + '</button>' +
                 '</div></div>';
             }).join('')
@@ -6615,6 +6631,14 @@
               rm.disabled = false;
               U.toast('error', '移除失败：' + e.message);
             });
+          });
+        }
+        // v0.10.20：「他们的沟通」要看得见——成员行加会话入口，跳到该工位的
+        // 会话流（圆桌测试时工人的发言只散在各窗口会话和工作区文件里）。
+        var chat = U.$('[data-act="chat"]', row);
+        if (chat) {
+          chat.addEventListener('click', function () {
+            if (global.App && global.App.go) global.App.go('windows', { win: wid });
           });
         }
       });

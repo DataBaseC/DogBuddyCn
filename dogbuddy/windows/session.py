@@ -16,6 +16,16 @@ from .context import ContextBuilder
 _CHARS_PER_TOKEN = 3.0
 
 
+def _cache_int(*values: Any) -> int | None:
+    """取第一个能解释成整数的值；都不是数字返回 None（= 服务商没给）。"""
+    for v in values:
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            return int(v)
+    return None
+
+
 class WindowSession:
     def __init__(self, window: Window, message_repo: Any, todo_repo: Any, compaction_repo: Any):
         self.window = window
@@ -27,6 +37,12 @@ class WindowSession:
         #: 前者是"现在上下文有多满"（压缩判据）。曾经两者共用 SUM(tokens)，
         #: 结果是压缩永不触发、用量条恒 0。
         self.last_prompt_tokens: int = 0
+        # v0.10.20：最近一次调用的缓存命中/未命中 token（DeepSeek 的
+        # `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens`，OpenAI 风格的
+        # `prompt_tokens_details.cached_tokens` 由 provider 层规范化后进来）。
+        # owner 要在控制台看"缓存命中"——数据 provider 一直给，只是没人解析。
+        self.last_cache_hit: int = 0
+        self.last_cache_miss: int = 0
         # T7.2: 挂载项目后，真正生效的工作区 = 项目根 (+ 工位子目录)。
         # 由 WindowManager 每次执行前写入；为空表示沿用 window.workspace_path。
         # 存在的理由：提示词里必须告诉模型**真实的**工作目录，否则它会按老路径找文件。
@@ -56,6 +72,8 @@ class WindowSession:
         """记住最近一次 LLM 调用的 usage —— 只取 `prompt_tokens` 作为上下文占用。
 
         `total_tokens`（含输出）是花费，不能拿来判"上下文满没满"。
+        v0.10.20：同时记缓存命中/未命中（`cache_hit_tokens`/`cache_miss_tokens`，
+        由 provider 层从 DeepSeek/OpenAI 两种形状规范化）。
         """
         if not isinstance(usage, dict):
             return
@@ -65,6 +83,34 @@ class WindowSession:
             prompt = 0
         if prompt > 0:
             self.last_prompt_tokens = prompt
+        # 缓存命中：provider 层（openai_compat._usage_dict）已规范化成
+        # cache_hit_tokens/cache_miss_tokens；这里兜底再认一次原始形状
+        # （DeepSeek 顶层 / OpenAI 嵌套），防其他 provider 或旧路径漏规范化。
+        hit = _cache_int(usage.get("cache_hit_tokens"),
+                         usage.get("prompt_cache_hit_tokens"))
+        if hit is None:
+            details = usage.get("prompt_tokens_details")
+            if isinstance(details, dict):
+                hit = _cache_int(details.get("cached_tokens"))
+        miss = _cache_int(usage.get("cache_miss_tokens"),
+                          usage.get("prompt_cache_miss_tokens"))
+        if hit is not None and miss is None and prompt > 0:
+            miss = max(0, prompt - hit)
+        if hit is not None or miss is not None:
+            self.last_cache_hit = int(hit or 0)
+            self.last_cache_miss = int(miss or 0)
+
+    def cache_stats(self) -> dict[str, Any]:
+        """最近一次调用的缓存命中情况（控制台用量条显示用）。
+
+        没拿到过缓存字段的服务商返回全 0——前端据此不显示那一行，
+        而不是显示一个假的 0%。
+        """
+        hit = int(getattr(self, "last_cache_hit", 0) or 0)
+        miss = int(getattr(self, "last_cache_miss", 0) or 0)
+        total = hit + miss
+        return {"cache_hit_tokens": hit, "cache_miss_tokens": miss,
+                "cache_hit_ratio": round(hit / total, 4) if total else 0.0}
 
     @property
     def context_tokens_estimated(self) -> bool:

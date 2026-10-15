@@ -266,6 +266,7 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
     from . import file_ops as _file
     from . import memory_ops as _mem
     from . import project_memory_ops as _pmem
+    from . import run_status as _run_status
     from . import search_ops as _search
     from . import server_exec as _srv
     from . import shell_ops as _shell
@@ -279,6 +280,7 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
         *_auto.all_tools(jobs=jobs, runner=run_job_now),
         *_pmem.all_tools(), *_mem.all_tools(),
         _ask.AskUserTool(), _srv.ServerExecTool(),
+        *_run_status.all_tools(),
     ]
     for t in tools:
         if include and t.name not in include:

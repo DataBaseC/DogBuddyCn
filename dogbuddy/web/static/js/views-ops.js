@@ -78,9 +78,14 @@
       }
       host.innerHTML = Jobs.rows.map(function (j) {
         var isSoon = (U.parseTime(j.next_run_at) || 0) - Date.now() < 10 * 60 * 1000;
+        /* v0.10.20（圆桌实测）：一次性任务被 park 到远期绝对时间（如 2030-01-01）后
+           "启用中"但永不再跑。> 30 天的下次运行时间打 ⚠，别让界面撒谎。 */
+        var nextTs = U.parseTime(j.next_run_at) || 0;
+        var isFar = nextTs - Date.now() > 30 * 24 * 3600 * 1000;
         var main =
           '<tr data-job-id="' + U.esc(j.id) + '">' +
-          '<td><b>' + U.esc(j.name) + '</b><div class="tiny muted mono">' + U.esc(j.kind || 'prompt') + '</div></td>' +
+          '<td><b>' + U.esc(j.name) + '</b>' + (isFar ? ' <span title="下次运行在 30 天以上——期间不会自动触发">⚠️</span>' : '') +
+          '<div class="tiny muted mono">' + U.esc(j.kind || 'prompt') + '</div></td>' +
           '<td class="muted">' + U.esc(Jobs.windowName(j.window_id)) + '</td>' +
           '<td><span class="badge badge-grey mono">' + U.esc(j.schedule || '—') + '</span>' +
           '<div class="tiny muted" style="margin-top:3px">' + U.esc(j.schedule_type || '') + '</div></td>' +

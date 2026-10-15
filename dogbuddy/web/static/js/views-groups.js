@@ -278,6 +278,8 @@
                 '<div class="row-actions">' +
                 (m.role === 'lead' ? '' :
                   '<button class="icon-btn" data-act="set-lead" title="设为组长">' + U.icon('arrow-up', 'sm') + '</button>') +
+                (m.exists === false ? '' :
+                  '<button class="icon-btn" data-act="chat" title="查看该成员的会话（他们在这里的发言）">' + U.icon('chat', 'sm') + '</button>') +
                 '<button class="icon-btn danger" data-act="remove" title="移出群组">' + U.icon('trash', 'sm') + '</button>' +
                 '</div></div>';
             }).join('')
@@ -451,6 +453,14 @@
               rm.disabled = false;
               U.toast('error', '移除失败：' + e.message);
             });
+          });
+        }
+        // v0.10.20：「他们的沟通」要看得见——成员行加会话入口，跳到该工位的
+        // 会话流（圆桌测试时工人的发言只散在各窗口会话和工作区文件里）。
+        var chat = U.$('[data-act="chat"]', row);
+        if (chat) {
+          chat.addEventListener('click', function () {
+            if (global.App && global.App.go) global.App.go('windows', { win: wid });
           });
         }
       });

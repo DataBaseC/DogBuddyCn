@@ -39,6 +39,7 @@ class AdminService:
         memory: Any,           # MemoryService
         config: Any,           # ConfigService
         models: Any = None,    # ModelService（模型目录；管理员只能选不能造）
+        groups: Any = None,    # GroupManager（群组/共享频道，v0.10.20）
         bus: Any = None,
         max_iterations: int = 20,
         self_status: Callable[[bool], dict] | None = None,
@@ -53,6 +54,7 @@ class AdminService:
         self.memory = memory
         self.config = config
         self.models = models
+        self.groups = groups
         self.bus = bus
         self.max_iterations = max_iterations
         self.self_status = self_status
@@ -73,7 +75,9 @@ class AdminService:
                             # P1-9：agent 路径改 profile 也要落盘
                             persist=getattr(config, "persist", None),
                             # v0.10.17：管理员只能从模型目录里"选"模型
-                            models=models)
+                            models=models,
+                            # v0.10.20：群组工具（圆桌测试暴露管理员没有 group 工具）
+                            groups=groups)
         self.registry = ToolRegistry(gate=None, audit=db)
         self.registry.gate = _AdminGate()
         for tool in build_admin_tools(svc):

@@ -129,11 +129,15 @@ def router(svc, auth_deps) -> APIRouter:
         max_tokens = p.get("max_context_tokens", 0) or 0
         used = 0
         estimated = True
+        cache = {"cache_hit_tokens": 0, "cache_miss_tokens": 0, "cache_hit_ratio": 0.0}
         try:
             rt_session = svc.sessions._rt(w.id).session
             ctx = getattr(rt_session, "context_tokens", None)
             used = int(ctx() if callable(ctx) else rt_session.token_usage())
             estimated = bool(getattr(rt_session, "context_tokens_estimated", False))
+            stats = getattr(rt_session, "cache_stats", None)
+            if callable(stats):
+                cache = stats()
         except Exception:  # noqa: BLE001 — usage bar degrades to zeros, never 500s
             pass
         ratio = (used / max_tokens) if max_tokens else 0.0
@@ -143,7 +147,10 @@ def router(svc, auth_deps) -> APIRouter:
                 "ratio": round(min(ratio, 1.0), 4),
                 "threshold": p.get("compact_threshold", 0.0),
                 "estimated": estimated,
-                "tokens": st.get("tokens", 0)}
+                "tokens": st.get("tokens", 0),
+                "cache_hit_tokens": cache.get("cache_hit_tokens", 0),
+                "cache_miss_tokens": cache.get("cache_miss_tokens", 0),
+                "cache_hit_ratio": cache.get("cache_hit_ratio", 0.0)}
 
     @r.delete("/windows/{window_id}", dependencies=auth_deps)
     def delete_window(window_id: str) -> dict:

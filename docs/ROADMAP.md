@@ -912,3 +912,87 @@ JSON Schema 里 `required` 只能是**字符串数组**。SiliconFlow / Sensenov
 
 教训：**别把"服务商特定的严格性"当成"用户配置问题"** —— 报错里的工具名和
 `true is not of type "array"` 已经指得很清楚了。
+
+---
+
+## 17. 第十轮：圆桌测试复盘 —— 群组工具 / 误拦收敛 / 任务挂死 / token 优化（2026-10-15 夜，`0.10.20`）
+
+owner 报："我前端无法看到群组，还有他们的沟通"。复盘圆桌测试（qagroup 三工位）
+的生产数据 + 代码现状，四条根因全部坐实，本轮一次修完；token 优化参考
+`github.com/T-Auto/dsh-ops`（DSH 的底层操作插件），**只移植适用 Linux 服务端的思想**
+（Rust 原生工具与独立 Windows Shell 不适用）。
+
+### 17.1 群组系统：管理员一个 group 工具都没有（最优先）
+
+| 现象 | 根因（生产数据实证） |
+|---|---|
+| 控制台群组页永远空白；owner 让管理员"建个群组让他们自己聊" | `groups`/`group_members`/频道消息 **0 行**；`ADMIN_TOOLS` 里没有任何 `group_*`。管理员在对话里明说只能退化成"共享工作区 + 多窗口圆桌"土办法（msg id 474）——它**没有能力**走 Group 功能 |
+| "他们的沟通"看不见 | 群频道（`messages.group_id`）没有任何生产者；工人发言散在各窗口会话 + 工作区文件 |
+
+修法：
+- `GroupManager.post()`：群频道唯一生产入口（写 `messages.group_id` + 审计）。
+- 管理工具包新增 4 个工具：`group_create` / `group_list` / `group_assign` /
+  `group_channel_post`（`agents/management/tools.py`），登记进 `ADMIN_TOOLS`
+  与 `PROJECT_TOOLS`（project 级 = 主管也能编排自己项目里的群组；运行时 gate 按
+  group/window 归属 fail-closed，跨项目拒绝）。
+- `AdminServices`/`AdminService`/`main.py` 注入 `GroupManager`。
+- 窗口 assign 进组后 `WindowSession.append` 自动带 `group_id` 进频道（T3.1 既有
+  机制被激活）。
+- 前端群组详情成员行加「会话」入口（跳到该工位会话流）；部署后把 qagroup 三工位
+  建成真群组，此后他们的对话自动进共享频道。
+
+### 17.2 边界守卫误拦（圆桌实测：9 次 shell 4 次被拦，每次 5 行长文）
+
+qa-env 因此烧掉大量轮次、最终撞 `max iterations reached`（25 轮/43 次工具调用，
+`job_runs` id 20 的 summary 实证）。三条 owner 交接书点名的误拦：
+
+| 误拦 | 修法 |
+|---|---|
+| `grep -oE '"/api/[a-z]+'`、`curl "http://h$c"` 里的 `/api`、URL 被当路径 | 词法级引号掩码（`_mask_quoted`）：任一引号 region 脱引号后**像纯路径**才参与判定（`rm -rf '/var/log'`、`cat "/etc/passwd"` 依然拦）；URL（`://`）、正则/glob 图案、普通文本一律掩码。重定向与 `cd` 目标照旧在原文上判定（`echo x >"/etc/x"`、`cd "/etc"` 仍拦） |
+| `for c in /api /docs; do …` 的词表被当路径 | `for/while/until/if` 构造本身不拦（词表与测试条件不是路径引用）；**命令体逐段照常判**（`do cp $f /etc/` 仍拦）。循环体内的不可判定构造按交接书"放行+记录"（audit `shell:dynamic-allowed`），不再拒绝 |
+| `python -c` 一律拒 | 他语言内联代码（python/perl/node/ruby/php）从拒绝降为**放行+审计**：内容从来不可静态分析，且写进 .py 文件执行本就放行——拦它不改变真实攻击面，只制造噪音与绕行动机（qa-env 正是被逼去写脚本文件，随后读到了 `/etc/dogbuddy/config.yaml` 明文密钥）。真正绕不过 shell 分析的构造（`sh -c`/`eval`/`sudo`/`xargs`/`find -exec`/`$( )`/反引号/`${ }`/`$VAR`）仍一律拒 |
+
+拒绝消息**单行化 + 错误码**（`E_BOUNDARY_OUTSIDE_PATH` / `E_BOUNDARY_UNEVALUABLE`），
+同一轮对话同一错误码只完整说明一次（`ctx.extra["boundary_codes_shown"]`）。
+新增只读工具 `run_status`（已用 token、上下文上限与阈值、轮次/等待上限、信任级、
+工作区可写性、待办、定时/人工）——替代 worker 去撞 `env`/`/proc`（qa-ops 查不到
+预算只能瞎跑，正是撞上限的推手）。
+
+### 17.3 任务 park 到 2030："启用中"但永不再跑
+
+生产 6 个任务里 5 个 `next_run_at=2030-01-01`、`enabled=1`、`last_run_at=null`
+（qa-ops 原话："启用 ≠ 会跑"）。根因：`JobManager.run_now` 只派单，
+**从不更新任务生命周期**——一次性任务被 park 到远期后靠手动 run_now 触发，
+跑完依然显示启用中。修法：once 任务派单即 consumed（禁用 + 清 next_run，
+留审计）；`task_create`/`task_list` 对 > 30 天的下次运行时间给 ⚠ 警告；
+前端任务页同名标记。
+
+### 17.4 token 优化（移植 dsh-ops 思想）
+
+- **有界结果引用（PTC 思想）**：`tools/bound_output.py`——shell/web_fetch 的
+  20000 字符硬截（留巨大输出的头部，圆桌实测：PyPI simple 索引全量、GitHub API
+  root、360KB HTML，每次 ~5-7k token 噪音）改为 head+tail（默认 8000，3:1 分配），
+  中间标注省略量与翻页办法（`sed -n`/`grep`/`head`/`tail` 或 `max_output_chars`）；
+  grep 截断现在也告诉模型"停在 200 条"。
+- **缓存命中可见化**（交接书 §2.2）：`_usage_dict()` 规范化两种形状
+  （DeepSeek 顶层 `prompt_cache_hit/miss_tokens`；OpenAI 风格
+  `prompt_tokens_details.cached_tokens`，miss 由 prompt 推）→ `WindowSession
+  .note_usage()/cache_stats()` → `/api/admin/chat/usage` 与
+  `/api/windows/{id}/usage` 新增 `cache_hit_tokens/cache_miss_tokens/
+  cache_hit_ratio` → 前端用量条「缓存命中 x% (h/m)」（全 0 时不显示，不造假数字）。
+  **验收**：连发两条相同前缀的请求 → 第二条 `cache_hit_tokens > 0`（用 DeepSeek 验）。
+- **渐进式披露（按需加载工具 schema）**：改的是工具调用契约，风险高——
+  列为待 owner 决策的后继项，本轮不做。
+
+### 17.5 顺带
+
+- `progress_report` 的 NULL summary 崩溃（`0.10.19` 已修）随本轮部署生效。
+- 测试基线 559 → **601 passed / 4 skipped**（新增 42 条：群组工具 9 / 守卫误拦 8 /
+  run_status 4 / 任务挂死 5 / 有界输出 7 / 缓存命中 9）。`audit_ui --strict` exit 0；
+  五条变异（v1/v4/前端 A/B/C）全部被抓住（本机无 bash，守卫脚本的 PowerShell
+  复刻在 `scripts/verify_guards.ps1`）。
+
+**已知未修（需 owner 决策）**：沙箱 `.py` 逃逸 P0（qa-tools 实证：脚本文件可读
+`/etc/dogbuddy/config.yaml` 明文密钥 + worker env 内 `DOGBUDDY_PANEL_TOKEN`
+可 root 执行）——静态检查器的固有局限，真修需要容器/只读挂载级方案。
+

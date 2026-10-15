@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .bound_output import DEFAULT_MAX_CHARS, bound_output
 from .registry import ToolContext, ToolResult
 
 logger = logging.getLogger("dogbuddy.tools.search")
@@ -243,6 +244,9 @@ class GrepTool:
                     break
 
             out = "\n".join(results) if results else "(no matches)"
+            if truncated:
+                out += (f"\n...[grep stopped at {MAX_RESULTS} matches; narrow the "
+                        f"pattern or add a path/include filter to see the rest]")
             return ToolResult.success(out, matches=len(results), truncated=truncated)
         except Exception as e:  # noqa: BLE001
             logger.warning("grep failed", exc_info=True)
@@ -327,7 +331,8 @@ class WebFetchTool:
     name = "web_fetch"
     description = (
         "Fetch an http(s) URL and return its content as plain text (scripts and "
-        "styles removed, tags stripped), truncated to max_chars (default 20000)."
+        "styles removed, tags stripped), bounded to head+tail at max_chars "
+        "(default 8000) with an omission marker; raise max_chars if you need more."
     )
     parameters = {
         "type": "object",
@@ -338,7 +343,9 @@ class WebFetchTool:
             },
             "max_chars": {
                 "type": "integer",
-                "description": "Maximum characters of text to return (default 20000).",
+                "description": (
+                    "Output size cap in characters (default 8000). Output is kept as "
+                    "head+tail with an omission marker telling you how much was skipped."),
             },
         },
         "required": ["url"],
@@ -349,7 +356,7 @@ class WebFetchTool:
         url = str(args.get("url", "") or "").strip()
         if not re.match(r"^https?://", url, flags=re.IGNORECASE):
             return ToolResult.failure("only http/https URLs are allowed")
-        max_chars = max(1, _to_int(args.get("max_chars"), 20000))
+        max_chars = max(1, _to_int(args.get("max_chars"), DEFAULT_MAX_CHARS))
         try:
             import httpx  # lazy: web tools degrade gracefully without the dep
         except ImportError as e:
@@ -367,9 +374,8 @@ class WebFetchTool:
 
         try:
             text = _html_to_text(page)
-            if len(text) > max_chars:
-                text = text[:max_chars] + "\n...[truncated]"
-            return ToolResult.success(text, url=final_url, chars=len(text))
+            text, stats = bound_output(text, max_chars=max_chars)
+            return ToolResult.success(text, url=final_url, chars=len(text), **stats)
         except Exception as e:  # noqa: BLE001
             return ToolResult.failure(f"web_fetch unavailable: {e}")
 

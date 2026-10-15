@@ -116,6 +116,27 @@ class GroupManager:
                  "created_at": m.created_at}
                 for m in self.db.list_group_messages(g.id, limit)]
 
+    def post(self, group_ref: str, window_id: str, content: str) -> dict:
+        """往共享频道发一条消息（群频道唯一的生产入口）。
+
+        管理员/主管靠 `group_channel_post` 工具把结论/指令投进频道；
+        工人消息则在窗口 assign 进组后由 `WindowSession.append` 自动带入
+        （`window.group_id` → `messages.group_id`）。
+        """
+        g = self.db.get_group(group_ref)
+        if g is None:
+            raise ValueError(f"group not found: {group_ref}")
+        text = str(content or "").strip()
+        if not text:
+            raise ValueError("channel post content is empty")
+        actor = str(window_id or "").strip() or "admin"
+        m = self.db.add_message(actor, "assistant", text, 0, None, group_id=g.id)
+        self.db.audit("system", "group:channel_post",
+                      f"{g.id} by {actor} ({len(text)} chars)")
+        return {"id": m.id, "group_id": g.id, "window_id": actor,
+                "role": "assistant", "content": text,
+                "created_at": getattr(m, "created_at", "")}
+
     # -------------------------------------------------------------- runs
     def _strict_tools(self, member_ids: list[str]) -> list[str] | None:
         """权限取最严：所有成员角色白名单的**交集**。

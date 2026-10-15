@@ -124,6 +124,10 @@ ADMIN_TOOLS = [
     "approve_decision", "decision_list",
     # T9.4 指挥链第一跳：管理员 → 主管（P1-1 补的入口；此前四向信息流只有审批一通）
     "supervisor_command",
+    # v0.10.20 群组（共享工作频道）：圆桌测试（2026-10-15）里 owner 让管理员
+    # "建个群组让他们自己聊"，管理员**没有任何 group 工具**，只能退化成
+    # "共享工作区 + 多窗口圆桌"土办法 → DB 0 群组 → 前端群组页永远空白。
+    "group_create", "group_list", "group_assign", "group_channel_post",
     # self-upgrade of the running deployment (NOT delegable to an employee window)
     "self_version", "self_update",
 ]
@@ -147,6 +151,9 @@ WORKER_PROGRAMMER_TOOLS = [
     # 工位记忆（ROLES.md 权限矩阵「员工 ✅ 本工位」）。只认 ctx.window_id，
     # 模型没有参数可以指向别的工位——所以不需要作用域裁决（审查报告 P1-4）。
     "window_memory_read", "window_memory_write",
+    # v0.10.20：只读的本人预算/环境查询（圆桌测试：qa-ops 查不到自己的上下文
+    # 预算，`env`/`/proc` 又被边界守卫拒 → 只能瞎跑撞 max iterations）。
+    "run_status",
 ]
 
 

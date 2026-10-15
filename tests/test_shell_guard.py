@@ -20,7 +20,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dogbuddy.tools.registry import ToolContext, build_registry  # noqa: E402
-from dogbuddy.tools.shell_guard import analyze_command, is_elevated  # noqa: E402
+from dogbuddy.tools.shell_guard import (analyze_command, dynamic_notes,  # noqa: E402
+                                        is_elevated, refusal_message)
 
 
 def _run(coro):
@@ -142,10 +143,7 @@ def test_审查报告_payload_全部被拦(tmp_path):
         "echo /etc/x | xargs rm",
         "find . -exec rm {} ;",
         "sh -c 'rm -rf /var/log'",
-        # 解释器内联写入
-        "python -c \"open('/etc/x','w').write('p')\"",
-        "perl -e \"unlink '/etc/x'\"",
-        # 带引号的写命令参数
+        # 带引号的写命令参数（v0.10.20：引号内**像纯路径**仍参与判定）
         "rm -rf '/var/log'",
         "tee \"/etc/hosts\"",
     ]
@@ -224,3 +222,116 @@ def test_工作区内命令不受影响(tmp_path):
     assert res.ok
     assert (tmp_path / "ws" / "ok.txt").exists()
     assert "hello" in (tmp_path / "ws" / "ok.txt").read_text(encoding="utf-8")
+
+
+# ==========================================================================
+# v0.10.20 误拦收敛（owner 交接书 §2.3 点名的圆桌实测误拦）
+# ==========================================================================
+def test_引号内的正则与URL不是路径(tmp_path):
+    """圆桌实测误拦①：`grep -oE '"/api/...'`、`curl "http://...$c"` 里的
+    `/api`、URL 是字符串字面量，不是路径引用。"""
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    for cmd in [
+        "grep -oE '\"/api/[a-zA-Z0-9._/{}-]+' probe/app.js",
+        "grep -oE \"/api/[a-z]+\" probe/app.js",
+        "curl -s http://127.0.0.1:8787/api/health",
+        "curl -s \"http://127.0.0.1:8787/api/health\"",
+        "echo \"== ws ==\"; date; locale",
+        "for c in /api /api/health /docs; do echo $c; done",
+        "echo '=== TZ ==='; date",
+    ]:
+        assert analyze_command(cmd, ws) == [], f"误拦：{cmd}"
+
+
+def test_引号内像纯路径的参数仍然拦(tmp_path):
+    """取舍的另一面：带引号的**纯路径**参数依然是路径引用（`rm -rf '/var/log'`）。"""
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    for cmd in ["rm -rf '/var/log'", "cat \"/etc/passwd\"", "tee \"/etc/hosts\"",
+                "cd \"/etc\""]:
+        assert analyze_command(cmd, ws), f"带引号的纯路径必须拦: {cmd}"
+
+
+def test_循环构造本身不拦_循环体照判(tmp_path):
+    """圆桌实测误拦②：`for c in /api ...` 的词表不是路径引用；
+    但循环体里的命令逐段判定——`do cp $f /etc/` 仍拦。"""
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    # 词表里的路径不拦
+    assert analyze_command("for c in /api /docs /tmp; do echo $c; done", ws) == []
+    assert analyze_command("if [ -f /etc/os-release ]; then echo yes; fi", ws) == []
+    # 循环体写外界照拦
+    risks = analyze_command("for f in *.txt; do cp $f /etc/leak; done", ws)
+    assert any("/etc/leak" in r["target"] for r in risks), f"循环体越界应拦: {risks}"
+    # while 条件里的路径不拦，体重定向照拦
+    assert analyze_command("while read -r l; do echo \"$l\"; done < list.txt", ws) == []
+    risks = analyze_command("while read -r l; do echo $l > /etc/x; done", ws)
+    assert any(r["kind"] == "write" for r in risks)
+
+
+def test_python_c等他语言内联代码放行且记录(tmp_path):
+    """圆桌实测误拦③：`python -c` 内容从来不可静态分析，且写进 .py 文件
+    执行本就放行——拦它只制造噪音与绕行动机（qa-env 正是被逼去写脚本文件）。"""
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    for cmd in ["python3 -c 'import platform; print(platform.platform())'",
+                "python -c \"open('x.txt','w').write('p')\"",
+                "perl -e \"print 1\"",
+                "node -e \"console.log(1)\""]:
+        assert analyze_command(cmd, ws) == [], f"他语言内联应放行: {cmd}"
+    notes = dynamic_notes("python3 -c 'print(1)'")
+    assert notes and "python -c" in notes[0]["target"], "放行但要留审计记录"
+
+
+def test_循环体内的不可判定构造放行且记录(tmp_path):
+    """owner 交接书：循环体里的命令逐个判定，无法判定就放行+记录。"""
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    cmd = "for c in /api /docs; do curl -s \"http://127.0.0.1:8787$c\"; done"
+    assert analyze_command(cmd, ws) == [], f"循环体内的动态构造应放行: {cmd}"
+    notes = dynamic_notes(cmd)
+    assert notes, "放行但要留审计记录"
+    # 循环**外**的同类构造仍然拒绝
+    assert analyze_command("curl -s \"http://h$x\"", ws), "循环外的 $VAR 仍拦"
+
+
+def test_拒绝消息单行化带错误码且同码只详述一次(tmp_path):
+    from dogbuddy.db import Database
+    db = Database(tmp_path / "t.db")
+    reg = build_registry(audit=db)
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    ctx = _ctx(tmp_path, db=db)
+
+    res = _run(reg.execute("shell", {"command": "cat /etc/passwd"}, ctx))
+    assert not res.ok
+    msg = res.output
+    assert "\n" not in msg, "拒绝消息必须单行（5 行长文既烧 token 又被摘要继承）"
+    assert "E_BOUNDARY_OUTSIDE_PATH" in msg
+    assert res.data.get("error_code") == ["E_BOUNDARY_OUTSIDE_PATH"]
+
+    # 同一会话同一错误码：第二次只回短消息
+    res2 = _run(reg.execute("shell", {"command": "ls /var/log"}, ctx))
+    assert "已说明过" in res2.output, f"同码第二次应只给短消息: {res2.output}"
+
+    # 换一个错误码：重新完整说明
+    res3 = _run(reg.execute("shell", {"command": "cat $HOME/x"}, ctx))
+    assert "E_BOUNDARY_UNEVALUABLE" in res3.output and "已说明过" not in res3.output
+    db.close()
+
+
+def test_refusal_message_两条码合并(tmp_path):
+    ws = str(tmp_path / "ws")
+    risks = [{"kind": "path", "target": "/etc/x", "reason": "r"},
+             {"kind": "dynamic", "target": "$VAR", "reason": "r"}]
+    msg = refusal_message(risks, ws)
+    assert "\n" not in msg
+    assert "E_BOUNDARY_OUTSIDE_PATH" in msg and "E_BOUNDARY_UNEVALUABLE" in msg
+    short = refusal_message(risks, ws, first_time=False)
+    assert "已说明过" in short
+
+
+def test_dynamic_notes_他语言外不误报(tmp_path):
+    """普通命令不该被记成"放行的动态构造"。"""
+    assert dynamic_notes("ls -la && git status") == []
+    assert dynamic_notes("echo hi > out.txt") == []

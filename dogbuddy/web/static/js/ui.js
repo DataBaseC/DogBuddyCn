@@ -263,6 +263,15 @@
     var level = ratio > 0.95 ? 'crit'
       : (Number(u.threshold) > 0 && ratio > Number(u.threshold) ? 'warn' : '');
     var pct = Math.round(ratio * 100);
+    /* v0.10.20：缓存命中（DeepSeek 的 prompt_cache_hit/miss_tokens）。
+       服务商没给这些字段时（全 0）不显示这一行，而不是显示假的 0%。 */
+    var cacheHit = Number(u.cache_hit_tokens) || 0;
+    var cacheMiss = Number(u.cache_miss_tokens) || 0;
+    var cacheTotal = cacheHit + cacheMiss;
+    var cacheLine = cacheTotal > 0
+      ? '<span class="hint">缓存命中 ' + Math.round(cacheHit / cacheTotal * 100) + '%' +
+        ' (' + fmtInt(cacheHit) + ' 命中 / ' + fmtInt(cacheMiss) + ' 未命中)</span>'
+      : '';
     return '<div class="ctx-usage-top">' +
       '<span class="ctx-usage-label">' + icon('activity', 'sm') +
       esc(opts.label || '上下文用量') + '</span>' +
@@ -273,7 +282,7 @@
       '" style="width:' + pct + '%"></div></div>' +
       '<div class="ctx-usage-foot"><span>' + pct + '%</span>' +
       '<span class="hint">压缩阈值 ' + Math.round((Number(u.threshold) || 0) * 100) + '%' +
-      (u.estimated ? ' · 粗估' : '') + '</span></div>';
+      (u.estimated ? ' · 粗估' : '') + '</span>' + cacheLine + '</div>';
   }
 
   /**

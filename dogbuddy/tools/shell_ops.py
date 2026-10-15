@@ -3,7 +3,11 @@
 """shell tool: run commands in the workspace, foreground or background.
 
   - foreground: merged stdout/stderr capture, hard timeout kills the process
-    group (started in its own session), output truncated to 20000 chars
+    group (started in its own session), output bounded to head+tail
+    (v0.10.20: 20000-char hard truncation dumped the *head* of huge listings
+    like a full PyPI index into context for ~5-7k tokens of noise; now the
+    default is 8000 chars head+tail with an omission marker, overridable
+    per call via max_output_chars)
   - background: returns immediately with the pid and registers the subprocess
     on ctx.extra["bg_processes"] for later inspection/reaping
 """
@@ -15,11 +19,11 @@ import os
 import signal
 from typing import Any
 
+from .bound_output import (DEFAULT_MAX_CHARS, bound_output)
 from .registry import ToolContext, ToolResult
 
 logger = logging.getLogger("dogbuddy.tools.shell")
 
-MAX_OUTPUT_CHARS = 20000
 DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 3600
 
@@ -96,7 +100,9 @@ class ShellTool:
     name = "shell"
     description = (
         "Run a shell command with the workspace as working directory. stdout and "
-        "stderr are merged and truncated to 20000 characters. The command is "
+        "stderr are merged and bounded to head+tail (default 8000 chars, with an "
+        "omission marker telling you how much was skipped and how to page: "
+        "sed -n/grep/head/tail, or raise max_output_chars). The command is "
         "killed after `timeout` seconds (default 60). Set background=true to "
         "start the command without waiting; the pid is returned and the process "
         "is tracked in ctx.extra['bg_processes']."
@@ -111,6 +117,13 @@ class ShellTool:
             "timeout": {
                 "type": "integer",
                 "description": "Seconds to wait before killing the process (default 60).",
+            },
+            "max_output_chars": {
+                "type": "integer",
+                "description": (
+                    f"Output size cap in characters (default {DEFAULT_MAX_CHARS}). "
+                    "Output is kept as head+tail with an omission marker; raise this "
+                    "only when you really need more of a large output."),
             },
             "background": {
                 "type": "boolean",
@@ -129,16 +142,30 @@ class ShellTool:
             command = str(command)
             timeout = _to_int(args.get("timeout"), DEFAULT_TIMEOUT)
             timeout = max(1, min(timeout, MAX_TIMEOUT))
+            max_out = max(1, _to_int(args.get("max_output_chars"), DEFAULT_MAX_CHARS))
             background = _to_bool(args.get("background"), False)
             cwd = str(ctx.workspace)
 
             # T7.4：shell 是绕过文件边界的缝——越界必须走 ELEVATED + 留痕
-            from .shell_guard import analyze_command, is_elevated, refusal_message
+            from .shell_guard import (ERROR_CODES, analyze_command,
+                                      dynamic_notes, is_elevated,
+                                      refusal_message)
             risks = analyze_command(command, cwd)
+            # v0.10.20：他语言内联代码 / 循环体内的不可判定构造 → 放行 + 留痕
+            # （不拒绝：静态拦 shell 文本但放 .py 文件执行 = 纯噪音，还把工人
+            # 逼去写脚本文件绕行——圆桌测试里正是这么逃逸的）
+            notes = dynamic_notes(command)
+            audit = getattr(ctx, "db", None)
+            elevated = is_elevated(ctx)
+            actor = getattr(ctx, "actor", "worker")
+            if notes and audit is not None:
+                try:
+                    audit.audit(actor, "shell:dynamic-allowed",
+                                f"cmd={command[:200]} notes="
+                                f"{[n['reason'] for n in notes]}")
+                except Exception:  # noqa: BLE001 — 留痕失败不能反过来挡住判断
+                    logger.warning("dynamic audit failed", exc_info=True)
             if risks:
-                audit = getattr(ctx, "db", None)
-                elevated = is_elevated(ctx)
-                actor = getattr(ctx, "actor", "worker")
                 detail = (f"elevated={elevated} trust={((ctx.extra or {}).get('trust') or '')} "
                           f"cmd={command[:200]} risks="
                           f"{[r['reason'] for r in risks]}")
@@ -149,8 +176,15 @@ class ShellTool:
                         logger.warning("boundary audit failed", exc_info=True)
                 if not elevated:
                     logger.warning("shell boundary refused: %s", [r["reason"] for r in risks])
-                    return ToolResult.failure(refusal_message(risks, cwd),
-                                              boundary=True, risks=risks)
+                    # v0.10.20：单行 + 错误码；同一轮对话同一错误码只完整说明一次
+                    # （5 行长文每次被拦都喂回上下文，烧 token 又被压缩摘要继承）
+                    codes = {ERROR_CODES.get(r["kind"], "E_BOUNDARY") for r in risks}
+                    shown = ctx.extra.setdefault("boundary_codes_shown", set())
+                    first_time = bool(codes - shown)
+                    shown |= codes
+                    return ToolResult.failure(
+                        refusal_message(risks, cwd, first_time=first_time),
+                        boundary=True, risks=risks, error_code=sorted(codes))
                 logger.info("shell boundary allowed (elevated): %s",
                             [r["reason"] for r in risks])
 
@@ -186,18 +220,15 @@ class ShellTool:
                 except Exception:  # noqa: BLE001
                     out_bytes = b""
                 output = (out_bytes or b"").decode("utf-8", errors="replace")
-                if len(output) > MAX_OUTPUT_CHARS:
-                    output = output[:MAX_OUTPUT_CHARS] + "\n...[output truncated]"
+                output, stats = bound_output(output, max_chars=max_out)
                 suffix = f"\n{output}" if output.strip() else ""
                 return ToolResult.failure(
                     f"timeout: command killed after {timeout}s: {command}{suffix}",
-                    timeout=True,
-                )
+                    timeout=True, **stats)
 
             output = (out_bytes or b"").decode("utf-8", errors="replace")
-            if len(output) > MAX_OUTPUT_CHARS:
-                output = output[:MAX_OUTPUT_CHARS] + "\n...[output truncated]"
-            return ToolResult.success(output, returncode=proc.returncode)
+            output, stats = bound_output(output, max_chars=max_out)
+            return ToolResult.success(output, returncode=proc.returncode, **stats)
         except Exception as e:  # noqa: BLE001
             logger.warning("shell failed", exc_info=True)
             return ToolResult.failure(f"shell failed: {e}")

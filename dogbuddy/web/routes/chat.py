@@ -155,6 +155,15 @@ def router(svc, auth_deps) -> APIRouter:
         except Exception:  # noqa: BLE001
             pass
         ratio = (used / max_tokens) if max_tokens else 0.0
+        # v0.10.20：缓存命中（owner 要在控制台看"缓存命中"——provider 一直给
+        # 这些字段，只是从来没人解析）。没拿过缓存字段时全 0，前端不显示那一行。
+        cache = {"cache_hit_tokens": 0, "cache_miss_tokens": 0, "cache_hit_ratio": 0.0}
+        try:
+            stats = getattr(session, "cache_stats", None)
+            if callable(stats):
+                cache = stats()
+        except Exception:  # noqa: BLE001 — 用量条降级，绝不 500
+            pass
         # 管理员的模型 = 运行时全局配置（管理员没有工位，所以在"模型管理"页点「设为当前」
         # 就是给管理员换模型；工位不单独指定模型时继承它）
         cur_model = str(getattr(llm, "model", "") or "")
@@ -169,7 +178,10 @@ def router(svc, auth_deps) -> APIRouter:
                 "model": cur_model,
                 "base_url": cur_base,
                 "provider": cur_provider,
-                "estimated": bool(getattr(session, "context_tokens_estimated", True))}
+                "estimated": bool(getattr(session, "context_tokens_estimated", True)),
+                "cache_hit_tokens": cache.get("cache_hit_tokens", 0),
+                "cache_miss_tokens": cache.get("cache_miss_tokens", 0),
+                "cache_hit_ratio": cache.get("cache_hit_ratio", 0.0)}
 
     @r.post("/admin/chat", dependencies=auth_deps)
     async def chat(body: ChatIn) -> dict:

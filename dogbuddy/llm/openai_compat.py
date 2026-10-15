@@ -219,6 +219,13 @@ def _usage_dict(usage: dict[str, Any]) -> dict[str, Any]:
     `prompt_tokens_details`, `completion_tokens_details`, cached/reasoning
     counters, …). A blind `int(v)` blew up the first real turn with
     "int() argument must be ... not 'dict'".
+
+    v0.10.20 缓存命中规范化：provider 一直把这些字段**原样带回**，但从来没人
+    解析（owner 要在控制台看"缓存命中"）。两种形状统一成顶层
+    `cache_hit_tokens` / `cache_miss_tokens`：
+      - DeepSeek：顶层 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
+      - OpenAI 风格：`prompt_tokens_details.cached_tokens`（miss = prompt - hit）
+    原始嵌套对象仍然保留（`out[key] = value`），不影响别的消费者。
     """
     out: dict[str, Any] = {}
     for key, value in (usage or {}).items():
@@ -230,4 +237,24 @@ def _usage_dict(usage: dict[str, Any]) -> dict[str, Any]:
             out[key] = int(value)
         else:
             out[key] = value  # keep nested detail objects as-is
+
+    def _num(v: Any) -> int | None:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return int(v)
+        return None
+
+    hit = _num(out.get("prompt_cache_hit_tokens"))
+    miss = _num(out.get("prompt_cache_miss_tokens"))
+    details = out.get("prompt_tokens_details")
+    if hit is None and isinstance(details, dict):
+        hit = _num(details.get("cached_tokens"))
+    if hit is not None:
+        out["cache_hit_tokens"] = hit
+        if miss is None:
+            prompt = _num(out.get("prompt_tokens"))
+            miss = max(0, prompt - hit) if prompt is not None else 0
+    if miss is not None:
+        out["cache_miss_tokens"] = miss
     return out
