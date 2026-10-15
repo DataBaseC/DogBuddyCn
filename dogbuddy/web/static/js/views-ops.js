@@ -85,7 +85,8 @@
           '<td><span class="badge badge-grey mono">' + U.esc(j.schedule || '—') + '</span>' +
           '<div class="tiny muted" style="margin-top:3px">' + U.esc(j.schedule_type || '') + '</div></td>' +
           '<td><span class="badge badge-blue">' + U.esc(j.report_strategy || 'brief') + '</span></td>' +
-          '<td><label class="switch"><input type="checkbox" data-toggle="' + U.esc(j.id) + '"' +
+          '<td><label class="switch" title="' + (j.enabled ? '点一下停用这个任务' : '点一下启用这个任务') + '">' +
+          '<input type="checkbox" data-toggle="' + U.esc(j.id) + '"' +
           (j.enabled ? ' checked' : '') + '><i></i></label></td>' +
           '<td><span class="countdown' + (isSoon ? ' soon' : '') + '" data-countdown="' + U.esc(j.next_run_at) + '">' +
           U.esc(U.countdown(j.next_run_at)) + '</span></td>' +

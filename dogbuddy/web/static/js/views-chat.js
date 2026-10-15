@@ -12,7 +12,10 @@
   /* v9（v2 口径）：只有一个管理员与用户对接；用户可以开多个对话，
      每个对话是一份独立上下文。`sender` 字段保留为"对话 id"（后端同名）。 */
   var state = { sender: 'default', messages: [], admins: [], conversations: [],
-                llmOk: true, sending: false };
+                llmOk: true, sending: false, streamText: '' };
+
+  /** 打字机缓冲：本次发送正在流式输出的文本（按对话隔离，切换对话就丢弃） */
+  var stream = { conv: '', text: '', active: false };
 
   function sender() {
     try { return global.localStorage.getItem(SENDER_KEY) || 'default'; } catch (e) { return 'default'; }
@@ -143,7 +146,7 @@
   function render() {
     var log = U.$('#chat-log');
     if (!log) return;
-    if (!state.messages.length) {
+    if (!state.messages.length && !stream.active) {
       log.innerHTML = U.empty({
         art: 'chat',
         title: state.llmOk ? '还没有对话' : 'LLM 尚未配置',
@@ -154,7 +157,40 @@
       return;
     }
     log.innerHTML = state.messages.map(bubble).join('');
+    renderStream();
     log.scrollTop = log.scrollHeight;
+  }
+
+  /* ---------------- 打字机（SSE admin.stream） ----------------
+     管理员以前没有 on_delta（只有工位有 window.stream），所以控制台上永远是
+     "发送中… → 整段蹦出来"。现在按对话收 admin.stream，边收边渲染。 */
+  function renderStream() {
+    var log = U.$('#chat-log');
+    if (!log) return;
+    var node = U.$('#chat-stream-bubble');
+    if (!stream.active || !stream.text) {
+      if (node && node.parentNode) node.parentNode.removeChild(node);
+      return;
+    }
+    var html = '<div class="chat-msg chat-bot" id="chat-stream-bubble">' +
+      '<div class="chat-meta"><span class="chat-who">管理员</span>' +
+      '<span class="chat-time">正在输入…</span></div>' +
+      '<div class="chat-body">' + U.esc(stream.text).replace(/\n/g, '<br>') +
+      '<span class="stream-caret"></span></div></div>';
+    if (node) node.outerHTML = html;
+    else log.insertAdjacentHTML('beforeend', html);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function onStream(payload) {
+    payload = payload || {};
+    if (String(payload.conversation || '') !== String(state.sender)) return;  // 别的对话，不串屏
+    if (payload.delta === undefined || payload.delta === null) return;
+    if (!global.SSE || !global.SSE.state || !global.SSE.state.connected) return;
+    stream.active = true;
+    stream.conv = state.sender;
+    stream.text += String(payload.delta);
+    renderStream();
   }
 
   function setBusy(on) {
@@ -206,16 +242,21 @@
     /* 乐观追加用户气泡，失败时回滚 */
     var optimistic = { id: 'pending', role: 'user', content: text, created_at: new Date().toISOString() };
     state.messages.push(optimistic);
+    stream.active = true;                 // 立刻出现"正在输入…"气泡，等第一个 delta
+    stream.conv = state.sender;
+    stream.text = '';
     render();
     ta.value = '';
     setBusy(true);
 
     A.adminChat(text, state.sender).then(function (res) {
+      stream.active = false; stream.text = '';   // 整段回复到手 → 收起流式气泡，渲染正式消息
       state.messages = (res && res.messages) || state.messages;
       setBusy(false);
       render();
       refreshUsage(state.sender);
     }).catch(function (e) {
+      stream.active = false; stream.text = '';
       state.messages = state.messages.filter(function (m) { return m !== optimistic; });
       var msg = (e && e.message) ? e.message : String(e);
       setBusy(false);
@@ -247,6 +288,9 @@
   function bind() {
     if (bound) return;
     bound = true;
+
+    /* SSE：管理员打字机（admin.stream） */
+    if (global.SSE && global.SSE.on) global.SSE.on('admin.stream', onStream);
 
     var form = U.$('#chat-send');
     if (form) form.addEventListener('click', send);

@@ -25,6 +25,9 @@ CONFIRM_REQUEST = "confirm.request"
 WINDOW_STATUS = "window.status"
 RATE_LIMIT_STATUS = "rate_limit.status"
 USER_MESSAGE = "user.message"
+#: 管理员对话的打字机流（管理员没有工位，不能复用 window.stream）。
+#: payload: {conversation, delta} —— 前端按 conversation 过滤，多对话不串屏。
+ADMIN_STREAM = "admin.stream"
 
 
 @dataclass

@@ -321,8 +321,50 @@ class AdminService:
             max_iterations=self.max_iterations)
         # 多对话时不要把发送者前缀塞进提示词（v2 只有一个管理员，前缀只会干扰）
         prompt = text if sender == self.DEFAULT_CONVERSATION else (text or "")
-        result = await loop.run(prompt, ctx)
+
+        # v0.10.13 打字机：管理员以前**没有** on_delta（只有工位有 window.stream），
+        # 所以控制台上永远是"转圈→整段蹦出来"。这里按对话发 admin.stream 事件；
+        # 60ms 合并一次，避免每个 token 一帧把 SSE 队列（500）刷爆。
+        on_delta = self._delta_emitter(sender)
+        try:
+            result = await loop.run(prompt, ctx, on_delta=on_delta)
+        finally:
+            # 收尾：把不足 60ms 的尾巴也发出去，否则界面上会少最后几个字
+            if on_delta is not None:
+                on_delta.flush()
         return result.content or "(no reply)"
+
+    def _delta_emitter(self, sender: str):
+        """把 LLM 增量合并成 admin.stream 事件（没有 bus 时返回 None）。"""
+        if self.bus is None:
+            return None
+        import time
+
+        from ..events.bus import ADMIN_STREAM, Event
+        buf: list[str] = []
+        last = [0.0]
+
+        def flush() -> None:
+            if not buf:
+                return
+            text = "".join(buf)
+            buf.clear()
+            last[0] = time.monotonic()
+            try:
+                self.bus.emit(Event(type=ADMIN_STREAM,
+                                    payload={"conversation": sender, "delta": text}))
+            except Exception:  # noqa: BLE001 — 打字机坏了也不能影响对话本身
+                logger.debug("admin stream emit failed", exc_info=True)
+
+        def on_delta(delta: str) -> None:
+            if not delta:
+                return
+            buf.append(str(delta))
+            if time.monotonic() - last[0] >= 0.06:
+                flush()
+
+        on_delta.flush = flush  # type: ignore[attr-defined]  # 收尾时把尾巴也发出去
+        return on_delta
 
     async def notify(self, text: str) -> str:
         """Push an internal notification into the system admin session and get its reply."""
