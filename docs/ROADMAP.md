@@ -880,3 +880,35 @@ tester-1: 全量  58 条 | limit= 60 段首=user 孤儿开头=False 内部断裂
   `ADMIN_TOOLS` 同步补上两个新名字（不变量测试会拦）。
 - 向导保存凭据后自动 `adopt-current`：填的模型立刻进目录 ——"配置里的模型"和
   "模型页里的模型"不再有两套说法。
+
+---
+
+## 16. 第九轮：函数定义非法导致的 400（切到 DeepSeek 才暴露）（`0.10.18`）
+
+owner 报：
+
+> `[LLM error/permanent] ... Invalid schema for function 'approve_decision':
+>  true is not of type "array"` —— 你这 deepseek 预设不对啊
+
+**不是预设不对，是我们发出去的函数定义非法。** `_p()` 把 `required` 当**布尔**塞进属性里：
+
+```json
+"properties": {"decision_id": {"type": "integer", "description": "...", "required": true}}
+```
+
+JSON Schema 里 `required` 只能是**字符串数组**。SiliconFlow / Sensenova 不校验，
+所以一直没暴露；切到 **DeepSeek**（严格校验整轮 `tools`）立刻 400，而报错指向工具名，
+看起来就像"模型配置不对"。
+
+修法：
+- `_p()` 改用内部标记 `_required`，由 `_props()` 收走并生成顶层字符串数组；线上定义里
+  再也不会出现属性级布尔 `required`。
+- 新增 `dogbuddy/tools/schema_check.py`：`schema_problems()` 递归校验（顶层 object、
+  `required` 是数组且已声明、属性不许带布尔 `required`/内部标记、array 必须有 items、
+  enum 是数组、type 合法…）。**注册时**每个工具都会自检并记 error 日志（不抛，避免起不来）。
+- `tests/test_tool_schemas_valid.py`：把**所有注册表**（admin/management/supervisor/
+  worker/generic，共 194 个定义）过一遍校验器，并专门钉住这次的具体形状；
+  另有一条测试证明校验器能复现原故障（免得测试变成永远为真的摆设）。
+
+教训：**别把"服务商特定的严格性"当成"用户配置问题"** —— 报错里的工具名和
+`true is not of type "array"` 已经指得很清楚了。

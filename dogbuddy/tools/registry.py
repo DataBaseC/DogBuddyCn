@@ -125,6 +125,13 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         if tool.name in self._tools:
             raise ValueError(f"tool already registered: {tool.name}")
+        # v0.10.18：函数定义会原样发给服务商。形状不合法（例如属性里的布尔 required）
+        # 会被严格的服务商整轮 400，而且报错指向工具名、看起来像"模型配置不对"。
+        try:
+            from .schema_check import audit_tool_schema
+            audit_tool_schema(tool.name, getattr(tool, "parameters", {}))
+        except Exception:  # noqa: BLE001 — 自检绝不能挡住注册
+            logger.debug("tool schema audit failed for %s", tool.name, exc_info=True)
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> Tool | None:

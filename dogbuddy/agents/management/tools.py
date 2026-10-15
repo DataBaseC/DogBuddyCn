@@ -96,13 +96,22 @@ _OBJ = {"type": "object", "properties": {}}
 
 
 def _props(**kw: Any) -> dict[str, Any]:
-    return {"type": "object", "properties": kw, "required": [k for k, v in kw.items() if v.get("required")]}
+    """工具参数对象。
+
+    `_p(..., required=True)` 只是给这里用的**标记**，必须在这里摘掉——
+    属性里的 `"required": true` 是**非法 JSON Schema**，而 DeepSeek 会严格校验整轮
+    函数定义，直接 400（owner 实测）：
+      Invalid schema for function 'approve_decision': true is not of type "array"
+    """
+    required = [k for k, v in kw.items() if v.pop("_required", False)]
+    return {"type": "object", "properties": kw, "required": required}
 
 
 def _p(t: str, desc: str, required: bool = False, **extra: Any) -> dict[str, Any]:
-    d = {"type": t, "description": desc}
+    d: dict[str, Any] = {"type": t, "description": desc}
     d.update(extra)
-    d["required"] = required
+    if required:
+        d["_required"] = True     # 由 _props 收走；绝不发到线上
     return d
 
 
