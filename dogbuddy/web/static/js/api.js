@@ -226,6 +226,10 @@
       remove: function (id) { return request('DELETE', '/api/models/' + enc(id)); },
       /* POST /api/models/{id}/activate → 写运行时配置并落盘（换模型） */
       activate: function (id) { return request('POST', '/api/models/' + enc(id) + '/activate'); },
+      /* POST /api/models/adopt-current → 把正在运行的模型收进目录 */
+      adoptCurrent: function () { return request('POST', '/api/models/adopt-current'); },
+      /* GET /api/models/verify-current → 当前模型在不在服务商返回的列表里 */
+      verifyCurrent: function () { return request('GET', '/api/models/verify-current'); },
       /* POST /api/models/import {provider,base_url,api_key} → 拉取列表批量入库 */
       import: function (body) { return request('POST', '/api/models/import', body || {}); }
     },

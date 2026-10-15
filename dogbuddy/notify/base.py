@@ -11,8 +11,9 @@ are skipped with a warning so a bad config never blocks startup.
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
+from .chat import ChatNotifier
 from .console import ConsoleNotifier
 from .gateway import GatewayNotifier, resolve_push_target
 from .webhook import WebhookNotifier
@@ -23,6 +24,7 @@ __all__ = [
     "Notifier",
     "build_notifiers",
     "ConsoleNotifier",
+    "ChatNotifier",
     "WebhookNotifier",
     "GatewayNotifier",
 ]
@@ -51,10 +53,13 @@ def build_notifiers(
     notify_cfg: Any,
     gateway_adapter: Any = None,
     gateway_default_target: dict[str, Any] | None = None,
+    chat_sink: Callable[[str], Any] | None = None,
 ) -> list[Notifier]:
     """Build the enabled channels from ``NotifyConfig.channels``.
 
     - channels empty (or cfg missing) → a single ``console`` channel.
+    - ``chat_sink`` 非空时，console 渠道用 `ChatNotifier`（写进用户对话流，控制台可见）；
+      为空时退回只写日志的 `ConsoleNotifier`（测试/嵌入式场景）。
     - ``channel.name`` defaults to its ``type``; duplicate names get a numeric
       suffix (``webhook``, ``webhook-2``, ...) so per-job routing stays unique.
     - ``gateway`` channels need ``gateway_adapter`` (a BaseAdapter); their
@@ -64,9 +69,13 @@ def build_notifiers(
     - invalid / under-provisioned / disabled channels are skipped with a
       ``logger.warning`` — never raise.
     """
+    def _console(name: str):
+        return ChatNotifier(chat_sink, name=name) if chat_sink is not None \
+            else ConsoleNotifier(name=name)
+
     channels = list(getattr(notify_cfg, "channels", None) or [])
     if not channels:
-        return [ConsoleNotifier(name="console")]
+        return [_console("console")]
 
     notifiers: list[Notifier] = []
     taken: set[str] = set()
@@ -80,7 +89,7 @@ def build_notifiers(
             base_name = str(getattr(ch, "name", "") or "").strip() or ctype
 
             if ctype == "console":
-                notifiers.append(ConsoleNotifier(name=_dedupe_name(base_name, taken)))
+                notifiers.append(_console(_dedupe_name(base_name, taken)))
             elif ctype == "webhook":
                 url = str(getattr(ch, "url", "") or "").strip()
                 if not url:

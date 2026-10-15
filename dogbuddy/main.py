@@ -171,7 +171,11 @@ class DogBuddyApp:
         # 没有这一步，`worker.report`/`supervisor.command` 在生产路径上**无人投递**：
         # 处理器与单测都是好的，但功能从不发生。
         self.admin.set_supervision(self.supervision)
-        self.notifiers = build_notifiers(config.notify, self.adapter, config.gateway.push_target)
+        # v0.10.14：console 渠道不再只写日志——汇报要**写进用户的对话流**，
+        # 否则"员工干完活逐级汇报"用户永远看不见（他要看的是控制台，不是日志）。
+        self.notifiers = build_notifiers(config.notify, self.adapter,
+                                         config.gateway.push_target,
+                                         chat_sink=self.admin.notify_user)
         # worker questions / confirm requests must reach the admin conversation:
         # in v1.3 `AdminService.notify()` was never called, so a worker could ask
         # and nobody would ever answer. The admin decides what to do with them.

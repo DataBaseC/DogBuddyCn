@@ -28,6 +28,9 @@ USER_MESSAGE = "user.message"
 #: 管理员对话的打字机流（管理员没有工位，不能复用 window.stream）。
 #: payload: {conversation, delta} —— 前端按 conversation 过滤，多对话不串屏。
 ADMIN_STREAM = "admin.stream"
+#: 管理员/系统**写进用户对话流**的汇报（控制台即时追加一条消息）
+#: payload: {conversation, text, message_id, created_at}
+ADMIN_NOTICE = "admin.notice"
 
 
 @dataclass

@@ -113,6 +113,21 @@ def router(svc, auth_deps) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"result": result, "current": m.current()}
 
+    @r.post("/models/adopt-current", dependencies=auth_deps)
+    def adopt_current() -> dict:
+        """把正在运行的模型收进目录（页面上看不到它时的一键补救）。"""
+        m = _m()
+        try:
+            saved = m.adopt_current()
+        except (ValueError, RuntimeError) as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"model": saved, "models": m.catalog(), "summary": m.summary()}
+
+    @r.get("/models/verify-current", dependencies=auth_deps)
+    async def verify_current() -> dict:
+        """当前模型真的在服务商列表里吗（拼错/下线会静默 400）。"""
+        return await _m().verify_current()
+
     @r.post("/models/import", dependencies=auth_deps)
     async def import_models(body: ImportIn) -> dict:
         """从 provider 拉取模型列表批量入库（已存在的保留用户备注）。"""

@@ -581,6 +581,10 @@
       remove: function (id) { return request('DELETE', '/api/models/' + enc(id)); },
       /* POST /api/models/{id}/activate → 写运行时配置并落盘（换模型） */
       activate: function (id) { return request('POST', '/api/models/' + enc(id) + '/activate'); },
+      /* POST /api/models/adopt-current → 把正在运行的模型收进目录 */
+      adoptCurrent: function () { return request('POST', '/api/models/adopt-current'); },
+      /* GET /api/models/verify-current → 当前模型在不在服务商返回的列表里 */
+      verifyCurrent: function () { return request('GET', '/api/models/verify-current'); },
       /* POST /api/models/import {provider,base_url,api_key} → 拉取列表批量入库 */
       import: function (body) { return request('POST', '/api/models/import', body || {}); }
     },
@@ -2032,6 +2036,25 @@
     });
   }
 
+  function onNotice(payload) {
+    payload = payload || {};
+    var text = String(payload.text || '');
+    if (!text) return;
+    if (String(payload.conversation || '') !== String(state.sender)) {
+      /* 汇报落在另一个对话里：提示一下，别让人以为没发生 */
+      U.toast('info', '管理员有新汇报（在另一个对话里）');
+      return;
+    }
+    state.messages.push({
+      id: payload.message_id || ('notice-' + Date.now()),
+      role: 'assistant', content: text,
+      created_at: payload.created_at || new Date().toISOString(),
+      meta: { notice: true }
+    });
+    render();
+    refreshUsage(state.sender);
+  }
+
   /* ---------------- 渲染 ---------------- */
   function renderSenders() {
     var sel = U.$('#chat-sender');
@@ -2259,8 +2282,11 @@
     if (bound) return;
     bound = true;
 
-    /* SSE：管理员打字机（admin.stream） */
-    if (global.SSE && global.SSE.on) global.SSE.on('admin.stream', onStream);
+    /* SSE：管理员打字机（admin.stream）+ 员工汇报写入对话流（admin.notice） */
+    if (global.SSE && global.SSE.on) {
+      global.SSE.on('admin.stream', onStream);
+      global.SSE.on('admin.notice', onNotice);
+    }
 
     var form = U.$('#chat-send');
     if (form) form.addEventListener('click', send);
@@ -4720,8 +4746,17 @@
       '<span class="card-sub">上下文 ' + U.esc(String(c.max_context_tokens || 0)) + ' tokens</span>' +
       '<span class="card-sub">活跃配置套 ' + U.esc(c.active_profile || '(默认)') + '</span>' +
       '</div>' +
+      ((state.summary && state.summary.current_in_catalog === false)
+        ? '<div class="card-sub" style="margin-top:6px;color:var(--warn)">' +
+          '⚠️ 这个模型**不在下面的目录里** —— 页面上看不到它、也没法写备注。' +
+          '<button class="btn btn-soft btn-sm" data-mdl="adopt-current" style="margin-left:8px">把当前模型纳入目录</button>' +
+          '</div>'
+        : '') +
       '<div class="card-sub" style="margin-top:6px">下面对话那头（管理员）用的就是这条模型；' +
-      '工位没有单独指定模型时也继承它。点某一行的「设为管理员模型」即可切换。</div>' +
+      '工位没有单独指定模型时也继承它。点某一行的「设为管理员模型」即可切换。' +
+      '<button class="btn btn-soft btn-sm" data-mdl="verify-current" style="margin-left:8px">' +
+      '校验它在服务商列表里</button></div>' +
+      '<div class="card-sub" id="mdl-verify-out" style="margin-top:4px"></div>' +
       '</div>';
   }
 
@@ -4822,7 +4857,14 @@
         state.options = res[1] || {};
         renderSummary();
         var cur = U.$('#mdl-current');
-        if (cur) cur.innerHTML = curLine();
+        if (cur) {
+          cur.innerHTML = curLine();
+          U.$$('[data-mdl]', cur).forEach(function (b) {
+            b.addEventListener('click', function () {
+              action(b.getAttribute('data-mdl'), b.getAttribute('data-id'));
+            });
+          });
+        }
         render();
       }).catch(function (e) {
         U.toast('error', '加载模型目录失败：' + (e && e.message ? e.message : e));
@@ -4830,6 +4872,28 @@
   }
 
   function action(kind, id) {
+    if (kind === 'adopt-current') {
+      A.models.adoptCurrent().then(function (r) {
+        U.toast('success', '已把当前模型纳入目录：' + ((r.model && r.model.model) || ''));
+        return load();
+      }).catch(function (e) { U.toast('error', '纳入失败：' + e.message); });
+      return;
+    }
+    if (kind === 'verify-current') {
+      var out = U.$('#mdl-verify-out');
+      if (out) out.textContent = '正在向服务商校验…';
+      A.models.verifyCurrent().then(function (r) {
+        if (!out) return;
+        if (r.error) { out.textContent = '校验失败：' + r.error; return; }
+        out.innerHTML = r.in_provider_list
+          ? '<span style="color:var(--ok)">✅ 服务商列表里有这个模型</span>（共 ' + r.model_count + ' 个模型）'
+          : '<span style="color:var(--danger)">❌ 服务商列表里**没有** ' + U.esc(r.model) + '</span>' +
+            (r.similar && r.similar.length
+              ? '（相近的：' + r.similar.map(U.esc).join('、') + '）'
+              : '（共 ' + r.model_count + ' 个模型；可能是拼错或已下线）');
+      }).catch(function (e) { if (out) out.textContent = '校验失败：' + e.message; });
+      return;
+    }
     var m = state.models.filter(function (x) { return x.id === id; })[0];
     if (!m) return;
     if (kind === 'note') return editModel(m, true);

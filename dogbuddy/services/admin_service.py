@@ -366,6 +366,38 @@ class AdminService:
         on_delta.flush = flush  # type: ignore[attr-defined]  # 收尾时把尾巴也发出去
         return on_delta
 
+    async def notify_user(self, text: str, conversation: str = "") -> dict[str, Any]:
+        """把一条汇报**写进用户的对话流**（控制台里看得见），并推一条 SSE。
+
+        为什么不是走 `notify()`：`notify()` 是"让管理员自己读一条系统事件"，它的回复
+        落在 `admin:system` 会话里，用户在控制台看不到。汇报要出现在**他正在看的对话**里。
+
+        目标对话：显式指定 > 最近有活动的那个（`conversations.last_message_at`）> default。
+        """
+        text = str(text or "").strip()
+        if not text:
+            return {}
+        conv = conversation
+        if not conv:
+            try:
+                rows = [c for c in self.db.list_conversations() if c.get("id") != "system"]
+                conv = str(rows[0]["id"]) if rows else self.DEFAULT_CONVERSATION
+            except Exception:  # noqa: BLE001 — 取不到就用默认对话
+                logger.warning("pick report conversation failed", exc_info=True)
+                conv = self.DEFAULT_CONVERSATION
+        session = self.session_for(conv)
+        msg = session.append("assistant", text, meta={"notice": True, "source": "report"})
+        payload = {"conversation": conv, "text": text, "message_id": getattr(msg, "id", None),
+                   "created_at": getattr(msg, "created_at", "")}
+        if self.bus is not None:
+            try:
+                from ..events.bus import ADMIN_NOTICE, Event
+                self.bus.emit(Event(type=ADMIN_NOTICE, payload=payload))
+            except Exception:  # noqa: BLE001 — 推送失败不影响落库
+                logger.debug("admin.notice emit failed", exc_info=True)
+        self.db.audit("system", "admin:report_to_user", f"conversation={conv} len={len(text)}")
+        return payload
+
     async def notify(self, text: str) -> str:
         """Push an internal notification into the system admin session and get its reply."""
         session = self.session_for("system")

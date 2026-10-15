@@ -19,7 +19,8 @@ from ..agents.core.roles import get_role
 from ..agents.core.runners import RunnerRegistry, RunnerResult, TaskEnv, default_runners
 from ..agents.worker_programmer.tools import build_worker_registry
 from ..cron.scheduler import JobOutcome
-from ..events.bus import CONFIRM_REQUEST, WINDOW_STATUS, WORKER_QUESTION, Event
+from ..events.bus import (CONFIRM_REQUEST, JOB_COMPLETED, JOB_FAILED, WINDOW_STATUS,
+                            WORKER_QUESTION, Event)
 from ..ports import Window
 from ..tools.registry import ToolContext
 from ..windows.compactor import Compactor
@@ -523,6 +524,33 @@ class WindowManager:
         return float(self.CRON_WAIT_TIMEOUT)
 
 
+    def _report_manual_run(self, w: Any, task: Any, result: Any) -> None:
+        """人工派单跑完 → 发一条完成/失败事件，让汇报链（→主管→管理员→用户）动起来。
+
+        定时任务不发（调度器自己发，发了就重复）。
+        """
+        if not self.bus or getattr(task, "job_id", None):
+            return
+        if str(getattr(task, "kind", "prompt") or "prompt") != "prompt":
+            return
+        status = _run_status(result)
+        summary = (getattr(result, "summary", "") or "")[:1500]
+        payload = {
+            "job_id": "",
+            "window_id": w.id,
+            "window_name": w.name,
+            "name": w.name,
+            "summary": summary,
+            "prompt": str(getattr(task, "prompt", ""))[:200],
+            "report_strategy": "brief",     # 用户要的就是"简短汇报"
+            "manual": True,
+        }
+        if status == "ok":
+            self.bus.emit(Event(type=JOB_COMPLETED, payload=payload))
+        elif status in ("failed", "rate_limited"):
+            payload["auto_paused"] = False
+            self.bus.emit(Event(type=JOB_FAILED, payload=payload))
+
     def dispatch_manual(self, window_id: str, prompt: str) -> None:
         """Manual (human-initiated) run — head-of-queue, fire-and-forget."""
         self.dispatch(window_id, prompt, urgent=True)
@@ -634,6 +662,13 @@ class WindowManager:
                 rt.current_task_label = ""
                 self._set_status(w.id, "idle")
         rt.last_output = result.summary
+
+        # v0.10.14：**人工/对话派给员工的活跑完也要汇报**。
+        # 以前只有 cron 调度器发 `job.completed`，于是"让两个员工做测试"这种
+        # 对话派单跑完后，管理员那边什么都不知道，用户也就永远等不到汇报
+        # （owner 原话："两个员工测试完成后，管理员没有向用户做简短汇报"）。
+        # 定时任务那一侧由调度器发（task.job_id 非空），这里只补人工那条，避免重复。
+        self._report_manual_run(w, task, result)
 
         if result.pending_questions and self.bus:
             for q in result.pending_questions:

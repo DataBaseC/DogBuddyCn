@@ -180,3 +180,54 @@ def test_frontend_has_the_one_form_onboarding_path():
         assert hook in js, f"模型页缺少接入要素：{hook}"
     html = (REPO / "dogbuddy/web/static/index.html").read_text(encoding="utf-8")
     assert 'id="mdl-add"' in html and 'id="mdl-import"' in html
+
+
+# ------------------------------------------------- 当前模型与目录/服务商的一致性
+def test_adopt_current_registers_the_running_model(tmp_path, monkeypatch):
+    """owner 看到"管理员在用一个列表里没有的模型"：一键把它收进目录。"""
+    app = _app(tmp_path, monkeypatch)
+    app.config.llm.model = "zai-org/GLM-5.3-Flash"
+    app.config.llm.base_url = "https://api.siliconflow.cn/v1"
+    with TestClient(app.web_app) as client:
+        client.headers["X-Auth-Token"] = TOKEN
+        before = client.get("/api/models").json()
+        assert before["summary"]["current_in_catalog"] is False
+        r = client.post("/api/models/adopt-current")
+        assert r.status_code == 200, r.text
+        after = client.get("/api/models").json()
+        assert after["summary"]["current_in_catalog"] is True
+        row = [m for m in after["models"] if m["model"] == "zai-org/GLM-5.3-Flash"][0]
+        assert row["base_url"] == "https://api.siliconflow.cn/v1"
+        assert row["has_api_key"] is False          # 不复制密钥，继续用全局那把
+        assert row["api_key"] == ""
+        # 幂等：再点一次不会又加一条
+        again = client.post("/api/models/adopt-current").json()
+        assert len(again["models"]) == len(after["models"])
+
+
+def test_verify_current_reports_membership(tmp_path, monkeypatch):
+    app = _app(tmp_path, monkeypatch)
+    app.config.llm.model = "vendor/typo-model"
+
+    async def fake_meta(provider=None, base_url=None, api_key=None):
+        return [{"id": "vendor/typo-model-2", "context_window": 0},
+                {"id": "other/model", "context_window": 0}]
+
+    # ModelService 在构造时就抓住了 fetch_meta 引用 → 要替换它自己那个属性
+    monkeypatch.setattr(app.models, "_fetch_meta", fake_meta)
+    with TestClient(app.web_app) as client:
+        client.headers["X-Auth-Token"] = TOKEN
+        r = client.get("/api/models/verify-current").json()
+        assert r["in_provider_list"] is False and r["model_count"] == 2
+        assert r["similar"] == ["vendor/typo-model-2"], "没给出相近的候选（拼错时很有用）"
+
+        app.config.llm.model = "other/model"
+        assert client.get("/api/models/verify-current").json()["in_provider_list"] is True
+
+
+def test_frontend_wires_adopt_and_verify():
+    js = (REPO / "dogbuddy/web/static/js/views-models.js").read_text(encoding="utf-8")
+    api = (REPO / "dogbuddy/web/static/js/api.js").read_text(encoding="utf-8")
+    assert "把当前模型纳入目录" in js and "adopt-current" in js
+    assert "校验它在服务商列表里" in js and "verify-current" in js
+    assert "adoptCurrent" in api and "verifyCurrent" in api

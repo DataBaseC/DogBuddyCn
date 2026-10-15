@@ -126,6 +126,50 @@ class ModelService:
             r["model"] == cur.get("model") for r in self.db.list_models())
         return s
 
+    # ------------------------------------------------------------- 收编/校验
+    def adopt_current(self) -> dict[str, Any]:
+        """把**正在运行的模型**收进目录。
+
+        场景（owner 实测）：他直接改了运行时配置（或从别处切过来），于是模型管理页
+        的列表里根本没有这个模型，页面上显示"未纳入目录"——看起来就像"管理员在用一个
+        列表里不存在的模型"。这里一键把它登记成条目（密钥留空 = 继续用全局那把）。
+        """
+        cfg = self.app
+        if cfg is None:
+            raise RuntimeError("配置不可用")
+        model = str(cfg.llm.model or "").strip()
+        if not model:
+            raise ValueError("当前没有配置模型，先把 base_url / model / api_key 配好")
+        existing = self.db.get_model(make_model_id(cfg.llm.provider or "openai_compat", model))
+        if existing is not None:
+            return {**existing, **self._public(existing)}
+        return self.upsert(provider=cfg.llm.provider or "openai_compat", model=model,
+                           base_url=cfg.llm.base_url or "", display_name=model,
+                           source="adopted", enabled=True,
+                           note="由控制台从运行配置收进目录")
+
+    async def verify_current(self) -> dict[str, Any]:
+        """校验"当前模型"是否真的存在于服务商返回的列表里。
+
+        防的是另一种静默失败：配置里写了个拼错/已下线的模型名，调用时才 400，
+        而界面上看不出任何异常。
+        """
+        cfg = self.app
+        model = str(getattr(cfg.llm, "model", "") if cfg else "").strip()
+        if not model:
+            return {"ok": False, "model": "", "error": "当前没有配置模型"}
+        if self._fetch_meta is None:
+            return {"ok": False, "model": model, "error": "未接入模型列表拉取能力"}
+        try:
+            details = await self._fetch_meta(cfg.llm.provider, cfg.llm.base_url, cfg.llm.api_key)
+        except Exception as e:  # noqa: BLE001 — 校验失败要说原因，不能吞
+            return {"ok": False, "model": model, "error": str(e)}
+        ids = [str(d.get("id") or "") for d in (details or [])]
+        tail = model.split("/")[-1].lower()
+        near = [i for i in ids if tail[:6] and tail[:6] in i.lower()][:5]
+        return {"ok": model in ids, "model": model, "model_count": len(ids),
+                "in_provider_list": model in ids, "similar": near}
+
     # ------------------------------------------------------------- 写
     def upsert(self, **fields: Any) -> dict[str, Any]:
         model = str(fields.get("model") or "").strip()

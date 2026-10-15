@@ -778,3 +778,35 @@ owner 的三条口径：
 测试：`tests/test_context_window_and_threshold.py`（10 条）覆盖上下文字段解析、导入不编数/不覆盖、
 `activate` 保留全局、建工位带阈值（API + agent 工具 + 越界报错）、管理员模型可见可换（含 SSE/前端接线）。
 基线 **513 passed / 4 skipped**。
+
+---
+
+## 13. 第六轮：汇报到用户眼前 + 管理员模型一致性（2026-10-15 晚，`0.10.14`）
+
+owner 报了两件事：
+
+> - 两个员工测试完成后，管理员没有向用户做简短汇报
+> - 管理员好像调用了模型列表里不存在的模型
+
+### 13.1 员工干完活 → 用户眼前（三处缺口）
+
+| 缺口 | 证据 | 修法 |
+|---|---|---|
+| 人工/对话派单跑完**不发任何事件** | `JOB_COMPLETED` 只有 `cron/scheduler.py` 发；"让两个员工做测试"是对话派单，没有 `job_id` | `WindowManager._report_manual_run()`：无 `job_id` 的 prompt 运行结束时发 `job.completed`（失败发 `job.failed`），`report_strategy="brief"`；**带 job_id 的不发**（调度器已发，避免用户收到两条） |
+| console 渠道**只写日志** | `ConsoleNotifier.send()` 只 `logger.info`，用户不会去看日志 | 新增 `notify/chat.py: ChatNotifier`：日志 + **写进用户对话流**；`build_notifiers(..., chat_sink=...)` 注入，名字仍叫 `console`（按名路由不变） |
+| 用户对话流需要即时更新 | 之前只有整页刷新才看得到 | `AdminService.notify_user()` 落库到**最近活跃的对话**并推 SSE `admin.notice`；`views-chat.js` 订阅后即时追加气泡（别的对话则 toast 提示） |
+
+### 13.2 "管理员调用了列表里不存在的模型"
+
+真相：模型**是存在的**（实测：`zai-org/GLM-5.3-Flash`、`Qwen/Qwen3.5-9B` 都在 SiliconFlow 返回的
+99 个里），缺的是**控制台的目录没登记它** —— 模型管理页只有 5 条旧的 Sensenova/DeepSeek 条目，
+于是页面显示"未纳入目录"，看起来就像"用了一个列表里没有的模型"。
+
+修法（两条都给）：
+- `POST /api/models/adopt-current`：**一键把正在运行的模型收进目录**（密钥不复制，继续用全局那把）；
+  页面在"未纳入目录"时直接给按钮。
+- `GET /api/models/verify-current`：**向服务商核对**当前模型在不在它的列表里（拼错/下线会在
+  调用时才 400，界面上看不出来）；不在时给出相近候选。页面给「校验它在服务商列表里」按钮。
+
+测试：`tests/test_user_reporting.py`（7 条）+ `tests/test_model_catalog_keys.py` 扩 3 条。
+基线 **531 passed / 4 skipped**。

@@ -62,6 +62,25 @@
     });
   }
 
+  function onNotice(payload) {
+    payload = payload || {};
+    var text = String(payload.text || '');
+    if (!text) return;
+    if (String(payload.conversation || '') !== String(state.sender)) {
+      /* 汇报落在另一个对话里：提示一下，别让人以为没发生 */
+      U.toast('info', '管理员有新汇报（在另一个对话里）');
+      return;
+    }
+    state.messages.push({
+      id: payload.message_id || ('notice-' + Date.now()),
+      role: 'assistant', content: text,
+      created_at: payload.created_at || new Date().toISOString(),
+      meta: { notice: true }
+    });
+    render();
+    refreshUsage(state.sender);
+  }
+
   /* ---------------- 渲染 ---------------- */
   function renderSenders() {
     var sel = U.$('#chat-sender');
@@ -289,8 +308,11 @@
     if (bound) return;
     bound = true;
 
-    /* SSE：管理员打字机（admin.stream） */
-    if (global.SSE && global.SSE.on) global.SSE.on('admin.stream', onStream);
+    /* SSE：管理员打字机（admin.stream）+ 员工汇报写入对话流（admin.notice） */
+    if (global.SSE && global.SSE.on) {
+      global.SSE.on('admin.stream', onStream);
+      global.SSE.on('admin.notice', onNotice);
+    }
 
     var form = U.$('#chat-send');
     if (form) form.addEventListener('click', send);
