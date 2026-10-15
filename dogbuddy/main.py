@@ -468,27 +468,51 @@ class DogBuddyApp:
         logger.info("DogBuddyCn %s started (web on %s:%s)", __version__,
                     self.config.web.host, self.config.web.port)
 
+    #: 关停时每一步的最长等待（秒）。**必须有界**：
+    #: 线上实测（2026-10-15）SIGTERM 之后进程卡住不退，于是端口一直被旧进程占着，
+    #: 外部守护启动的新进程 `[Errno 98] address already in use` 秒退 →
+    #: 面板进入"启动-退出码3-再启动"的重启循环，升级看起来失败。
+    #: 卡死不影响数据安全（DB 用 WAL，重启时会自动恢复），所以宁可强制退出。
+    SHUTDOWN_STEP_TIMEOUT: float = 8.0
+
+    async def _shutdown_step(self, coro, what: str) -> None:
+        """有界地执行一个关停步骤：超时只记日志，绝不把整个进程挂住。"""
+        try:
+            await asyncio.wait_for(coro, timeout=self.SHUTDOWN_STEP_TIMEOUT)
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning("关停步骤 %s 超过 %.0fs 未完成，强制继续（端口必须让出来）",
+                           what, self.SHUTDOWN_STEP_TIMEOUT)
+        except Exception:  # noqa: BLE001 — 关停失败不该阻断后面的清理
+            logger.warning("关停步骤 %s 失败", what, exc_info=True)
+
     async def stop(self) -> None:
         if not self._started:
             return
         self._started = False
         self.scheduler.stop()
-        await self.windows.stop()
-        try:
-            await self.mcp.close()
-        except Exception:  # noqa: BLE001
-            logger.debug("mcp close failed", exc_info=True)
+        await self._shutdown_step(self.windows.stop(), "windows.stop")
+        await self._shutdown_step(self.mcp.close(), "mcp.close")
         for t in self._tasks:
             t.cancel()
-        self.db.close()
+        try:
+            self.db.close()
+        except Exception:  # noqa: BLE001
+            logger.warning("db.close failed", exc_info=True)
+
+
+def build_uvicorn_config(app: DogBuddyApp, config: AppConfig) -> uvicorn.Config:
+    """uvicorn 配置。`timeout_graceful_shutdown` 是关停的**第二道保险**：
+    即使某个请求/任务不肯放手，10 秒后也强制退出——否则 SIGTERM 会"看起来没反应"。
+    """
+    return uvicorn.Config(app=app.web_app, host=config.web.host, port=config.web.port,
+                          log_level="info", timeout_graceful_shutdown=10)
 
 
 def run(config_path: str | None = None) -> None:
     config = load_config(config_path)
     app = DogBuddyApp(config)
     # startup/shutdown run through FastAPI's lifespan (create_app hooks)
-    server = uvicorn.Server(uvicorn.Config(
-        app=app.web_app, host=config.web.host, port=config.web.port, log_level="info"))
+    server = uvicorn.Server(build_uvicorn_config(app, config))
     try:
         server.run()
     except KeyboardInterrupt:
