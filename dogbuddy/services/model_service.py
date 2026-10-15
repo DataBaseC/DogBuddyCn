@@ -19,6 +19,8 @@ import hashlib
 import logging
 from typing import Any, Callable
 
+from ..config import SECRET_MASK, is_masked_secret, mask_secret
+
 logger = logging.getLogger("dogbuddy.services.models")
 
 # 备注里的可选能力标签（前端做成多选 chip）
@@ -26,8 +28,8 @@ CAPABILITY_TAGS = ("工具调用", "推理", "代码", "长上下文", "中文�
 SPEED_LEVELS = ("", "很快", "快", "中", "慢", "很慢")
 COST_LEVELS = ("", "免费", "低", "中", "高")
 
-#: 掩码前缀——**凡是要出接口的密钥都必须过这里**
-MASK = "********"
+#: 掩码前缀——**凡是要出接口的密钥都必须过这里**；口径统一在 `config.mask_secret`
+MASK = SECRET_MASK
 
 #: 常见服务商预设（模型管理页的"一键填入"）。**只预填 base_url/provider，不预填密钥。**
 PROVIDER_PRESETS: tuple[dict[str, str], ...] = (
@@ -45,19 +47,13 @@ PROVIDER_PRESETS: tuple[dict[str, str], ...] = (
 
 
 def mask_key(key: str | None) -> str:
-    """`sk-abcdef123456` → `********3456`。空 key 回空串。
-
-    短 key 连尾巴都不给看：4 位尾巴对 5~8 位的 key 等于泄露大半。
-    """
-    k = (key or "").strip()
-    if not k:
-        return ""
-    return MASK + (k[-4:] if len(k) >= 12 else "")
+    """`sk-abcdef123456` → `********3456`。空 key 回空串（口径：`config.mask_secret`）。"""
+    return mask_secret(key)
 
 
 def is_masked(value: str | None) -> bool:
     """前端回传掩码时表示"没改密钥"，不能把它当成新密钥存下去。"""
-    return bool(value) and str(value).strip().startswith(MASK)
+    return is_masked_secret(value)
 
 
 def make_model_id(provider: str, model: str) -> str:

@@ -8,6 +8,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ...config import is_masked_secret, mask_secret
+
 
 class ConfigKVIn(BaseModel):
     key: str
@@ -86,8 +88,8 @@ def router(svc, auth_deps) -> APIRouter:
         return {
             "provider": section.provider, "base_url": section.base_url,
             "model": section.model,
-            "api_key": ("*" * 8 + section.api_key[-4:]) if section.api_key else "",
-            "keys": ["*" * 8 + k[-4:] if k else "" for k in section.keys],
+            "api_key": mask_secret(section.api_key),
+            "keys": [mask_secret(k) for k in section.keys],
             "temperature": section.temperature,
             "max_context_tokens": section.max_context_tokens,
             "compact_threshold": section.compact_threshold,
@@ -95,12 +97,24 @@ def router(svc, auth_deps) -> APIRouter:
             "retry": section.retry.model_dump(),
         }
 
+    def _panel_dump() -> dict:
+        """面板段也**必须**掩码。
+
+        审查外的实测发现（2026-10-15）：这里原来是 `cfg.panel.model_dump()`，
+        于是 `GET /api/settings` 把面板的 `agent_token` **明文**返回，前端还把它直接
+        渲染进 `<input value=...>`。那个 token 能通过面板的 `/api/terminal/exec`
+        **在服务器上以 root 执行任意命令**——等于任何拿到控制台 web token 的人
+        都能拿到 root。密钥只该"能改、不能读"。
+        """
+        return {"enabled": cfg.panel.enabled, "base_url": cfg.panel.base_url,
+                "agent_token": mask_secret(cfg.panel.agent_token)}
+
     def _dump() -> dict:
         return {
             "llm": _llm_dump(cfg.llm),
             "profiles": {name: _llm_dump(section) for name, section in cfg.llm_profiles.items()},
             "active_llm_profile": cfg.active_llm_profile,
-            "panel": cfg.panel.model_dump(),
+            "panel": _panel_dump(),
             "gateway": {"enabled": cfg.gateway.enabled,
                         "whitelist": cfg.gateway.whitelist,
                         "push_target": cfg.gateway.push_target},
@@ -142,20 +156,28 @@ def router(svc, auth_deps) -> APIRouter:
                 v = getattr(body.llm, f)
                 if v is not None:
                     setattr(cfg.llm, f, v)
-            if body.llm.api_key:
+            # 密钥：掩码 = 保持不变。
+            # 这里原来没有这道判断，于是前端把掩码原样回传时，**真密钥会被
+            # "********abcd" 覆盖掉**（实测复现）→ LLM 静默变成认证失败。
+            if body.llm.api_key and not is_masked_secret(body.llm.api_key):
                 cfg.llm.api_key = body.llm.api_key
             if body.llm.keys is not None:
-                cfg.llm.keys = body.llm.keys
+                if all(not is_masked_secret(k) for k in body.llm.keys):
+                    cfg.llm.keys = [str(k).strip() for k in body.llm.keys if str(k).strip()]
             if body.llm.retry:
                 for f in ("base_interval", "max_interval", "max_retries", "backoff"):
                     v = getattr(body.llm.retry, f)
                     if v is not None:
                         setattr(cfg.llm.retry, f, v)
         if body.panel:
-            for f in ("enabled", "base_url", "agent_token"):
+            for f in ("enabled", "base_url"):
                 v = getattr(body.panel, f)
                 if v is not None:
                     setattr(cfg.panel, f, v)
+            # 密钥：留空 / 回传掩码 = 保持不变（绝不把 ********abcd 存成真 token）
+            token = body.panel.agent_token
+            if token is not None and str(token).strip() and not is_masked_secret(token):
+                cfg.panel.agent_token = str(token).strip()
         if body.gateway:
             for f in ("enabled", "whitelist", "push_target"):
                 v = getattr(body.gateway, f)
@@ -215,10 +237,11 @@ def router(svc, auth_deps) -> APIRouter:
             v = getattr(body_llm, f)
             if v is not None:
                 setattr(section, f, v)
-        if body_llm.api_key:
+        # 密钥：掩码 = 保持不变（同 `/settings`，配置套也不能被掩码覆盖）
+        if body_llm.api_key and not is_masked_secret(body_llm.api_key):
             section.api_key = body_llm.api_key
-        if body_llm.keys is not None:
-            section.keys = body_llm.keys
+        if body_llm.keys is not None and all(not is_masked_secret(k) for k in body_llm.keys):
+            section.keys = [str(k).strip() for k in body_llm.keys if str(k).strip()]
         if body_llm.retry:
             for f in ("base_interval", "max_interval", "max_retries", "backoff"):
                 v = getattr(body_llm.retry, f)

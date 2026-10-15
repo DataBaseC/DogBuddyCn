@@ -149,8 +149,10 @@
         '<label class="switch"><input type="checkbox" id="set-panel-enabled"' + (p.enabled ? ' checked' : '') + '><i></i></label></div>' +
         '<div class="field"><span class="field-label">面板 Base URL</span>' +
         '<input class="input mono" id="set-panel-url" value="' + U.esc(p.base_url || '') + '" placeholder="http://127.0.0.1:8080"></div>' +
-        '<div class="field"><span class="field-label">Agent Token</span>' +
-        '<input class="input mono" id="set-panel-token" value="' + U.esc(p.agent_token || '') + '"></div></div>' +
+        '<div class="field"><span class="field-label">Agent Token' +
+        (p.agent_token ? '（已保存：' + U.esc(p.agent_token) + '，留空保持不变）' : '') + '</span>' +
+        '<input class="input mono" id="set-panel-token" type="password" value="" placeholder="' +
+        U.esc(p.agent_token ? '留空保持不变' : '从面板「Agent 接入」复制') + '"></div></div>' +
         '<div class="set-card-foot"><div class="spacer"></div>' +
         '<button class="btn btn-primary btn-sm" data-save="panel">保存该组</button></div></div>';
     },
@@ -442,9 +444,11 @@
         } else if (group === 'panel') {
           body.panel = {
             enabled: document.getElementById('set-panel-enabled').checked,
-            base_url: document.getElementById('set-panel-url').value.trim(),
-            agent_token: document.getElementById('set-panel-token').value.trim()
+            base_url: document.getElementById('set-panel-url').value.trim()
           };
+          /* 密钥：留空 = 不改（服务端也拦一道，绝不把掩码存成真 token） */
+          var ptoken = document.getElementById('set-panel-token').value.trim();
+          if (ptoken && !masked(ptoken)) body.panel.agent_token = ptoken;
         } else if (group === 'gateway') {
           var target = document.getElementById('set-gw-target').value.trim();
           var push = {};

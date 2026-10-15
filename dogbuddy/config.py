@@ -256,6 +256,27 @@ class AppConfig(BaseModel):
         return self.paths.data / "checkpoints"
 
 
+#: 掩码前缀（见 `mask_secret`）——所有"要出接口的密钥"统一用它
+SECRET_MASK = "********"
+
+
+def mask_secret(value: str | None, keep_tail: int = 4, min_len: int = 12) -> str:
+    """把密钥变成可以出接口的掩码：`sk-abcdef123456` → `********3456`。
+
+    这是**唯一**的密钥掩码口径（LLM key / 面板 agent token 都走它）。
+    太短的密钥连尾巴都不给看：4 位尾巴对 8 位的 key 等于泄露一半。
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    return SECRET_MASK + (v[-keep_tail:] if len(v) >= min_len else "")
+
+
+def is_masked_secret(value: str | None) -> bool:
+    """前端把掩码回传时表示"没改密钥"，绝不能把掩码当成新密钥存下去。"""
+    return bool(value) and str(value).strip().startswith(SECRET_MASK)
+
+
 def _env_overrides(cfg: AppConfig) -> AppConfig:
     """Environment variables override YAML (secrets stay out of files)."""
     if v := os.environ.get("DOGBUDDY_LLM_API_KEY"):
