@@ -873,6 +873,7 @@
           '<input class="input" id="model-input" list="model-options" value="' + U.esc(w.model || '') + '" placeholder="留空 = 继承管理员模型' +
           (w.resolved_model && !w.model ? '（当前 ' + U.esc(w.resolved_model) + '）' : '') + '">' +
           '<button class="btn btn-soft btn-sm" id="model-fetch" type="button">拉取模型</button></div>' +
+          '<select class="select mono" id="model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
           '<div class="hint">留空即跟随管理员使用的模型；填了则此工位单独使用该模型。</div>' +
           '<datalist id="model-options"></datalist></div>' +
           '<div class="field"><span class="field-label">模式</span>' +
@@ -921,6 +922,8 @@
                 return '<option value="' + U.esc(m) + '"></option>';
               }).join('');
             }
+            /* 全量进下拉：datalist 会按输入框已有文字过滤，只靠它会出现"只能选一个" */
+            U.fillModelSelect('model-select', r.models || [], 'model-input');
             if (r.error) U.toast('warn', '拉取模型失败：' + r.error);
             else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
           }).catch(function (e) {

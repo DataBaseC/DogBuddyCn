@@ -204,6 +204,7 @@
         '<div style="display:flex;gap:8px">' +
         '<input class="input mono" id="pf-model" list="pf-model-options" value="' + U.esc(src.model || '') + '" placeholder="gpt-4o-mini">' +
         '<button class="btn btn-soft btn-sm" id="pf-fetch-models" type="button">拉取模型</button></div>' +
+        '<select class="select mono" id="pf-model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
         '<datalist id="pf-model-options"></datalist></div>';
       h += '<div class="field"><span class="field-label">keys（多密钥，逗号分隔，可选）</span>' +
         '<input class="input mono" id="pf-keys" value="' + U.esc(keysText(src.keys)) + '" placeholder="留空不改动"></div>';
@@ -293,6 +294,8 @@
                 return '<option value="' + U.esc(mm) + '"></option>';
               }).join('');
             }
+            /* 全量进下拉（datalist 会按输入框已有文字过滤） */
+            U.fillModelSelect('pf-model-select', r.models || [], 'pf-model');
             if (r.error) U.toast('warn', '拉取失败：' + r.error);
             else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
           }).catch(function (e) {

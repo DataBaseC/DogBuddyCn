@@ -220,6 +220,12 @@
         '<button class="btn btn-soft btn-sm" id="mdl-f-fetch" type="button">' + U.icon('refresh', 'sm') + '拉取模型列表</button>' +
         '<button class="btn btn-soft btn-sm" id="mdl-f-test" type="button">' + U.icon('activity', 'sm') + '测试连接</button>' +
         '<span class="hint" id="mdl-f-probe-out"></span></div>' +
+        /* 拉取结果放进真正的下拉：<datalist> 会**按输入框里已有的文字过滤**，
+           所以"自动填第一个"会让下拉里只剩那一个（实测就是这样：99 个只能选到 1 个）。 */
+        '<div class="field" id="mdl-f-picker" style="display:none">' +
+        '<span class="field-label">从拉取到的列表里选（<span id="mdl-f-count">0</span> 个）</span>' +
+        '<select class="select mono" id="mdl-f-select"><option value="">（选择…）</option></select>' +
+        '<div class="hint">选中后会填进上面的「模型名」；也可以直接在模型名框里输入关键词，用下拉建议。</div></div>' +
         '<div class="field"><span class="field-label">备注：能力与限制（建议写清）</span>' +
         '<textarea class="textarea" id="mdl-f-note" rows="3" placeholder="例如：工具调用稳定；429 限速很凶，并发别超 2；中文好；不支持 vision。">' +
         U.esc(m.note || '') + '</textarea></div>' +
@@ -322,17 +328,27 @@
       fetchBtn.addEventListener('click', function () {
         var a = formArgs();
         probeOut('拉取中…');
-        A.settings.models(a.provider, a.base_url, a.api_key).then(function (r) {
+        A.settings.models(a.provider, a.base_url, a.api_key, undefined, a.model_ref).then(function (r) {
           var list = (r && r.models) || [];
           if (r && r.error) { probeOut('拉取失败：' + r.error, 'err'); return; }
+          /* ① 给输入框留一份建议（供手输过滤） */
           var dl = U.$('#mdl-f-model-list');
           if (dl) dl.innerHTML = list.map(function (x) { return '<option value="' + U.esc(x) + '"></option>'; }).join('');
-          var mi = U.$('#mdl-f-model');
-          if (mi && !mi.value && list.length) mi.value = list[0];
-          probeOut('拉到 ' + list.length + ' 个模型（点模型名输入框可选）', 'ok');
+          /* ② 真正能选的是这个 select：不自动填值，用户点开就是全量列表
+             （实现见 ui.js `fillModelSelect`：datalist 会按输入框文字过滤） */
+          U.fillModelSelect('mdl-f-select', list, 'mdl-f-model');
+          var cnt = U.$('#mdl-f-count');
+          if (cnt) cnt.textContent = String(list.length);
+          var picker = U.$('#mdl-f-picker');
+          if (picker) picker.style.display = list.length ? '' : 'none';
+          probeOut(list.length
+            ? ('拉到 ' + list.length + ' 个模型，在下面下拉里选')
+            : '没拉到模型（检查地址与密钥）', list.length ? 'ok' : 'err');
         }).catch(function (e) { probeOut('拉取失败：' + e.message, 'err'); });
       });
     }
+
+    /* 选中下拉项 → 填进「模型名」输入框（事件在 ui.fillModelSelect 里绑，幂等） */
 
     var testBtn = U.$('#mdl-f-test');
     if (testBtn) {

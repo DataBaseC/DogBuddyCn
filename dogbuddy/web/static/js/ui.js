@@ -276,6 +276,36 @@
       (u.estimated ? ' · 粗估' : '') + '</span></div>';
   }
 
+  /**
+   * 拉取到的模型列表 → 填进一个**真正能选**的 `<select>`，并可选地回写输入框。
+   *
+   * 为什么不只用 `<datalist>`：浏览器的 datalist 候选**按输入框里已有的文字过滤**。
+   * 所以"拉取后自动填第一个"（或输入框里本来就有旧模型名）时，下拉里就只剩那一项——
+   * 用户看到的就是"只能选第一个"。实测：SiliconFlow 返回 99 个模型，界面上只选得到 1 个。
+   *
+   * @param {string} selectId 目标 `<select>` 的 id
+   * @param {string[]} models 拉取到的模型名
+   * @param {string=} mirrorInputId 选中后回写到哪个输入框
+   * @returns {number} 填入的条数
+   */
+  function fillModelSelect(selectId, models, mirrorInputId) {
+    var sel = document.getElementById(selectId);
+    if (!sel) return 0;
+    var list = models || [];
+    sel.innerHTML = '<option value="">（选择…共 ' + list.length + ' 个）</option>' +
+      list.map(function (m) {
+        return '<option value="' + esc(m) + '">' + esc(m) + '</option>';
+      }).join('');
+    if (!sel.getAttribute('data-wired') && mirrorInputId) {
+      sel.setAttribute('data-wired', '1');
+      sel.addEventListener('change', function () {
+        var inp = document.getElementById(mirrorInputId);
+        if (inp && sel.value) inp.value = sel.value;
+      });
+    }
+    return list.length;
+  }
+
   /* ---------------- 防抖 ---------------- */
   function debounce(fn, ms) {
     var t = null;
@@ -312,6 +342,6 @@
     relTime: relTime, countdown: countdown, fmtSize: fmtSize,
     toast: toast, modal: modal, confirm: confirm, closeTopModal: closeTopModal,
     skeleton: skeleton, empty: empty, debounce: debounce, highlightCode: highlightCode,
-    fmtInt: fmtInt, usageHTML: usageHTML
+    fmtInt: fmtInt, usageHTML: usageHTML, fillModelSelect: fillModelSelect
   };
 })(window);

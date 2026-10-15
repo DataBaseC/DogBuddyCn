@@ -282,6 +282,36 @@
       (u.estimated ? ' · 粗估' : '') + '</span></div>';
   }
 
+  /**
+   * 拉取到的模型列表 → 填进一个**真正能选**的 `<select>`，并可选地回写输入框。
+   *
+   * 为什么不只用 `<datalist>`：浏览器的 datalist 候选**按输入框里已有的文字过滤**。
+   * 所以"拉取后自动填第一个"（或输入框里本来就有旧模型名）时，下拉里就只剩那一项——
+   * 用户看到的就是"只能选第一个"。实测：SiliconFlow 返回 99 个模型，界面上只选得到 1 个。
+   *
+   * @param {string} selectId 目标 `<select>` 的 id
+   * @param {string[]} models 拉取到的模型名
+   * @param {string=} mirrorInputId 选中后回写到哪个输入框
+   * @returns {number} 填入的条数
+   */
+  function fillModelSelect(selectId, models, mirrorInputId) {
+    var sel = document.getElementById(selectId);
+    if (!sel) return 0;
+    var list = models || [];
+    sel.innerHTML = '<option value="">（选择…共 ' + list.length + ' 个）</option>' +
+      list.map(function (m) {
+        return '<option value="' + esc(m) + '">' + esc(m) + '</option>';
+      }).join('');
+    if (!sel.getAttribute('data-wired') && mirrorInputId) {
+      sel.setAttribute('data-wired', '1');
+      sel.addEventListener('change', function () {
+        var inp = document.getElementById(mirrorInputId);
+        if (inp && sel.value) inp.value = sel.value;
+      });
+    }
+    return list.length;
+  }
+
   /* ---------------- 防抖 ---------------- */
   function debounce(fn, ms) {
     var t = null;
@@ -318,7 +348,7 @@
     relTime: relTime, countdown: countdown, fmtSize: fmtSize,
     toast: toast, modal: modal, confirm: confirm, closeTopModal: closeTopModal,
     skeleton: skeleton, empty: empty, debounce: debounce, highlightCode: highlightCode,
-    fmtInt: fmtInt, usageHTML: usageHTML
+    fmtInt: fmtInt, usageHTML: usageHTML, fillModelSelect: fillModelSelect
   };
 })(window);
 
@@ -602,11 +632,12 @@
     settings: {
       get: function () { return request('GET', '/api/settings'); },
       update: function (body) { return request('PUT', '/api/settings', body); },
-      /* GET /api/settings/models?provider=&base_url=&api_key=&profile= → {models, error}
-         profile 可选（v1.3）：按配置套拉模型，不传按原逻辑 */
-      models: function (provider, baseUrl, apiKey, profile) {
+      /* GET /api/settings/models?provider=&base_url=&api_key=&profile=&model_ref= → {models, error}
+         profile 可选（v1.3）：按配置套拉模型；model_ref 可选：按**目录条目**自带密钥拉 */
+      models: function (provider, baseUrl, apiKey, profile, modelRef) {
         return request('GET', '/api/settings/models' + qs({
-          provider: provider, base_url: baseUrl, api_key: apiKey, profile: profile
+          provider: provider, base_url: baseUrl, api_key: apiKey, profile: profile,
+          model_ref: modelRef
         }));
       },
       /* POST /api/settings/test_llm {provider?,base_url?,api_key?,model?,profile?} */
@@ -1776,6 +1807,7 @@
           '<input class="input" id="model-input" list="model-options" value="' + U.esc(w.model || '') + '" placeholder="留空 = 继承管理员模型' +
           (w.resolved_model && !w.model ? '（当前 ' + U.esc(w.resolved_model) + '）' : '') + '">' +
           '<button class="btn btn-soft btn-sm" id="model-fetch" type="button">拉取模型</button></div>' +
+          '<select class="select mono" id="model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
           '<div class="hint">留空即跟随管理员使用的模型；填了则此工位单独使用该模型。</div>' +
           '<datalist id="model-options"></datalist></div>' +
           '<div class="field"><span class="field-label">模式</span>' +
@@ -1824,6 +1856,8 @@
                 return '<option value="' + U.esc(m) + '"></option>';
               }).join('');
             }
+            /* 全量进下拉：datalist 会按输入框已有文字过滤，只靠它会出现"只能选一个" */
+            U.fillModelSelect('model-select', r.models || [], 'model-input');
             if (r.error) U.toast('warn', '拉取模型失败：' + r.error);
             else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
           }).catch(function (e) {
@@ -2739,6 +2773,7 @@
         '<div style="display:flex;gap:8px">' +
         '<input class="input mono" id="set-model" list="set-model-options" value="' + U.esc(llm.model || '') + '" placeholder="gpt-4o-mini">' +
         '<button class="btn btn-soft btn-sm" id="set-fetch-models" type="button">拉取模型</button></div>' +
+        '<select class="select mono" id="set-model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
         '<datalist id="set-model-options"></datalist></div>' +
         '<div class="set-row" style="border:0;padding-top:2px">' +
         '<button class="btn btn-soft btn-sm" id="set-test-llm" type="button">' + U.icon('zap', 'sm') + '测试连接</button>' +
@@ -2923,6 +2958,8 @@
                 return '<option value="' + U.esc(m) + '"></option>';
               }).join('');
             }
+            /* 全量进下拉（datalist 会按输入框已有文字过滤，见 ui.js fillModelSelect 注释） */
+            U.fillModelSelect('set-model-select', r.models || [], 'set-model');
             if (r.error) U.toast('warn', '拉取失败：' + r.error);
             else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
           }).catch(function (e) {
@@ -3250,6 +3287,7 @@
       } else if (state.step === 4) {
         inner += '<div class="field"><span class="field-label">默认模型</span>' +
           '<input class="input mono" id="wz-model" list="wz-model-options" value="' + U.esc(state.model) + '" placeholder="选择或输入模型名">' +
+          '<select class="select mono" id="wz-model-select" style="margin-top:6px"><option value="">（点上面「拉取模型」后在这里选）</option></select>' +
           '<datalist id="wz-model-options">' + state.models.map(function (m) {
             return '<option value="' + U.esc(m) + '"></option>';
           }).join('') + '</datalist></div>' +
@@ -3310,7 +3348,9 @@
             state.modelError = r.error || '';
             if (r.error) U.toast('warn', '拉取失败：' + r.error);
             else U.toast('success', '已拉取 ' + state.models.length + ' 个模型');
-            if (!state.model && state.models.length) state.model = state.models[0];
+            /* v0.10.11：**不再自动填第一个** —— 那会让 datalist 只剩一项。
+               现在全量进下拉，用户自己选。 */
+            U.fillModelSelect('wz-model-select', state.models, 'wz-model');
           }).catch(function (e) {
             state.modelError = e.message;
             U.toast('error', '拉取失败：' + e.message);
@@ -3620,6 +3660,7 @@
         '<div style="display:flex;gap:8px">' +
         '<input class="input mono" id="pf-model" list="pf-model-options" value="' + U.esc(src.model || '') + '" placeholder="gpt-4o-mini">' +
         '<button class="btn btn-soft btn-sm" id="pf-fetch-models" type="button">拉取模型</button></div>' +
+        '<select class="select mono" id="pf-model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
         '<datalist id="pf-model-options"></datalist></div>';
       h += '<div class="field"><span class="field-label">keys（多密钥，逗号分隔，可选）</span>' +
         '<input class="input mono" id="pf-keys" value="' + U.esc(keysText(src.keys)) + '" placeholder="留空不改动"></div>';
@@ -3709,6 +3750,8 @@
                 return '<option value="' + U.esc(mm) + '"></option>';
               }).join('');
             }
+            /* 全量进下拉（datalist 会按输入框已有文字过滤） */
+            U.fillModelSelect('pf-model-select', r.models || [], 'pf-model');
             if (r.error) U.toast('warn', '拉取失败：' + r.error);
             else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
           }).catch(function (e) {
@@ -4892,6 +4935,12 @@
         '<button class="btn btn-soft btn-sm" id="mdl-f-fetch" type="button">' + U.icon('refresh', 'sm') + '拉取模型列表</button>' +
         '<button class="btn btn-soft btn-sm" id="mdl-f-test" type="button">' + U.icon('activity', 'sm') + '测试连接</button>' +
         '<span class="hint" id="mdl-f-probe-out"></span></div>' +
+        /* 拉取结果放进真正的下拉：<datalist> 会**按输入框里已有的文字过滤**，
+           所以"自动填第一个"会让下拉里只剩那一个（实测就是这样：99 个只能选到 1 个）。 */
+        '<div class="field" id="mdl-f-picker" style="display:none">' +
+        '<span class="field-label">从拉取到的列表里选（<span id="mdl-f-count">0</span> 个）</span>' +
+        '<select class="select mono" id="mdl-f-select"><option value="">（选择…）</option></select>' +
+        '<div class="hint">选中后会填进上面的「模型名」；也可以直接在模型名框里输入关键词，用下拉建议。</div></div>' +
         '<div class="field"><span class="field-label">备注：能力与限制（建议写清）</span>' +
         '<textarea class="textarea" id="mdl-f-note" rows="3" placeholder="例如：工具调用稳定；429 限速很凶，并发别超 2；中文好；不支持 vision。">' +
         U.esc(m.note || '') + '</textarea></div>' +
@@ -4994,17 +5043,27 @@
       fetchBtn.addEventListener('click', function () {
         var a = formArgs();
         probeOut('拉取中…');
-        A.settings.models(a.provider, a.base_url, a.api_key).then(function (r) {
+        A.settings.models(a.provider, a.base_url, a.api_key, undefined, a.model_ref).then(function (r) {
           var list = (r && r.models) || [];
           if (r && r.error) { probeOut('拉取失败：' + r.error, 'err'); return; }
+          /* ① 给输入框留一份建议（供手输过滤） */
           var dl = U.$('#mdl-f-model-list');
           if (dl) dl.innerHTML = list.map(function (x) { return '<option value="' + U.esc(x) + '"></option>'; }).join('');
-          var mi = U.$('#mdl-f-model');
-          if (mi && !mi.value && list.length) mi.value = list[0];
-          probeOut('拉到 ' + list.length + ' 个模型（点模型名输入框可选）', 'ok');
+          /* ② 真正能选的是这个 select：不自动填值，用户点开就是全量列表
+             （实现见 ui.js `fillModelSelect`：datalist 会按输入框文字过滤） */
+          U.fillModelSelect('mdl-f-select', list, 'mdl-f-model');
+          var cnt = U.$('#mdl-f-count');
+          if (cnt) cnt.textContent = String(list.length);
+          var picker = U.$('#mdl-f-picker');
+          if (picker) picker.style.display = list.length ? '' : 'none';
+          probeOut(list.length
+            ? ('拉到 ' + list.length + ' 个模型，在下面下拉里选')
+            : '没拉到模型（检查地址与密钥）', list.length ? 'ok' : 'err');
         }).catch(function (e) { probeOut('拉取失败：' + e.message, 'err'); });
       });
     }
+
+    /* 选中下拉项 → 填进「模型名」输入框（事件在 ui.fillModelSelect 里绑，幂等） */
 
     var testBtn = U.$('#mdl-f-test');
     if (testBtn) {

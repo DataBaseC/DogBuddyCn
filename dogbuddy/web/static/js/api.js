@@ -277,11 +277,12 @@
     settings: {
       get: function () { return request('GET', '/api/settings'); },
       update: function (body) { return request('PUT', '/api/settings', body); },
-      /* GET /api/settings/models?provider=&base_url=&api_key=&profile= → {models, error}
-         profile 可选（v1.3）：按配置套拉模型，不传按原逻辑 */
-      models: function (provider, baseUrl, apiKey, profile) {
+      /* GET /api/settings/models?provider=&base_url=&api_key=&profile=&model_ref= → {models, error}
+         profile 可选（v1.3）：按配置套拉模型；model_ref 可选：按**目录条目**自带密钥拉 */
+      models: function (provider, baseUrl, apiKey, profile, modelRef) {
         return request('GET', '/api/settings/models' + qs({
-          provider: provider, base_url: baseUrl, api_key: apiKey, profile: profile
+          provider: provider, base_url: baseUrl, api_key: apiKey, profile: profile,
+          model_ref: modelRef
         }));
       },
       /* POST /api/settings/test_llm {provider?,base_url?,api_key?,model?,profile?} */

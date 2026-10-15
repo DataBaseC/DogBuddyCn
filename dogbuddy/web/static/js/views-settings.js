@@ -94,6 +94,7 @@
         '<div style="display:flex;gap:8px">' +
         '<input class="input mono" id="set-model" list="set-model-options" value="' + U.esc(llm.model || '') + '" placeholder="gpt-4o-mini">' +
         '<button class="btn btn-soft btn-sm" id="set-fetch-models" type="button">拉取模型</button></div>' +
+        '<select class="select mono" id="set-model-select" style="margin-top:6px"><option value="">（点「拉取模型」后在这里选）</option></select>' +
         '<datalist id="set-model-options"></datalist></div>' +
         '<div class="set-row" style="border:0;padding-top:2px">' +
         '<button class="btn btn-soft btn-sm" id="set-test-llm" type="button">' + U.icon('zap', 'sm') + '测试连接</button>' +
@@ -278,6 +279,8 @@
                 return '<option value="' + U.esc(m) + '"></option>';
               }).join('');
             }
+            /* 全量进下拉（datalist 会按输入框已有文字过滤，见 ui.js fillModelSelect 注释） */
+            U.fillModelSelect('set-model-select', r.models || [], 'set-model');
             if (r.error) U.toast('warn', '拉取失败：' + r.error);
             else U.toast('success', '已拉取 ' + ((r.models || []).length) + ' 个模型');
           }).catch(function (e) {
@@ -605,6 +608,7 @@
       } else if (state.step === 4) {
         inner += '<div class="field"><span class="field-label">默认模型</span>' +
           '<input class="input mono" id="wz-model" list="wz-model-options" value="' + U.esc(state.model) + '" placeholder="选择或输入模型名">' +
+          '<select class="select mono" id="wz-model-select" style="margin-top:6px"><option value="">（点上面「拉取模型」后在这里选）</option></select>' +
           '<datalist id="wz-model-options">' + state.models.map(function (m) {
             return '<option value="' + U.esc(m) + '"></option>';
           }).join('') + '</datalist></div>' +
@@ -665,7 +669,9 @@
             state.modelError = r.error || '';
             if (r.error) U.toast('warn', '拉取失败：' + r.error);
             else U.toast('success', '已拉取 ' + state.models.length + ' 个模型');
-            if (!state.model && state.models.length) state.model = state.models[0];
+            /* v0.10.11：**不再自动填第一个** —— 那会让 datalist 只剩一项。
+               现在全量进下拉，用户自己选。 */
+            U.fillModelSelect('wz-model-select', state.models, 'wz-model');
           }).catch(function (e) {
             state.modelError = e.message;
             U.toast('error', '拉取失败：' + e.message);

@@ -196,9 +196,25 @@ def router(svc, auth_deps) -> APIRouter:
     # --------------------------------------------------- LLM discovery helpers
     @r.get("/settings/models", dependencies=auth_deps)
     async def list_models(provider: str | None = None, base_url: str | None = None,
-                          api_key: str | None = None, profile: str | None = None) -> dict:
-        """Auto-fetch the model list so the console user picks instead of typing."""
+                          api_key: str | None = None, profile: str | None = None,
+                          model_ref: str | None = None) -> dict:
+        """Auto-fetch the model list so the console user picks instead of typing.
+
+        `model_ref`：按**目录条目**自带的 provider/base_url/密钥去拉（条目自己的密钥不会出接口，
+        所以只能服务端取）。这与 `test_llm` 的 `model_ref` 是同一套口径。
+        """
+        entry = None
+        if model_ref:
+            entry = svc.db.get_model(model_ref)
+            if entry is None:
+                raise HTTPException(status_code=404, detail=f"模型不存在：{model_ref}")
         try:
+            if entry is not None:
+                models = await svc.config.fetch_models(
+                    provider or entry.get("provider") or None,
+                    base_url or entry.get("base_url") or None,
+                    api_key if api_key is not None else (entry.get("api_key") or None))
+                return {"models": models, "error": ""}
             if profile:
                 section = cfg.llm_for(profile)
                 models = await svc.config.fetch_models(section.provider, section.base_url,
