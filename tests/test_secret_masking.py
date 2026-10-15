@@ -26,7 +26,11 @@ from dogbuddy.main import DogBuddyApp  # noqa: E402
 
 TOKEN = "settings-token"
 LLM_KEY = "sk-llm-supersecret-0001"
-PANEL_TOKEN = "YjnloGxUOXfborJZbMmfIPdpXWTR5UE33BphsvuXgoc"  # 形状同线上那枚（这里只是形状）
+# ⚠️ 必须是**假的**：这里绝不能用线上真令牌。
+# 2026-10-15 事故：这一行最初贴的是生产面板 Agent Token，随 0.10.8 提交推到了
+# **公开仓库**——等于把服务器 root 令牌公开了（发现后立刻轮换了面板令牌）。
+# 教训：任何"示例凭据"都要写成一眼假的形状，并在提交前 grep 一遍真值。
+PANEL_TOKEN = "panel-agent-token-EXAMPLE-not-real-0000"
 
 
 def _app(tmp_path, monkeypatch) -> tuple[DogBuddyApp, AppConfig]:
@@ -78,9 +82,9 @@ def test_saving_the_mask_back_does_not_destroy_the_token(tmp_path, monkeypatch):
         client.headers["X-Auth-Token"] = TOKEN
         r = client.put("/api/settings", json={"panel": {
             "enabled": True, "base_url": "http://127.0.0.1:8787",
-            "agent_token": "********Xgoc"}})
+            "agent_token": mask_secret(PANEL_TOKEN)}})
         assert r.status_code == 200
-        assert r.json()["panel"]["agent_token"] == "********Xgoc"
+        assert r.json()["panel"]["agent_token"] == mask_secret(PANEL_TOKEN)
         assert cfg.panel.agent_token == PANEL_TOKEN, "掩码被存成了真 token"
 
         client.put("/api/settings", json={"panel": {"agent_token": ""}})
@@ -89,7 +93,7 @@ def test_saving_the_mask_back_does_not_destroy_the_token(tmp_path, monkeypatch):
         client.put("/api/settings", json={"panel": {"agent_token": "brand-new-token-123456"}})
         assert cfg.panel.agent_token == "brand-new-token-123456", "真给新值时要生效"
         # 更新后又只能读到掩码
-        assert client.get("/api/settings").json()["panel"]["agent_token"] == "********3456"
+        assert client.get("/api/settings").json()["panel"]["agent_token"] == mask_secret("brand-new-token-123456")
 
 
 def test_llm_key_keeps_the_old_masking_contract(tmp_path, monkeypatch):
