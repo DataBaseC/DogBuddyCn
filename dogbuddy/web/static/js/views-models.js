@@ -349,19 +349,23 @@
             var typed = body.querySelector('#mdl-f-key').value.trim();
             if (typed) payload.api_key = typed;
             if (!payload.model) { U.toast('warn', '模型名不能为空'); return false; }
-            /* v0.10.23：新增前先说清楚会不会撞上同名条目 —— 服务端现在**拒绝**
-               覆盖同名同端点（409），同名不同端点会自动另存一条。这里把话说在前面，
-               免得用户提交后才发现"怎么又多了一条/怎么没保存"。 */
+            /* v0.10.23：身份 = 模型名 + 端点 + **密钥**。只有"完全同身份"才拦；
+               同端点换 key 是允许的（同一个服务商、同一个模型、两把 key 各存一条）——
+               这正是用户要的，别再拦错。 */
             if (isNew) {
-              var same = (state.models || []).filter(function (x) {
-                return x.model === payload.model;
+              var keyTail = payload.api_key
+                ? String(payload.api_key).replace(/[^A-Za-z0-9]/g, '').slice(-4) : '';
+              var clash = (state.models || []).filter(function (x) {
+                if (x.model !== payload.model) return false;
+                if ((x.endpoint_host || '') !== endpointHostOf(payload.base_url)) return false;
+                if (!keyTail) return true;  /* 没填新 key = 沿用全局 → 同身份 */
+                var tail = String(x.api_key || '').replace(/[^A-Za-z0-9]/g, '').slice(-4);
+                return tail === keyTail;
               });
-              var sameEp = same.filter(function (x) {
-                return (x.endpoint_host || '') === endpointHostOf(payload.base_url);
-              });
-              if (sameEp.length) {
-                U.toast('error', '已有同名同端点的条目「' + sameEp[0].id +
-                  '」。新增不会覆盖它：请点那一行的「备注」编辑，或改模型名/换地址。');
+              if (clash.length) {
+                U.toast('error', '已有完全同身份的条目「' + clash[0].id +
+                  '」（同名 + 同端点 + 同一把 key）。新增不会覆盖它：' +
+                  '要改请点那一行的「备注」；要用另一把 key，就把上面的 API Key 换成另一把。');
                 return false;
               }
             }
@@ -370,11 +374,11 @@
             var p = isNew ? apiModels().create(payload) : apiModels().update(m.id, payload);
             p.then(function (r) {
               var saved = (r && r.model) || {};
-              /* v0.10.21：同名模型但**端点不同** → 服务端另存了一条（两条共存），
-                 而不是把原来那条的地址改掉。把这件事说清楚，别让用户以为又是覆盖。 */
+              /* v0.10.23：同名但**身份不同**（换了端点或换了 key）→ 服务端另存了一条，
+                 两条共存。把这件事说清楚，别让用户以为又是覆盖。 */
               if (isNew && saved.endpoint_conflict) {
-                U.toast('success', '已加入目录：同名模型指向别的地址，已另存为「' +
-                  (saved.id || '') + '」，原来那条不受影响');
+                U.toast('success', '已加入目录：同名条目已有别的身份（端点或密钥不同），' +
+                  '已另存为「' + (saved.id || '') + '」，原来那条不受影响');
               } else {
                 U.toast('success', isNew ? '已加入目录' : '已保存');
               }

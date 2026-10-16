@@ -107,6 +107,28 @@ def endpoint_of(base_url: str) -> str:
     return f"{host}{path}"
 
 
+def key_signature(api_key: str) -> str:
+    """密钥的**可读身份后缀**（不是密钥本身）：后 4 位，界面上本来就以掩码显示。
+
+    用于给"同 provider + 同模型 + 同端点、但**换了 key**"的条目起一个能区分的 id
+    （owner 实测需求：两个服务商一样、模型一样、key 不同，要能各存一条）。
+    """
+    raw = "".join(ch for ch in str(api_key or "").strip() if ch.isalnum())
+    return raw[-4:] if raw else ""
+
+
+def key_identity(api_key: str) -> str:
+    """密钥的**身份指纹**（判断"是不是同一把 key"用，不泄露密钥）。
+
+    只看后 4 位不够（两把 key 可能同尾），所以身份比较用短哈希；
+    id 里则用可读的后 4 位。
+    """
+    raw = str(api_key or "").strip()
+    if not raw:
+        return ""
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
 def fetch_error_hint(exc: Any) -> str:
     """把"拉不到模型列表"的底层异常翻译成一句人能用的提示。
 
@@ -200,11 +222,31 @@ class ModelService:
         model = str(cfg.llm.model or "").strip()
         if not model:
             raise ValueError("当前没有配置模型，先把 base_url / model / api_key 配好")
-        existing = self.db.get_model(make_model_id(cfg.llm.provider or "openai_compat", model))
+        # v0.10.23：按**身份**找 —— 同名 + 同端点 + 同一把 key。
+        # 注意"条目没写 key"= 它用的就是全局那把 key，所以这种条目也算同身份
+        # （否则每次收编都会因为 id 带了后缀而再造一条重复条目）。
+        cur_ep = endpoint_of(cfg.llm.base_url or "")
+        cur_kid = key_identity(cfg.llm.api_key or "")
+        existing = None
+        for row in self.db.list_models():
+            if str(row.get("model") or "") != model:
+                continue
+            row_ep = endpoint_of(row.get("base_url") or "")
+            if row_ep and cur_ep and row_ep != cur_ep:
+                continue
+            row_kid = key_identity(row.get("api_key") or "")
+            if not row_kid or row_kid == cur_kid:
+                existing = row
+                break
+        if existing is None:
+            existing = self.db.get_model(
+                make_model_id(cfg.llm.provider or "openai_compat", model))
         if existing is not None:
             return {**existing, **self._public(existing)}
+        # 不复制密钥：条目留空 = 继续用全局那把（原语义，别改）
         return self.upsert(provider=cfg.llm.provider or "openai_compat", model=model,
-                           base_url=cfg.llm.base_url or "", display_name=model,
+                           base_url=cfg.llm.base_url or "",
+                           display_name=model,
                            source="adopted", enabled=True,
                            note="由控制台从运行配置收进目录")
 
@@ -262,42 +304,87 @@ class ModelService:
         return out
 
     # ------------------------------------------------------------- 写
-    def _resolve_id(self, provider: str, model: str, base_url: str,
-                    explicit: str = "") -> tuple[str, str]:
-        """决定目录条目该用哪个 id；返回 `(id, 端点冲突说明)`。
+    def _identity_of(self, row: dict[str, Any], model: str, endpoint: str,
+                     key_id: str, match_keys: bool = True) -> bool:
+        """一条目录条目是不是"同一个身份"。
 
-        显式 id（PATCH/更新已有条目）原样使用。否则 = `make_model_id(provider, model)`
-        这个"同名同 provider 只有一条"的旧口径——**这正是覆盖的根源**。
-        现在补一条规则：若同名条目已存在、且指向**另一个端点**，就追加 `@<host>`
-        另开一条，两条共存（前端用「端点」列/标签区分）。同一个端点的重复新增
-        仍然幂等（沿用原条目）。
+        * `match_keys=True`（**手动新增/更新**）：同名 + **同端点** + 同密钥。
+          这是 owner 要的口径——同一个服务商、同一个模型、两把 key 要能各存一条。
+        * `match_keys=False`（**导入同步**）：只要求同名 + 端点一致（原条目没写端点
+          也算命中）。导入是"把服务商的列表同步进来"，不该因为 key 不同就再造一条，
+          也不该把用户手写的备注挤掉。
+        """
+        if str(row.get("model") or "") != model:
+            return False
+        row_ep = endpoint_of(row.get("base_url") or "")
+        if not match_keys:
+            return (not row_ep) or (not endpoint) or row_ep == endpoint
+        if row_ep != endpoint:
+            return False
+        return key_identity(row.get("api_key") or "") == key_id
+
+    def find_by_identity(self, model: str, base_url: str, api_key: str) -> dict | None:
+        """按"同名+同端点+同密钥"找条目（收编/新增都用它，避免造重复条目）。"""
+        ep = endpoint_of(base_url)
+        kid = key_identity(api_key)
+        for row in self.db.list_models():
+            if self._identity_of(row, model, ep, kid):
+                return row
+        return None
+
+    def _resolve_id(self, provider: str, model: str, base_url: str,
+                    api_key: str = "", explicit: str = "",
+                    match_keys: bool = True) -> tuple[str, str]:
+        """决定目录条目该用哪个 id；返回 `(id, 另存说明)`。
+
+        **身份 = 模型名 + 端点 + 密钥**（owner 三次实测才收敛的口径）：
+        * 0.10.21 之前：id 只看 `provider+model` → 同名就覆盖（换地址也覆盖）。
+        * 0.10.21：加上端点 → 换地址可共存；但**同端点换 key 仍被当成"同一条"**，
+          于是"两个服务商一样、模型一样、key 不同"存不进去（owner 第三次指出）。
+        * 0.10.23：身份再补上**密钥指纹** —— 同端点不同 key = 两条，新条目 id 带
+          `@端点` / `-k<key 尾 4 位>`，人能一眼区分；完全同身份才复用（幂等更新）。
         """
         if explicit:
             return explicit, ""
         base = make_model_id(provider, model)
-        row = self.db.get_model(base)
-        if row is None:
-            return base, ""
         new_ep = endpoint_of(base_url)
-        old_ep = endpoint_of(row.get("base_url") or "")
-        if not new_ep or not old_ep or new_ep == old_ep:
+        new_kid = key_identity(api_key)
+        same_model = [r for r in self.db.list_models()
+                      if str(r.get("model") or "") == model]
+        if not same_model:
             return base, ""
-        host = new_ep.split("/")[0] or "alt"
-        safe = _safe_id(f"{base}@{host}")
+        # 1) 同身份 → 复用该条目（更新语义）
+        for row in same_model:
+            if self._identity_of(row, model, new_ep, new_kid, match_keys=match_keys):
+                return str(row["id"]), ""
+        # 2) 身份不同 → 造一个能区分的新 id：@端点 + -k<密钥尾>
+        #    注意分隔符必须**路径安全**：`#` 会在 URL 里被当 fragment 截断
+        #    （`PATCH /api/models/{id}` 直接 404），所以用 `@`（pchar 合法）与 `-k`。
+        ref = same_model[0]
+        parts = [base]
+        if endpoint_of(ref.get("base_url") or "") != new_ep:
+            parts.append("@" + (new_ep.split("/")[0] or "alt"))
+        if key_identity(ref.get("api_key") or "") != new_kid:
+            parts.append("-k" + (key_signature(api_key) or "global"))
+        cand = _safe_id("".join(parts))
         n = 1
         while True:
-            row = self.db.get_model(safe)
-            if row is None or endpoint_of(row.get("base_url") or "") == new_ep:
-                break
+            row = self.db.get_model(cand)
+            if row is None or self._identity_of(row, model, new_ep, new_kid):
+                break  # 空位，或同身份已存在（幂等）
             n += 1
-            safe = _safe_id(f"{base}@{host}-{n}")
-        return safe, f"同名条目已指向 {old_ep or '(空)'}，本条另存为 {safe}（新端点 {new_ep}）"
+            cand = _safe_id("".join(parts) + f"-{n}")
+        return cand, (f"同名条目已有别的身份（端点 "
+                      f"{endpoint_of(ref.get('base_url') or '') or '—'}，密钥 "
+                      f"…{key_signature(ref.get('api_key') or '') or '全局'}）→ 本条另存为 {cand}")
 
     def upsert(self, **fields: Any) -> dict[str, Any]:
         model = str(fields.get("model") or "").strip()
         provider = str(fields.get("provider") or "openai_compat").strip()
+        raw_key = str(fields.get("api_key") or "").strip()
         entry_id, conflict = self._resolve_id(
             provider, model, str(fields.get("base_url") or ""),
+            "" if (not raw_key or is_masked(raw_key)) else raw_key,
             str(fields.get("id") or "").strip())
         entry = {k: v for k, v in fields.items() if v is not None}
         entry.pop("_was", None)
@@ -322,31 +409,37 @@ class ModelService:
                 "endpoint_conflict": bool(conflict), "conflict_detail": conflict}
 
     def create(self, **fields: Any) -> dict[str, Any]:
-        """**新增**：绝不静默覆盖同名条目（owner 实测两次的真问题）。
+        """**新增**：绝不静默覆盖同名条目（owner 实测三次，口径收敛到"身份"）。
 
-        0.10.21 只解决了"同名但**不同**端点"（另存 `...@host`）。**同名同端点**仍然走
-        `upsert` 的更新语义 → 第二条把第一条的备注/密钥/参数悄悄盖掉（复现：HTTP 200、
-        条数不变、`note` 变成新值、界面无任何提示）。
-
-        现在：同名同端点 ⇒ 抛 `ModelExistsError`（路由给 409 + 人话），
-        要改那条请走 `PATCH /models/{id}`（页面上就是「备注」按钮），新增只负责新增。
+        身份 = **模型名 + 端点 + 密钥**：
+        * 0.10.21 只解决了"同名但不同端点"；**同名同端点**仍走 upsert 的更新语义，
+          把第一条的备注/密钥/参数悄悄盖掉（复现：HTTP 200、条数不变、note 变新值）；
+        * owner 第三次指出真正想要的是：**同一个服务商、同一个模型、两把 key，各存一条**。
+          所以身份必须带上密钥：完全同身份 ⇒ 409；同端点换 key ⇒ 各存一条
+          （新条目 id 形如 `...@host#<key尾4>`）；换端点 ⇒ 也各存一条。
+        要改某一条走 `PATCH /models/{id}`（页面上是「备注」按钮）。
         """
         model = str(fields.get("model") or "").strip()
         provider = str(fields.get("provider") or "openai_compat").strip()
         if not model:
             raise ValueError("model 不能为空")
-        mid, conflict = self._resolve_id(provider, model, str(fields.get("base_url") or ""))
+        base_url = str(fields.get("base_url") or "")
+        api_key = str(fields.get("api_key") or "").strip()
+        mid, conflict = self._resolve_id(provider, model, base_url, api_key)
         if conflict:
-            # 同名、另一个端点 → **另存一条**（两条共存），不是覆盖
+            # 身份不同（换了 key 或换了端点）→ **另存一条**，不是覆盖
             return self.upsert(**fields)
         existing = self.db.get_model(mid)
         if existing is not None:
+            tail = key_signature(existing.get("api_key") or "")
             raise ModelExistsError(
-                f"目录里已经有同名同端点的条目「{mid}」"
+                f"目录里已经有**完全同身份**的条目「{mid}」"
                 f"（端点 {endpoint_of(existing.get('base_url') or '') or '—'}，"
+                f"密钥 {'自带 …' + tail if tail else '沿用全局'}，"
                 f"备注：{(existing.get('note') or '（空）')[:40]}）。"
                 f"新增不会覆盖它：要改配置请点那一行的「备注」编辑；"
-                f"要另存一条，请改模型名或把 API 地址换成另一个端点。")
+                f"要**同一个模型用另一把 key**，请在新增时把 API Key 填成另一把"
+                f"（端点相同、key 不同会自动各存一条）；换个 API 地址也会另存一条。")
         return self.upsert(**fields)
 
     def update(self, model_id: str, **fields: Any) -> dict[str, Any]:
@@ -460,9 +553,12 @@ class ModelService:
         existing = {r["id"]: r for r in self.db.list_models()}
         added, refreshed, kept_notes, ctx_filled, conflicts = [], [], 0, 0, []
         for name in names:
-            mid, conflict = self._resolve_id(used_provider, name, used_base)
+            # 导入 = "同步服务商列表"：同名同端点**不因 key 不同而重复建条目**
+            # （match_keys=False），也不动已存在条目的备注/密钥/端点。
+            mid, conflict = self._resolve_id(used_provider, name, used_base,
+                                             api_key or "", match_keys=False)
             if conflict:
-                # 同名但另一个端点 → 另存一条，**不动原来那条**
+                # 同名但身份不同（端点/key 不同）→ 另存一条，**不动原来那条**
                 conflicts.append({"model": name, "id": mid, "detail": conflict})
             entry = existing.get(mid)
             ctx = ctx_of.get(name, 0)

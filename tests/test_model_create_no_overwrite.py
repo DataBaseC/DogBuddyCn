@@ -42,12 +42,76 @@ def test_同名同端点新增被拒绝且原条目一字未动(tmp_path):
         svc.create(model="deepseek-v4.1-flash", provider="openai_compat",
                    base_url="https://token.sensenova.cn/v1", note="第二条：新备注")
     msg = str(ei.value)
-    assert "同名同端点" in msg and "备注" in msg, f"错误信息要可行动：{msg}"
+    assert "完全同身份" in msg and "备注" in msg and "另一把 key" in msg, f"错误信息要可行动：{msg}"
     rows = db.list_models()
     assert len(rows) == 1, f"不该多出一条：{[r['id'] for r in rows]}"
     kept = db.get_model(first["id"])
     assert kept["note"] == "第一条：原始备注", "原条目备注被覆盖了"
     assert kept["context_window"] == 1048576
+    db.close()
+
+
+def test_同名同端点不同key各存一条(tmp_path):
+    """owner 的真正诉求：**同一个服务商、同一个模型、两把 key**，要能各存一条。"""
+    db, svc = _svc(tmp_path)
+    a = svc.create(model="deepseek-v4.1-flash", provider="openai_compat",
+                   base_url="https://token.sensenova.cn/v1", api_key="sk-account-A-1111",
+                   note="账号 A")
+    b = svc.create(model="deepseek-v4.1-flash", provider="openai_compat",
+                   base_url="https://token.sensenova.cn/v1", api_key="sk-account-B-2222",
+                   note="账号 B")
+    assert a["id"] != b["id"], "同端点不同 key 必须是两条"
+    assert b["id"].endswith("-k2222"), f"新 id 要能一眼区分密钥：{b['id']}"
+    assert a["id"] == make_model_id("openai_compat", "deepseek-v4.1-flash")
+    rows = db.list_models()
+    assert len(rows) == 2
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[a["id"]]["api_key"] == "sk-account-A-1111", "A 的 key 不能被改"
+    assert by_id[a["id"]]["note"] == "账号 A"
+    assert by_id[b["id"]]["api_key"] == "sk-account-B-2222"
+    # 第三把 key 再存一条 → 三条共存
+    c = svc.create(model="deepseek-v4.1-flash", provider="openai_compat",
+                   base_url="https://token.sensenova.cn/v1", api_key="sk-account-C-3333")
+    assert len(db.list_models()) == 3
+    assert len({a["id"], b["id"], c["id"]}) == 3
+    db.close()
+
+
+def test_同名同端点同一把key才拒绝(tmp_path):
+    db, svc = _svc(tmp_path)
+    svc.create(model="m-key", provider="openai_compat",
+               base_url="https://a.example/v1", api_key="sk-same-9999", note="第一次")
+    with pytest.raises(ModelExistsError) as ei:
+        svc.create(model="m-key", provider="openai_compat",
+                   base_url="https://a.example/v1", api_key="sk-same-9999", note="第二次")
+    assert "完全同身份" in str(ei.value)
+    rows = db.list_models()
+    assert len(rows) == 1 and rows[0]["note"] == "第一次", "同身份不许覆盖"
+    db.close()
+
+
+def test_用全局key与自带key也算不同身份(tmp_path):
+    db, svc = _svc(tmp_path)
+    a = svc.create(model="m-g", provider="openai_compat", base_url="https://a.example/v1",
+                   api_key="sk-own-4444")
+    b = svc.create(model="m-g", provider="openai_compat", base_url="https://a.example/v1")
+    assert a["id"] != b["id"] and b["id"].endswith("-kglobal")
+    assert len(db.list_models()) == 2
+    db.close()
+
+
+def test_按身份收编不造重复条目(tmp_path):
+    """adopt_current 要按"名+端点+密钥"找，不能因为 id 带了后缀就再造一条。"""
+    db, svc = _svc(tmp_path)
+    created = svc.create(model="m-adopt", provider="openai_compat",
+                         base_url="https://a.example/v1", api_key="sk-adopt-7777")
+    assert created["id"].endswith("m-adopt"), created["id"]
+    svc.app.llm.model = "m-adopt"
+    svc.app.llm.base_url = "https://a.example/v1"
+    svc.app.llm.api_key = "sk-adopt-7777"
+    again = svc.adopt_current()
+    assert again["id"] == created["id"], "同身份收编必须命中已有条目（不能造重复）"
+    assert len(db.list_models()) == 1
     db.close()
 
 
