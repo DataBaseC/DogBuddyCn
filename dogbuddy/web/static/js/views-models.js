@@ -77,7 +77,7 @@
       '<td>' + U.esc(m.provider || '') + '<div class="card-sub mono">' + U.esc(m.base_url || '—') + '</div>' +
       (m.has_api_key
         ? '<span class="badge badge-green" title="该条目自带密钥，「设为当前」时会一起切换">自带密钥</span>'
-        : '<span class="badge badge-grey" title="跟设置页里的全局密钥共用">用全局密钥</span>') + '</td>' +
+        : '<span class="badge badge-amber" title="设置页的全局密钥框已停用；给这条填一把自己的密钥最稳妥">用全局密钥（已停用）</span>') + '</td>' +
       '<td>' + noteCell(m) + '</td>' +
       '<td>' + caps(m) + '</td>' +
       '<td class="num">' + (m.context_window ? U.esc(String(m.context_window)) : '—') + '</td>' +
@@ -131,6 +131,9 @@
       ['目录内模型', s.total || 0],
       ['启用', s.enabled || 0],
       ['已写备注', s.noted || 0],
+      ['用全局密钥（设置页已停用）', (state.models || []).filter(function (m) {
+        return m.has_api_key === false;
+      }).length],
       ['当前模型', s.current_model || '—']
     ].map(function (kv) {
       return '<div class="stat"><div class="stat-num">' + U.esc(String(kv[1])) + '</div>' +

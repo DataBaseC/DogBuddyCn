@@ -159,8 +159,16 @@ def router(svc, auth_deps) -> APIRouter:
             # 密钥：掩码 = 保持不变。
             # 这里原来没有这道判断，于是前端把掩码原样回传时，**真密钥会被
             # "********abcd" 覆盖掉**（实测复现）→ LLM 静默变成认证失败。
+            #
+            # v0.10.25（owner 要求）：**全局密钥在设置页停用** —— 密钥统一归属
+            # 「模型管理」页的具体模型条目（`activate()` 会把条目的密钥切到运行时）。
+            # 真收到一把新密钥就明确拒绝，而不是默默写进去或默默忽略。
             if body.llm.api_key and not is_masked_secret(body.llm.api_key):
-                cfg.llm.api_key = body.llm.api_key
+                raise HTTPException(
+                    status_code=400,
+                    detail="全局 API Key 已在设置页停用：请到「模型管理」页新增/编辑"
+                           "该模型条目并填写 API Key，然后点「设为管理员模型」——"
+                           "密钥会随模型一起切换（每个模型可自带密钥）。")
             if body.llm.keys is not None:
                 if all(not is_masked_secret(k) for k in body.llm.keys):
                     cfg.llm.keys = [str(k).strip() for k in body.llm.keys if str(k).strip()]

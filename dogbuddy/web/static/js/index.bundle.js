@@ -3046,8 +3046,13 @@
         }).join('') + '</select></div>' +
         '<div class="field"><span class="field-label">Base URL</span>' +
         '<input class="input mono" id="set-base-url" value="' + U.esc(llm.base_url || '') + '" placeholder="https://api.openai.com/v1"></div>' +
-        '<div class="field"><span class="field-label">API Key' + (llm.api_key ? '（已保存：' + U.esc(llm.api_key) + '，留空保持不变）' : '') + '</span>' +
-        '<input class="input mono" id="set-api-key" type="password" placeholder="sk-…"></div>' +
+        '<div class="field"><span class="field-label">全局 API Key（已停用）</span>' +
+        '<input class="input mono" id="set-api-key" type="password" value="" disabled ' +
+        'placeholder="' + U.esc(llm.api_key || '（未设置）') + '">' +
+        '<div class="hint">v0.10.25：**这个全局密钥框已停用** —— 密钥统一在「模型管理」页的' +
+        '**模型条目**上配置（点「新增模型」或那一行的编辑，填 API Key），' +
+        '点「设为管理员模型」时会连同密钥一起切换。这里只读显示当前生效的密钥掩码。' +
+        '</div></div>' +
         '<div class="set-row" style="border:0;padding-top:2px;gap:10px">' +
         '<span class="hint">管理员当前模型：<b class="mono">' + U.esc(llm.model || '(未设置)') + '</b> · ' +
         '换模型请到「模型管理」页点「设为管理员模型」（每个模型可自带密钥与上下文）</span>' +
@@ -3291,7 +3296,8 @@
       var body = {};
       try {
         if (group === 'llm') {
-          var key = document.getElementById('set-api-key').value.trim();
+          /* v0.10.25：全局密钥已停用 —— 这里不再读取/提交它（密钥归「模型管理」页的条目）。
+             旧代码会读 #set-api-key，现在那个框是 disabled 的，读也读不到。 */
           var payload = {
             provider: document.getElementById('set-provider').value,
             base_url: document.getElementById('set-base-url').value.trim(),
@@ -3300,8 +3306,6 @@
             compact_threshold: Number(document.getElementById('set-compact').value),
             request_timeout: Number(document.getElementById('set-timeout').value)
           };
-          /* api_key 掩码时不回传：留空不传 */
-          if (key && !masked(key)) payload.api_key = key;
           body.llm = payload;
         } else if (group === 'retry') {
           body.llm = {
@@ -4977,7 +4981,7 @@
       '<td>' + U.esc(m.provider || '') + '<div class="card-sub mono">' + U.esc(m.base_url || '—') + '</div>' +
       (m.has_api_key
         ? '<span class="badge badge-green" title="该条目自带密钥，「设为当前」时会一起切换">自带密钥</span>'
-        : '<span class="badge badge-grey" title="跟设置页里的全局密钥共用">用全局密钥</span>') + '</td>' +
+        : '<span class="badge badge-amber" title="设置页的全局密钥框已停用；给这条填一把自己的密钥最稳妥">用全局密钥（已停用）</span>') + '</td>' +
       '<td>' + noteCell(m) + '</td>' +
       '<td>' + caps(m) + '</td>' +
       '<td class="num">' + (m.context_window ? U.esc(String(m.context_window)) : '—') + '</td>' +
@@ -5031,6 +5035,9 @@
       ['目录内模型', s.total || 0],
       ['启用', s.enabled || 0],
       ['已写备注', s.noted || 0],
+      ['用全局密钥（设置页已停用）', (state.models || []).filter(function (m) {
+        return m.has_api_key === false;
+      }).length],
       ['当前模型', s.current_model || '—']
     ].map(function (kv) {
       return '<div class="stat"><div class="stat-num">' + U.esc(String(kv[1])) + '</div>' +

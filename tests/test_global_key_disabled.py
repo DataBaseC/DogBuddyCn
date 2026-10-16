@@ -1,0 +1,67 @@
+# DogBuddyCn — 全局密钥在设置页停用（v0.10.25）
+# Copyright (C) 2026 DogBuddyCn contributors — AGPL-3.0
+"""owner 要求："把设置页里全局 llm key 这个给禁用了，我感觉一点用都没有，只留模型页里的列表"。
+
+口径：**密钥归属"模型条目"**（`activate()` 会把条目的密钥切到运行时），
+设置页那个全局密钥框停用；真的往接口塞一把新密钥要**明确拒绝**，
+而不是默默写进去、也不是默默忽略。
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests.test_models import _client  # noqa: E402
+
+
+def test_设置页写全局密钥被明确拒绝(tmp_path, monkeypatch):
+    app, client = _client(tmp_path, monkeypatch)
+    with client:
+        before = client.get("/api/settings").json()["llm"]["api_key"]
+        r = client.put("/api/settings", json={"llm": {"api_key": "sk-brand-new-key-9999"}})
+        assert r.status_code == 400, r.text
+        msg = r.json()["detail"]
+        assert "停用" in msg and "模型管理" in msg, msg
+        # 运行时的密钥没有被改动（拒绝就得干干净净）
+        assert app.config.llm.api_key == "k"
+        assert client.get("/api/settings").json()["llm"]["api_key"] == before
+
+
+def test_设置页回传掩码或留空仍然放行(tmp_path, monkeypatch):
+    """前端可能把掩码原样回传（历史行为）：那属于"不改密钥"，必须照常通过。"""
+    app, client = _client(tmp_path, monkeypatch)
+    with client:
+        masked = client.get("/api/settings").json()["llm"]["api_key"]
+        assert client.put("/api/settings", json={
+            "llm": {"api_key": masked, "temperature": 0.5}}).status_code == 200
+        assert client.put("/api/settings", json={
+            "llm": {"temperature": 0.6}}).status_code == 200
+        assert app.config.llm.api_key == "k", "掩码/留空不能动真密钥"
+        assert app.config.llm.temperature == 0.6
+
+
+def test_模型条目自带密钥仍能切换运行时密钥(tmp_path, monkeypatch):
+    """停用的是"设置页那个框"，不是"全局密钥"本身 —— 条目切换必须照常带密钥。"""
+    app, client = _client(tmp_path, monkeypatch)
+    with client:
+        created = client.post("/api/models", json={
+            "model": "kv-model", "base_url": "http://kv/v1",
+            "api_key": "sk-entry-key-7777"}).json()
+        mid = created["model"]["id"]
+        act = client.post(f"/api/models/{mid}/activate").json()
+        assert act["result"]["api_key_switched"] is True
+        assert app.config.llm.api_key == "sk-entry-key-7777"
+        assert app.config.llm.model == "kv-model"
+
+
+def test_设置页仍回掩码不泄明文(tmp_path, monkeypatch):
+    """设置页仍要能看到"当前生效密钥的掩码"（只读展示），但**绝不回明文**。"""
+    app, client = _client(tmp_path, monkeypatch)
+    with client:
+        app.config.llm.api_key = "sk-abcdefghijklmnop"
+        masked = client.get("/api/settings").json()["llm"]["api_key"]
+        assert masked and masked != "sk-abcdefghijklmnop", f"回传了明文：{masked}"
+        assert masked.endswith("mnop"), f"掩码要给末尾几位好辨认：{masked}"
+        assert "abcdefghij" not in masked

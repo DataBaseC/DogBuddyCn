@@ -97,7 +97,11 @@ def test_saving_the_mask_back_does_not_destroy_the_token(tmp_path, monkeypatch):
 
 
 def test_llm_key_keeps_the_old_masking_contract(tmp_path, monkeypatch):
-    """回归：LLM 密钥的既有口径（掩码回传=不改）不能因为统一口径而退化。"""
+    """回归：LLM 密钥的既有口径（掩码回传=不改）不能因为统一口径而退化。
+
+    v0.10.25（owner 要求）：全局密钥在设置页**停用** —— 掩码/留空仍放行（= 不改），
+    但真塞一把新密钥要 400，而不是写进去。
+    """
     app, cfg = _app(tmp_path, monkeypatch)
     with TestClient(app.web_app) as client:
         client.headers["X-Auth-Token"] = TOKEN
@@ -105,8 +109,10 @@ def test_llm_key_keeps_the_old_masking_contract(tmp_path, monkeypatch):
         assert cfg.llm.api_key == LLM_KEY
         client.put("/api/settings", json={"llm": {"model": "m2"}})
         assert cfg.llm.api_key == LLM_KEY and cfg.llm.model == "m2"
-        client.put("/api/settings", json={"llm": {"api_key": "sk-brand-new-9999"}})
-        assert cfg.llm.api_key == "sk-brand-new-9999"
+        r = client.put("/api/settings", json={"llm": {"api_key": "sk-brand-new-9999"}})
+        assert r.status_code == 400, "全局密钥已在设置页停用"
+        assert "模型管理" in r.json()["detail"]
+        assert cfg.llm.api_key == LLM_KEY, "被拒绝的写入不能留下副作用"
 
 
 def test_frontend_panel_token_field_is_write_only():
