@@ -39,7 +39,8 @@ class FakeCoordinator:
     def dispatch(self, window_id, prompt):
         self.dispatched.append((window_id, prompt))
 
-    async def dispatch_and_wait(self, window_id, prompt, coordinated=False, timeout=None):
+    async def dispatch_and_wait(self, window_id, prompt, coordinated=False, timeout=None,
+                                run_parent_id=""):
         self.calls.append((window_id, prompt, coordinated, timeout))
         from dogbuddy.cron.scheduler import JobOutcome
         return JobOutcome(status=self.status, summary=self.summary)
@@ -235,7 +236,7 @@ class PendingCoordinator(FakeCoordinator):
         self.after = after
         self.futures: list = []
 
-    def dispatch_pending(self, window_id, prompt):
+    def dispatch_pending(self, window_id, prompt, run_parent_id=""):
         from dogbuddy.agents.core.runners import RunnerResult
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
@@ -317,7 +318,8 @@ def test_组员被限速时由系统重试这一步(tmp_path, monkeypatch):
     # 组长拿到的第一次结果是 rate_limited；随后**系统**（settle）续跑这一步
     calls = {"n": 0}
 
-    async def fake_wait(window_id, prompt, coordinated=False, timeout=None):
+    async def fake_wait(window_id, prompt, coordinated=False, timeout=None,
+                        run_parent_id=""):
         calls["n"] += 1
         return JobOutcome(status="ok", summary="续跑成功")
 

@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -323,6 +323,39 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v13(conn: sqlite3.Connection) -> None:
+    """`runs` 表（2026-10-23，P0）：把"一次运行"做成一等实体。
+
+    起因（owner 实测三连）："你在哪跑呢，我咋没看见"、"我能看到项目，但前端根本没显示
+    工位被挂在"、"他好像卡住了"。根因是运行状态散在四个地方
+    （`windows.status` / `groups.last_run` / `job_runs` / 内存里的 asyncio 任务），
+    没有一个"**此刻谁在跑什么**"的唯一真相；而且运行的存活挂在调用方的 HTTP 连接上。
+
+    `job_runs` 是**定时任务账本**，语义不同，保持不动；`runs` 覆盖全部运行
+    （人工派单 / 群组 / 群组步骤 / 组长派给组员），并记录父子关系以便级联取消。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS runs(
+      id TEXT PRIMARY KEY,
+      kind TEXT DEFAULT 'manual',
+      parent_run_id TEXT DEFAULT '',
+      window_id TEXT DEFAULT '', group_id TEXT DEFAULT '',
+      project_id TEXT DEFAULT '', job_id TEXT DEFAULT '',
+      status TEXT DEFAULT 'queued', phase TEXT DEFAULT '',
+      step_no INTEGER DEFAULT 0, steps_total INTEGER DEFAULT 0,
+      prompt_chars INTEGER DEFAULT 0, recap_chars INTEGER DEFAULT 0,
+      iterations INTEGER DEFAULT 0,
+      pause_count INTEGER DEFAULT 0, paused_seconds REAL DEFAULT 0,
+      cancel_requested INTEGER DEFAULT 0,
+      started_at TEXT DEFAULT '', updated_at TEXT DEFAULT '', finished_at TEXT DEFAULT '',
+      error_code TEXT DEFAULT '', summary TEXT DEFAULT '');
+    CREATE INDEX IF NOT EXISTS idx_runs_active ON runs(status, started_at);
+    CREATE INDEX IF NOT EXISTS idx_runs_window ON runs(window_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id, started_at);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -339,6 +372,7 @@ _MIGRATIONS: dict[int, Any] = {
     10: _migrate_v10,
     11: _migrate_v11,
     12: _migrate_v12,
+    13: _migrate_v13,
 }
 
 

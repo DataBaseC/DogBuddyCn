@@ -1436,3 +1436,47 @@ owner 实测："**员工调用工具的时候，并没显示，得刷新一下�
   保持"用户在看历史时不打断滚动"，助手正文落库时收掉半截流式气泡。
 
 基线：680 passed / 4 skipped；`audit_ui --strict` exit 0。
+
+---
+
+## 31. 第二十四轮：P0「运行可见性与可控性」最小可用（2026-10-23，`0.10.37`）
+
+按《方案-长任务可见性与可控性-2026-10-23.md》的**修订版 P0**（owner："简单开修"）落地。
+逻辑复核发现的两条主链路（W1/W2/W3）一次补齐。
+
+### 31.1 运行台账（schema 12 → 13）
+
+新表 `runs` + `RunRegistry`（`services/run_registry.py`）：
+`start / update / note_pause / finish / cancel / active / recent / get / summary`，
+状态机 `queued → running → (paused) → done|failed|cancelled|timeout|interrupted`，
+父子关系 `parent_run_id`（群组 → 成员步骤 → 组长派给组员的活），
+每次变化发 `run.started/updated/finished` 事件（前端只订阅这三种）。
+
+**启动清理**：`mark_orphans_interrupted()` 把上个进程遗留的 running/paused 标成
+`interrupted` —— 今天为部署重启过 3 次，没有这一步，界面会永远挂着"运行中"的僵尸行。
+
+### 31.2 取消（以前**完全没有入口**）
+
+`TaskQueue`：每项跑在**自己的任务**里（`_current_handle`）+ `drop()` + `cancel_current()`；
+队列循环捕获 `CancelledError` 时明确区分"这一项被取消"与"队列被关停"——
+以前 runner 直接 inline 在循环任务里，取消它就等于把整个窗口队列杀掉。
+`WindowManager.cancel_run()`：排队中 → 从队列拿掉；运行中 → 打断那一项；
+`RunRegistry.cancel(cascade=True)` 级联取消子运行。**不删产物、不算失败**。
+
+### 31.3 管理员终于有了运行入口（W1/W2/W3）
+
+新增工具：`group_run`（跑群组任务并等结果）、`window_dispatch`（派给单个工位，后台）、
+`run_list`、`run_status`、`run_cancel`。以前管理员**没有任何"启动运行"的工具**，
+只能靠 `task_create` + `task_run_now` 绕（实测：整理工作区因此变成了"一个定时任务"）；
+`progress_report` 也读不到群组运行 —— 群组跑着时问"进度怎么样"会答**"没有任务在跑"**，
+现在它读运行台账（`## 正在跑（runs）` + `live_runs`）。
+
+### 31.4 API + 前端指示器
+
+`GET /api/runs?active=1`、`GET /api/runs/{id}`（含子运行）、`POST /api/runs/{id}/cancel`、
+`POST /api/runs/{id}/retry`；`GET /api/status` 增加 `active_runs` / `run_summary`。
+前端 `views-runs.js`：顶栏常驻「▶ N 个任务在跑（M 个限速暂停）」→ 抽屉列出
+工位/群组 · 类型 · 阶段 · 状态 · 已跑多久 · 限速暂停次数，每行可**取消**；
+SSE `run.*` 实时更新，断线时 15s 轮询兜底。
+
+基线：688 passed / 4 skipped（新增 `tests/test_run_registry.py` 8 例）；`audit_ui --strict` exit 0。

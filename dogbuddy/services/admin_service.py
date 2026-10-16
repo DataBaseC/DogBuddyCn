@@ -45,6 +45,9 @@ class AdminService:
         # 工具一调就报 "panel client not configured"（owner 实测：让管理员整理
         # 线上工作区，它如实回报"工具存在但面板客户端未配置"）。
         panel: Any = None,
+        # v0.10.37（P0）：运行台账 —— 管理员的 group_run/window_dispatch/run_list/
+        # run_cancel/run_status 与 progress_report 都靠它（**"此刻谁在跑什么"的唯一真相**）
+        runs: Any = None,
         bus: Any = None,
         max_iterations: int = 20,
         self_status: Callable[[bool], dict] | None = None,
@@ -61,6 +64,7 @@ class AdminService:
         self.models = models
         self.groups = groups
         self.panel = panel
+        self.runs = runs
         self.bus = bus
         self.max_iterations = max_iterations
         self.self_status = self_status
@@ -77,6 +81,7 @@ class AdminService:
         svc = AdminServices(windows=windows, jobs=jobs, sessions=sessions,
                             workspaces=workspaces, memory=memory, config=config,
                             progress=self._progress_dict,
+                            runs=self.runs,
                             self_status=self_status, self_update=self_update,
                             # P1-9：agent 路径改 profile 也要落盘
                             persist=getattr(config, "persist", None),
@@ -452,19 +457,38 @@ class AdminService:
             lines.append(f"- {w.name}({w.id}) [{w.role}] status={st['status']} "
                          f"mode={w.mode} task={st['current_task']!r} tokens={st['tokens']}")
         job_lines = []
-        for j in self.jobs.list():
+        for j in (self.jobs.list() if getattr(self, "jobs", None) is not None else []):
             job_lines.append(f"- {j.name}({j.id}) win={j.window_id} sched={j.schedule_raw} "
                              f"enabled={j.enabled} next={j.next_run_at} fails={j.fail_count}")
-        runs = self.jobs.runs(limit=5)
+        runs = (self.jobs.runs(limit=5)
+                if getattr(self, "jobs", None) is not None else [])
         # v0.10.19：`summary` 可能是 NULL（任务是"没事可报"或被人为清过），
         # 直接 `r['summary'][:80]` 会 TypeError: 'NoneType' object is not subscriptable
         # —— 表现就是"主管查全局进度"这个核心工具整个挂掉（圆桌测试里实测到）。
         run_lines = [f"- {r.get('status')} {r.get('started_at')} "
                      f"{str(r.get('summary') or '')[:80]}" for r in runs]
-        text = ("## Windows\n" + ("\n".join(lines) or "(none)") +
+        # v0.10.37（P0 · 逻辑复核 W2）：**正在跑的运行**必须在这里。
+        # 以前只读 windows.status + cron 的 job_runs —— 群组运行中途问"进度怎么样"，
+        # 管理员会回答"没有任务在跑"（不是不详细，是**错的**）。
+        live_lines: list[str] = []
+        run_summary: dict[str, Any] = {}
+        if getattr(self, "runs", None) is not None:
+            try:
+                for r in self.runs.active():
+                    live_lines.append(
+                        f"- {r.id} [{r.kind}] {r.window_name or r.group_name or '-'} "
+                        f"phase={r.phase or '-'} status={r.status} "
+                        f"限速暂停{r.pause_count}次/共{r.paused_seconds:.0f}s "
+                        f"started={r.started_at}")
+                run_summary = self.runs.summary()
+            except Exception:  # noqa: BLE001
+                logger.debug("runs lookup failed in progress_report", exc_info=True)
+        text = ("## 正在跑（runs）\n" + ("\n".join(live_lines) or "(无)") +
+                "\n## Windows\n" + ("\n".join(lines) or "(none)") +
                 "\n## Jobs\n" + ("\n".join(job_lines) or "(none)") +
                 "\n## Recent runs\n" + ("\n".join(run_lines) or "(none)"))
-        return {"text": text, "windows": len(lines), "jobs": len(job_lines)}
+        return {"text": text, "windows": len(lines), "jobs": len(job_lines),
+                "live_runs": len(live_lines), "run_summary": run_summary}
 
 
 class _AdminGate:

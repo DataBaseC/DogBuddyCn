@@ -513,16 +513,36 @@ class WindowManager:
     # ------------------------------------------------------------- dispatch
     def dispatch(self, window_id: str, prompt: str, urgent: bool = True,
                  job_id: str | None = None, kind: str = "prompt",
-                 llm_profile: str = "") -> None:
+                 llm_profile: str = "", run_id: str = "") -> None:
         rt = self._rt(window_id)
+        meta: dict[str, Any] = {}
+        if run_id:
+            meta["run_id"] = run_id
         rt.queue.submit(TaskItem(prompt=prompt, job_id=job_id, urgent=urgent,
-                                 kind=kind or "prompt", llm_profile=llm_profile or ""))
+                                 kind=kind or "prompt", llm_profile=llm_profile or "",
+                                 meta=meta))
         self.db.audit("system", "window:dispatch",
-                      f"{rt.window.id} job={job_id} kind={kind} prompt={prompt[:80]}")
+                      f"{rt.window.id} job={job_id} kind={kind} run={run_id or '-'} "
+                      f"prompt={prompt[:80]}")
+
+    def _child_run(self, window_id: str, parent_run_id: str, kind: str) -> str:
+        """给"派给某个工位的活"记一条**子运行**（P0：界面要能看到谁在干什么）。"""
+        runs = getattr(self, "runs", None)
+        if runs is None or not parent_run_id:
+            return ""
+        try:
+            w = self.db.get_window(window_id)
+            run = runs.start(kind=kind, window_id=window_id, parent_run_id=parent_run_id,
+                             project_id=getattr(w, "project_id", "") or "",
+                             window_name=getattr(w, "name", "") or "", status="queued")
+            return run.id
+        except Exception:  # noqa: BLE001 — 台账失败不能拦住派单
+            logger.warning("child run start failed", exc_info=True)
+            return ""
 
     def dispatch_pending(self, window_id: str, prompt: str, *,
                          coordinated: bool = True, kind: str = "prompt",
-                         llm_profile: str = "") -> "asyncio.Future":
+                         llm_profile: str = "", run_parent_id: str = "") -> "asyncio.Future":
         """派单但**不等**：返回一个可 await 的 future（v0.10.36）。
 
         为什么需要它：组长用 `member_dispatch(wait=false)` 把活排给组员时，如果只有
@@ -535,6 +555,9 @@ class WindowManager:
         meta: dict[str, Any] = {"future": future, "run_owned_by_caller": True}
         if coordinated:
             meta["coordinated"] = True
+        child = self._child_run(window_id, run_parent_id, "coordinated")
+        if child:
+            meta["run_id"] = child
         rt.queue.submit(TaskItem(prompt=prompt, job_id=None, urgent=False,
                                  kind=kind or "prompt", llm_profile=llm_profile or "",
                                  meta=meta))
@@ -545,7 +568,8 @@ class WindowManager:
     async def dispatch_and_wait(self, window_id: str, prompt: str,
                                 job_id: str | None = None, kind: str = "prompt",
                                 llm_profile: str = "", coordinated: bool = False,
-                                timeout: float | None = None) -> JobOutcome:
+                                timeout: float | None = None,
+                                run_parent_id: str = "") -> JobOutcome:
         """Cron / 组长派活路径：投进队列并等这一轮结束。
 
         `coordinated=True`（v0.10.33）：这是**组长派给组员**的活，`window.run_finished`
@@ -557,6 +581,9 @@ class WindowManager:
         meta: dict[str, Any] = {"future": future, "run_owned_by_caller": True}
         if coordinated:
             meta["coordinated"] = True
+        child = self._child_run(window_id, run_parent_id, "coordinated")
+        if child:
+            meta["run_id"] = child
         rt.queue.submit(TaskItem(prompt=prompt, job_id=job_id, urgent=False,
                                  kind=kind or "prompt", llm_profile=llm_profile or "",
                                  # 调用方（CronScheduler / GroupManager）已经开好 job_runs 行
@@ -664,7 +691,50 @@ class WindowManager:
         "他好像卡住了"。
         """
         self._manual_last[window_id] = {"prompt": prompt, "attempts": 0}
-        self.dispatch(window_id, prompt, urgent=True)
+        # v0.10.37（P0）：登记一条**运行台账** —— "此刻谁在跑什么"的唯一真相。
+        run_id = ""
+        if getattr(self, "runs", None) is not None:
+            try:
+                w = self.db.get_window(window_id)
+                run = self.runs.start(kind="manual", window_id=window_id,
+                                      project_id=getattr(w, "project_id", "") or "",
+                                      window_name=getattr(w, "name", "") or "",
+                                      prompt_chars=len(prompt or ""), status="queued")
+                run_id = run.id
+                self._manual_last[window_id]["run_id"] = run_id
+            except Exception:  # noqa: BLE001 — 台账失败不能拦住派单
+                logger.warning("run start failed for manual dispatch", exc_info=True)
+        self.dispatch(window_id, prompt, urgent=True, run_id=run_id)
+
+    def cancel_run(self, run_id: str) -> dict[str, Any]:
+        """取消一次运行（人工派单 / 组员工位上的活）。幂等，返回给人看的结果。
+
+        v0.10.37（P0）：以前**没有任何取消入口**（owner："停掉重来"无处可停）。
+        排队中 → 从队列拿掉；正在跑 → 打断那一项的执行任务（`TaskQueue.cancel_current`，
+        队列本身继续活着）。
+        """
+        runs = getattr(self, "runs", None)
+        if runs is None:
+            return {"ok": False, "reason": "运行台账未启用"}
+        run = runs.get(run_id)
+        if run is None:
+            return {"ok": False, "reason": f"没有这个运行：{run_id}"}
+        out: dict[str, Any] = {"ok": True, "run_id": run_id}
+        wid = getattr(run, "window_id", "") or ""
+        if wid:
+            try:
+                rt = self._rt(wid)
+                cur = rt.queue.current
+                if cur is not None and (cur.meta or {}).get("run_id") == run_id:
+                    out["interrupted"] = rt.queue.cancel_current()
+                else:
+                    out["dropped"] = rt.queue.drop(
+                        lambda t: (t.meta or {}).get("run_id") == run_id)
+            except Exception as e:  # noqa: BLE001
+                out["queue_error"] = str(e)
+        out.update(runs.cancel(run_id))
+        self.db.audit("system", "run:cancel", f"{run_id} {out}")
+        return out
 
     def requeue_after_rate_limit(self, window_id: str, delay: float | None = None) -> str:
         """限速暂停后把人工派单**再排一次**（自动续跑）。
@@ -719,6 +789,40 @@ class WindowManager:
         return runner
 
     async def _execute(self, rt: WindowRuntime, task: TaskItem) -> Any:
+        w = rt.window
+        # v0.10.37（P0）：把这一轮记进运行台账（排队 → 运行中 → 终态）。
+        # 取消（`TaskQueue.cancel_current`）抛的 `CancelledError` 也必须收尾成
+        # `cancelled`（不是 failed、不计连败），否则界面上会留下永远"运行中"的行。
+        run_id = str((getattr(task, "meta", None) or {}).get("run_id") or "")
+        _runs = getattr(self, "runs", None)
+        if run_id and _runs is not None:
+            try:
+                if _runs.get(run_id) is not None and _runs.get(run_id).cancel_requested:
+                    _runs.finish(run_id, "cancelled", summary="已取消（还没开始执行就被取消）")
+                    raise asyncio.CancelledError()
+                _runs.update(run_id, status="running", phase="work")
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — 台账失败不能影响运行
+                logger.warning("run start-bookkeeping failed for %s", run_id, exc_info=True)
+        try:
+            return await self._execute_inner(rt, task)
+        except asyncio.CancelledError:
+            if run_id and _runs is not None:
+                try:
+                    _runs.finish(run_id, "cancelled", summary="已取消（人为停止）")
+                except Exception:  # noqa: BLE001
+                    logger.debug("run cancel bookkeeping failed", exc_info=True)
+            raise
+        except BaseException as e:  # noqa: BLE001 — 未预期异常也要给台账一个终态
+            if run_id and _runs is not None:
+                try:
+                    _runs.finish(run_id, "failed", summary=f"{type(e).__name__}: {e}"[:400])
+                except Exception:  # noqa: BLE001
+                    logger.debug("run failure bookkeeping failed", exc_info=True)
+            raise
+
+    async def _execute_inner(self, rt: WindowRuntime, task: TaskItem) -> Any:
         w = rt.window
         role = get_role(w.role)
         profile = task.llm_profile or w.llm_profile or None
@@ -825,6 +929,21 @@ class WindowManager:
         # 定时任务那一侧由调度器发（task.job_id 非空），这里只补人工那条，避免重复。
         self._emit_run_finished(w, task, result)
         self._report_manual_run(w, task, result)
+        # 运行台账收尾（限速暂停单独记 paused，便于界面显示"暂停中 · 已等 N 秒"）
+        run_id = str((getattr(task, "meta", None) or {}).get("run_id") or "")
+        _runs = getattr(self, "runs", None)
+        if run_id and _runs is not None:
+            try:
+                st = _run_status(result)
+                if st == "rate_limited":
+                    _runs.note_pause(run_id, 0.0)
+                else:
+                    _runs.finish(run_id, "done" if st == "ok" else
+                                 ("timeout" if st == "timeout" else "failed"),
+                                 summary=str(getattr(result, "summary", "") or "")[:800],
+                                 error_code=str(getattr(result, "error_code", "") or ""))
+            except Exception:  # noqa: BLE001
+                logger.debug("run finish bookkeeping failed", exc_info=True)
 
         if result.pending_questions and self.bus:
             for q in result.pending_questions:

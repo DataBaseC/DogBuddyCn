@@ -100,7 +100,13 @@ class MemberDispatchTool:
             fut = None
             if hasattr(self.coordinator, "dispatch_pending"):
                 try:
-                    fut = self.coordinator.dispatch_pending(w.id, task)
+                    fut = self.coordinator.dispatch_pending(
+                        w.id, task, run_parent_id=extra.get("run_id", ""))
+                except TypeError:      # 兼容不支持 run_parent_id 的实现
+                    try:
+                        fut = self.coordinator.dispatch_pending(w.id, task)
+                    except Exception as e:  # noqa: BLE001
+                        return ToolResult.failure(f"派活给 {w.name} 失败：{e}")
                 except Exception as e:  # noqa: BLE001
                     return ToolResult.failure(f"派活给 {w.name} 失败：{e}")
             else:  # 兼容：只能 fire-and-forget（收尾时无法 join，会在 run 里记为未知）
@@ -112,10 +118,14 @@ class MemberDispatchTool:
                 window_id=w.id, waited=False)
         try:
             outcome = await self.coordinator.dispatch_and_wait(
-                w.id, task, coordinated=True,
+                w.id, task, coordinated=True, run_parent_id=extra.get("run_id", ""),
                 **({"timeout": float(timeout)} if timeout else {}))
-        except TypeError:  # 兼容没有 coordinated/timeout 参数的实现
-            outcome = await self.coordinator.dispatch_and_wait(w.id, task)
+        except TypeError:  # 兼容没有 coordinated/timeout/run_parent_id 参数的实现
+            try:
+                outcome = await self.coordinator.dispatch_and_wait(w.id, task,
+                                                                  coordinated=True)
+            except TypeError:
+                outcome = await self.coordinator.dispatch_and_wait(w.id, task)
         except Exception as e:  # noqa: BLE001 — 派活失败要如实回报，不能把组长带崩
             entry["status"] = "failed"
             entry["summary"] = str(e)

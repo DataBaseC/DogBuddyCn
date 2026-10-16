@@ -27,6 +27,7 @@ from .routes import events as events_routes
 from .routes import files as files_routes
 from .routes import groups as groups_routes
 from .routes import iterations as iterations_routes
+from .routes import runs as runs_routes
 from .routes import ledger as ledger_routes
 from .routes import jobs as jobs_routes
 from .routes import logs as logs_routes
@@ -157,6 +158,7 @@ def create_app(svc: WebServices) -> FastAPI:
     app.include_router(models_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(projects_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(iterations_routes.router(svc, auth_deps), prefix="/api")
+    app.include_router(runs_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(settings_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(logs_routes.router(svc, auth_deps), prefix="/api")
 
@@ -206,7 +208,18 @@ def create_app(svc: WebServices) -> FastAPI:
         for r in runs:
             r["window_name"] = names.get(r["window_id"], r["window_id"])
             r["job_name"] = (svc.jobs.get(r["job_id"]).name if svc.jobs.get(r["job_id"]) else r["job_id"])
-        return {"windows": win_rows, "jobs": job_rows, "recent_runs": runs}
+        # P0（v0.10.37）：顶部指示器一次拿全"有什么在跑"
+        active_runs = []
+        run_summary = {}
+        reg = getattr(svc, "runs", None)
+        if reg is not None:
+            try:
+                active_runs = [x.as_dict() for x in reg.active()]
+                run_summary = reg.summary()
+            except Exception:  # noqa: BLE001 — 状态页不能因为台账抖动而 500
+                pass
+        return {"windows": win_rows, "jobs": job_rows, "recent_runs": runs,
+                "active_runs": active_runs, "run_summary": run_summary}
 
     app.include_router(base)
 

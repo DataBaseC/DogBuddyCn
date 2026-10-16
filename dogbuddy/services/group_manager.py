@@ -409,6 +409,19 @@ class GroupManager:
                 except OSError:
                     logger.warning("shared workspace not creatable: %s", shared_ws)
         steps: list[dict] = []
+        # v0.10.37（P0）：群组运行登记为**父运行** —— 无论从控制台、API 还是管理员的
+        # `group_run` 工具发起，界面上都看得到"谁在跑什么"。
+        parent_run = None
+        runs = getattr(self, "runs", None)
+        if runs is not None:
+            try:
+                parent_run = runs.start(
+                    kind="group", group_id=g.id, group_name=g.name,
+                    project_id=getattr(g, "project_id", "") or "",
+                    window_id=lead_id or "", phase="plan", steps_total=len(order),
+                    prompt_chars=len(prompt or ""))
+            except Exception:  # noqa: BLE001 — 台账不能拦住群组运行
+                logger.warning("group run start failed", exc_info=True)
         # v0.10.34：开跑就留痕（以前只有跑完的 group:run，进行中的运行在审计里查不到）
         self.db.audit("system", "group:run_start",
                       f"{g.id} {g.name} members={len(order)} "
@@ -445,6 +458,12 @@ class GroupManager:
             else:
                 delegated_note = ""
             rt = self.windows._rt(wid)
+            step_no = len(steps) + 1
+            if parent_run is not None:
+                try:
+                    runs.update(parent_run.id, phase=phase, step_no=step_no)
+                except Exception:  # noqa: BLE001
+                    logger.debug("group step bookkeeping failed", exc_info=True)
             # v0.10.34（owner："你在哪跑呢，我咋没看见"）：群组运行时**没有任何地方显示
             # "运行中"** —— 工位状态一直是 idle、群组页只有点按钮的人能看到转圈，
             # 用 API/脚本触发的运行完全不可见（owner 因此以为"卡住了"）。
@@ -514,6 +533,8 @@ class GroupManager:
                        "group_name": g.name,
                        "is_lead": is_lead,
                        "group_lead_id": lead_id,
+                       # v0.10.37：当前运行 id —— 组长派活时用它挂子运行
+                       "run_id": parent_run.id if parent_run is not None else "",
                        "dispatched_windows": dispatched,
                        # v0.10.36：派单台账与未决句柄（**同一批 list 对象**贯穿各步），
                        # 收尾前靠它们 join 与步骤级续跑 —— 少了这两条，工具写进的是
@@ -577,6 +598,13 @@ class GroupManager:
         if limited_n:
             # v0.10.28：把"被限速暂停"说清楚，并给出下一步（不是失败，别让人瞎猜）
             summary = (f"[限速暂停 {limited_n}/{len(steps)} 名成员] " + summary)
+        if parent_run is not None:
+            try:
+                runs.finish(parent_run.id, "done",
+                            summary=(f"[限速暂停 {limited_n}] " if limited_n else "")
+                            + (summary or "")[:800])
+            except Exception:  # noqa: BLE001
+                logger.debug("group run finish failed", exc_info=True)
         self.db.audit("system", "group:run",
                       f"{g.id} members={len(steps)} rate_limited={limited_n} "
                       f"recap_chars={recap_total['chars']} "
@@ -584,5 +612,6 @@ class GroupManager:
                       f"max_prompt_chars={max((s.get('prompt_chars', 0) for s in steps), default=0)}")
         return {"group_id": g.id, "group_name": g.name,
                 "start_id": start_id, "recap_total": recap_total,
+                "run_id": parent_run.id if parent_run is not None else "",
                 "rate_limited": limited_n,
                 "steps": steps, "summary": summary}

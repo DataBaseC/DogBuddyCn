@@ -294,6 +294,14 @@
           topRate.textContent = '限速等待中 ' + (attempt ? '第' + attempt + '次退避' : '退避中');
           topRate.classList.remove('hidden');
         });
+        /* P0（v0.10.37）：运行台账实时事件 —— 顶栏「N 个任务在跑」+ 抽屉
+           （owner："你在哪跑呢，我咋没看见"：群组/API 触发的运行以前完全不可见） */
+        if (global.Runs) {
+          ['run.started', 'run.updated', 'run.finished'].forEach(function (t) {
+            global.SSE.on(t, function (p) { global.Runs.onEvent(t, p); });
+          });
+          global.Runs.bind();
+        }
       }
 
       /* 新建按钮 */

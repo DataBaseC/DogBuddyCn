@@ -3,6 +3,7 @@
     "js/ui.js",
     "js/api.js",
     "js/sse.js",
+    "js/views-runs.js",
     "js/views-main.js",
     "js/views-chat.js",
     "js/views-ops.js",

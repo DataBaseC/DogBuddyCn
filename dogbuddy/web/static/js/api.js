@@ -236,6 +236,19 @@
       /* POST /api/models/import {provider,base_url,api_key} → 拉取列表批量入库 */
       import: function (body) { return request('POST', '/api/models/import', body || {}); }
     },
+    /* P0（v0.10.37）：运行台账 —— "此刻谁在跑什么"与取消。
+       GET /api/runs?active=1 → {runs:[…], summary:{running,paused,…}}
+       GET /api/runs/{id}     → {run:{…, children:[…]}}
+       POST /api/runs/{id}/cancel（幂等，不算失败）
+       POST /api/runs/{id}/retry  （用原派单内容重跑） */
+    runs: {
+      list: function (active) {
+        return request('GET', '/api/runs' + (active ? '?active=1' : ''));
+      },
+      get: function (id) { return request('GET', '/api/runs/' + enc(id)); },
+      cancel: function (id) { return request('POST', '/api/runs/' + enc(id) + '/cancel', {}); },
+      retry: function (id) { return request('POST', '/api/runs/' + enc(id) + '/retry', {}); }
+    },
     groups: {
       /* GET /api/groups → {groups:[{id,name,description,lead_window_id,created_at,
          updated_at,members:[{window_id,window_name,role,joined_at,exists}]}]} */

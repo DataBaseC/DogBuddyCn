@@ -36,7 +36,8 @@ def test_schema_v12_and_migration_adds_api_key_column(tmp_path):
     db = Database(tmp_path / "new.db")
     cols = {r[1] for r in db._conn.execute("PRAGMA table_info(models)").fetchall()}  # noqa: SLF001
     assert "api_key" in cols
-    assert SCHEMA_VERSION == 12 and db.schema_version == 12
+    # v13（runs 表）之后这里不再钉死 12：只要求"v12 迁移确实存在且库已跟上"
+    assert SCHEMA_VERSION >= 12 and db.schema_version == SCHEMA_VERSION
     db.close()
 
 
@@ -61,7 +62,7 @@ def test_migration_12_upgrades_a_v11_database(tmp_path):
     conn.close()
 
     db = Database(path)
-    assert db.schema_version == 12
+    assert db.schema_version == SCHEMA_VERSION
     row = db.get_model("openai_compat_old-model")
     assert row is not None and "api_key" in row and row["api_key"] in ("", None)
     db.close()

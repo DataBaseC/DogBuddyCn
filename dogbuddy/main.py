@@ -132,6 +132,17 @@ class DogBuddyApp:
             mcp_bridge=self.mcp)
         self.sessions = SessionManager(self.windows, self.db)
         self.groups = GroupManager(self.db, self.windows, bus=self.bus)
+        # P0（v0.10.37）：运行台账 —— "此刻谁在跑什么"的唯一真相
+        from .services.run_registry import RunRegistry
+        self.runs = RunRegistry(self.db, self.bus)
+        # 启动清理：上个进程遗留的 running/paused 标成 interrupted
+        # （否则重启/自升级后界面上会挂着永远"运行中"的僵尸行）
+        try:
+            self.runs.mark_orphans_interrupted()
+        except Exception:  # noqa: BLE001 — 清理失败不能拦住启动
+            logger.warning("run orphan cleanup failed", exc_info=True)
+        self.windows.runs = self.runs
+        self.groups.runs = self.runs
         self.workspaces = WorkspaceManager(config.paths.workspaces, self.db)
         self.job_store = JobStore(self.db)
         self.jobs = JobManager(self.job_store, self.windows)
@@ -161,7 +172,7 @@ class DogBuddyApp:
             db=self.db, llm_factory=self.llm_factory, windows=self.windows, jobs=self.jobs,
             sessions=self.sessions, workspaces=self.workspaces, memory=self.memory,
             config=self.config_svc, bus=self.bus, models=self.models, groups=self.groups,
-            panel=self.panel,
+            panel=self.panel, runs=self.runs,
             self_status=self.update_status, self_update=self.start_self_update)
 
         # T9.3：主管工位装配（只给项目级管理工具，system 级永不下放）；

@@ -1245,3 +1245,24 @@ tr.history-row td { background: rgba(255, 255, 255, 0.02); padding: 0 12px 14px;
 .mdl-pick:hover { background: rgba(255, 255, 255, 0.04); }
 .mdl-pick input { flex: 0 0 auto; }
 .mdl-pick span.mono { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* P0（v0.10.37）：运行台账指示器 + 抽屉（"此刻谁在跑什么"） */
+.runs-drawer {
+  position: absolute; right: 16px; top: 56px; z-index: 60;
+  width: min(560px, calc(100vw - 32px)); max-height: 60vh; overflow: auto;
+  background: var(--bg-2, #1a1d24); border: 1px solid var(--line-2, #2a2f3a);
+  border-radius: 12px; padding: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.35);
+}
+.runs-drawer.hidden { display: none; }
+.runs-empty { padding: 14px; color: var(--tx-3); font-size: 13px; }
+.run-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: 8px;
+}
+.run-row + .run-row { border-top: 1px solid var(--line-2, #2a2f3a); }
+.run-main { flex: 1; min-width: 0; }
+.run-title { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.run-sub { color: var(--tx-3); font-size: 11px; margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-amber { background: rgba(255,176,32,.18); color: var(--tx-1); }
+.badge-blue { background: rgba(64,128,255,.18); color: var(--tx-1); cursor: pointer; }

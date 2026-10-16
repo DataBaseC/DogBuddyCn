@@ -49,7 +49,8 @@ class AdminServices:
                  supervision: Any = None,
                  persist: Callable[[], Any] | None = None,
                  models: Any = None,
-                 groups: Any = None):
+                 groups: Any = None,
+                 runs: Any = None):
         self.windows = windows      # WindowManager: create/list/get/update/pause/resume/delete/status/dispatch
         self.jobs = jobs            # JobManager: create/list/get/update/pause/resume/remove/run_now
         self.sessions = sessions    # SessionManager: get/compress/reset/inject
@@ -67,6 +68,11 @@ class AdminServices:
         # v0.10.20：群组（共享工作频道）——圆桌测试暴露"管理员没有任何 group 工具"，
         # owner 让建群组时只能退化成"共享工作区+多窗口"土办法（DB 里 0 个群组）。
         self.groups = groups
+        # v0.10.37（P0 · 逻辑复核 W1/W2/W3）：运行台账 + 取消。
+        # owner 在对话里"把前端站做完 / 进度怎么样 / 停掉"以前**全都没入口** ——
+        # 管理员没有任何"启动运行"的工具（唯一歪路是 task_create + task_run_now，
+        # 结果变成定时任务），progress_report 也读不到群组运行，更没有取消原语。
+        self.runs = runs
         # 配置落盘（审查报告 P1-9）：`profile_save`/`profile_remove` 改的是内存里的
         # app config，**不调 persist 就等于重启即丢**。Web 路由那边是调了的
         # （`web/routes/settings.py`），agent 路径漏了。
@@ -837,6 +843,178 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
                text=_p("string", "message content", True)),
         group_channel_post, "write"))
 
+    # ---------------------------------------------- 运行（v0.10.37 · P0）
+    # 逻辑复核 W1/W2/W3：owner 在对话里"把前端站做完 / 进度怎么样 / 停掉吧"，
+    # 管理员以前**全都没有入口** —— 没有任何"启动运行"的工具（唯一歪路是
+    # `task_create` + `task_run_now`，于是"一次编排运行"变成了"一个定时任务"），
+    # `progress_report` 也读不到群组运行（只读 windows.status + cron 的 job_runs），
+    # 更没有取消入口（`AgentLoop`/`TaskQueue` 都没有）。这里一次补齐。
+    async def _run_group_now(gref: str, prompt: str, ctx: ToolContext) -> dict:
+        """先登记**父运行**，再跑群组；跑完收尾。"""
+        from ..core.roles import get_role as _get_role  # noqa: F401 — 保持导入一致性
+
+        grp = svc.groups.get(gref) if hasattr(svc.groups, "get") else None
+        if grp is None:
+            raise ValueError(f"群组不存在：{gref}")
+        parent = None
+        if svc.runs is not None:
+            parent = svc.runs.start(kind="group", group_id=grp.id,
+                                    group_name=getattr(grp, "name", "") or "",
+                                    project_id=getattr(grp, "project_id", "") or "",
+                                    window_id=getattr(grp, "lead_window_id", "") or "",
+                                    prompt_chars=len(prompt))
+        try:
+            out = await svc.groups.run(grp.id, prompt)
+        except BaseException as e:  # noqa: BLE001
+            if parent is not None:
+                import asyncio as _aio
+                svc.runs.finish(parent.id, "cancelled" if isinstance(e, _aio.CancelledError)
+                                else "failed", summary=str(e)[:400])
+            raise
+        if parent is not None:
+            out["run_id"] = parent.id
+            limited = int(out.get("rate_limited") or 0)
+            svc.runs.finish(parent.id, "done",
+                            summary=(f"[限速暂停 {limited} 项] " if limited else "")
+                            + (out.get("summary") or "")[:800])
+        return out
+
+    async def group_run(args: dict, ctx: ToolContext) -> ToolResult:
+        need(svc.groups, "groups")
+        gref = str(args.get("group") or "").strip()
+        prompt = str(args.get("prompt") or "").strip()
+        if not gref or not prompt:
+            return ToolResult.failure("group 与 prompt 都不能为空")
+        try:
+            out = await _run_group_now(gref, prompt, ctx)
+        except ValueError as e:
+            return ToolResult.failure(f"启动群组任务失败：{e}")
+        except Exception as e:  # noqa: BLE001
+            return ToolResult.failure(f"启动群组任务失败：{e}")
+        limited = int(out.get("rate_limited") or 0)
+        delegated = sum(1 for x in out.get("steps", []) if x.get("delegated"))
+        return ToolResult.success(
+            f"群组任务已完成：{out.get('group_name')} · {len(out.get('steps', []))} 步"
+            f"（组长派活 {delegated} 项，限速暂停 {limited} 项）run={out.get('run_id', '')}\n"
+            f"{(out.get('summary') or '')[:1200]}",
+            run_id=out.get("run_id", ""), rate_limited=limited)
+
+    tools.append(FnTool("group_run",
+        "Run a group task NOW (the lead plans, delegates to members via member_dispatch, "
+        "then summarizes and joins their results). Use this to start real multi-employee "
+        "work the owner asked for. It waits for the run and returns the summary; the run "
+        "is visible in the console and can be stopped with run_cancel.",
+        _props(group=_p("string", "group id or name", True),
+               prompt=_p("string", "the task for the whole group", True)),
+        group_run, "write"))
+
+    async def window_dispatch(args: dict, ctx: ToolContext) -> ToolResult:
+        need(svc.windows, "windows")
+        ref = str(args.get("window") or "").strip()
+        prompt = str(args.get("prompt") or "").strip()
+        if not ref or not prompt:
+            return ToolResult.failure("window 与 prompt 都不能为空")
+        w = svc.windows.get(ref)
+        if w is None:
+            return ToolResult.failure(f"工位不存在：{ref}")
+        svc.windows.dispatch_manual(w.id, prompt)
+        run_id = getattr(svc.windows, "_manual_last", {}).get(w.id, {}).get("run_id", "")
+        return ToolResult.success(
+            f"已把任务派给「{w.name}」（后台运行，run={run_id or '（未登记）'}）。"
+            f"用 run_list 看进度、run_cancel 停止。", window_id=w.id, run_id=run_id)
+
+    tools.append(FnTool("window_dispatch",
+        "Dispatch a prompt to ONE employee window right now (runs in the background). "
+        "Use it for a single-employee task; use group_run when several employees "
+        "should collaborate.",
+        _props(window=_p("string", "window id or name", True),
+               prompt=_p("string", "the task for that employee", True)),
+        window_dispatch, "write"))
+
+    async def run_list(args: dict, ctx: ToolContext) -> ToolResult:
+        if svc.runs is None:
+            return ToolResult.failure("运行台账不可用")
+        limit = int(args.get("limit") or 10)
+        live = svc.runs.active()
+        recent = svc.runs.recent(limit=limit)
+        lines = ["## 正在跑"]
+        for r in live:
+            lines.append(f"- {r.id} [{r.kind}] {r.window_name or r.group_name or '-'} "
+                         f"phase={r.phase or '-'} status={r.status} "
+                         f"限速暂停{r.pause_count}次/共{r.paused_seconds:.0f}s")
+        if not live:
+            lines.append("- (无)")
+        lines.append("## 最近")
+        for d in recent[:limit]:
+            lines.append(f"- {d.get('id')} [{d.get('kind')}] "
+                         f"{d.get('window_name') or d.get('group_name') or '-'} "
+                         f"status={d.get('status')} {str(d.get('summary') or '')[:60]}")
+        return ToolResult.success("\n".join(lines), live=len(live))
+
+    tools.append(FnTool("run_list",
+        "List what is running right now plus recent runs (id / kind / window / status / "
+        "how many times rate limits paused it). Use it to answer '进度怎么样' — window "
+        "status alone does NOT show group runs.",
+        _props(limit=_p("integer", "how many recent runs to show (default 10)", False)),
+        run_list, "read"))
+
+    async def run_cancel(args: dict, ctx: ToolContext) -> ToolResult:
+        rid = str(args.get("run_id") or "").strip()
+        if not rid:
+            return ToolResult.failure("run_id 不能为空（先用 run_list 查）")
+        if svc.windows is not None and hasattr(svc.windows, "cancel_run"):
+            out = svc.windows.cancel_run(rid)
+        elif svc.runs is not None:
+            out = svc.runs.cancel(rid)
+        else:
+            return ToolResult.failure("运行台账不可用")
+        if not out.get("ok"):
+            return ToolResult.failure(f"取消失败：{out.get('reason', out)}")
+        if out.get("already"):
+            return ToolResult.success(f"这次运行已经是终态（{out.get('status')}），无需取消。")
+        extra = []
+        if out.get("interrupted"):
+            extra.append("已打断正在执行的那一项")
+        if out.get("dropped"):
+            extra.append(f"已从队列拿掉 {out['dropped']} 项")
+        if out.get("children_cancelled"):
+            extra.append(f"级联取消子运行 {len(out['children_cancelled'])} 个")
+        return ToolResult.success(
+            f"已取消 {rid}（{'；'.join(extra) or '已标记取消'}）。已产出的文件保留，"
+            f"**不算失败**。")
+
+    tools.append(FnTool("run_cancel",
+        "Cancel a running task (idempotent). Nothing is deleted: artifacts stay on disk "
+        "and it is NOT recorded as a failure. Use it when the owner says stop / stuck.",
+        _props(run_id=_p("string", "run id from run_list", True)),
+        run_cancel, "write"))
+
+    async def run_status(args: dict, ctx: ToolContext) -> ToolResult:
+        if svc.runs is None:
+            return ToolResult.failure("运行台账不可用")
+        rid = str(args.get("run_id") or "").strip()
+        run = svc.runs.get(rid)
+        if run is None:
+            return ToolResult.failure(f"没有这个运行：{rid}")
+        kids = [x for x in svc.runs.active() if x.parent_run_id == rid]
+        text = (f"{run.id} [{run.kind}] status={run.status} phase={run.phase or '-'} "
+                f"step={run.step_no}/{run.steps_total}\n"
+                f"工位={run.window_name or run.window_id or '-'} "
+                f"群组={run.group_name or run.group_id or '-'}\n"
+                f"开始={run.started_at} 更新={run.updated_at} 结束={run.finished_at or '-'}\n"
+                f"限速暂停 {run.pause_count} 次 / 共 {run.paused_seconds:.0f}s\n"
+                f"摘要：{(run.summary or '')[:600]}")
+        if kids:
+            text += "\n子运行：\n" + "\n".join(
+                f"- {k.id} {k.window_name} phase={k.phase} status={k.status}" for k in kids)
+        return ToolResult.success(text)
+
+    tools.append(FnTool("run_status",
+        "Detailed status of ONE run: phase, step, how long, how many rate-limit pauses, "
+        "its child runs (members the lead delegated to) and the latest summary.",
+        _props(run_id=_p("string", "run id from run_list", True)),
+        run_status, "read"))
+
     # -------------------------------------------- 宿主机运维（v0.10.29）
     # `server_exec` 声明 `required_scope="system"` —— 只有管理员过得去。但它以前
     # **只挂在员工工具箱里**，于是员工每次调用都被 fail-closed 拒绝（今天实测：
@@ -859,6 +1037,8 @@ SYSTEM_TOOL_NAMES: frozenset[str] = frozenset({
     "memory_write", "memory_recall",  # 全局记忆（主管只有项目/工位记忆）
     "supervisor_command",             # 管理员→主管 的指令下发（T9.4，主管不能命令自己）
     "server_exec",                    # v0.10.29：宿主机命令（面板 agent API），仅管理员
+    # v0.10.37（P0）：启动/查看/取消运行 —— 主管**不给**（它管项目，不负责全局运行台账）
+    "group_run", "window_dispatch", "run_list", "run_cancel", "run_status",
 })
 
 #: 需要 **project** 作用域的：管本项目里的工位 / 任务 / 上下文 / 工作区

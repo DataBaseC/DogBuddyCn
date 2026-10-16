@@ -39,6 +39,8 @@ class TaskQueue:
         self._current: TaskItem | None = None
         self._paused = False
         self._stopped = False
+        #: 正在执行的那一项的任务句柄（v0.10.37：让"取消这一次运行"能真的打断它）
+        self._current_handle: asyncio.Task | None = None
         # 后台 shell 进程表：`shell(background=true)` 登记，窗口暂停/终止时统一回收。
         # 审查报告 P1-15：初版 `kill_background()` 读的就是这个字段，但**全仓库
         # 没有任何地方给它赋值**（工具写的是 `ctx.extra["bg_processes"]`），
@@ -95,6 +97,21 @@ class TaskQueue:
             procs.clear()
         return killed
 
+    def drop(self, predicate: Callable[[TaskItem], bool]) -> int:
+        """把还没开跑的项从队列里拿掉（取消排队中的运行）。返回拿掉几项。"""
+        keep = deque(t for t in self._queue if not predicate(t))
+        n = len(self._queue) - len(keep)
+        self._queue = keep
+        return n
+
+    def cancel_current(self) -> bool:
+        """取消**正在执行**的那一项（不关停队列本身）。返回是否真的发了取消。"""
+        h = self._current_handle
+        if h is None or h.done():
+            return False
+        h.cancel()
+        return True
+
     # ------------------------------------------------------------- worker
     async def run_loop(self) -> None:
         """The single worker task of this window."""
@@ -109,12 +126,21 @@ class TaskQueue:
             task = self._queue.popleft()
             self._current = task
             self._status("running")
+            # v0.10.37：每一项跑在**自己的任务**里 —— "取消这一次运行"只打断这一项，
+            # 队列本身继续活着（以前 runner 直接 inline 在循环任务里，取消它 = 杀死队列）。
+            self._current_handle = (asyncio.ensure_future(self.runner(task))
+                                    if self.runner is not None else None)
             try:
-                if self.runner is not None:
-                    await self.runner(task)
+                if self._current_handle is not None:
+                    await self._current_handle
+            except asyncio.CancelledError:
+                if self._stopped:
+                    raise                       # 队列被关停（关窗口/停服务）
+                logger.info("window %s: 当前任务已取消，队列继续", self.window_id)
             except Exception:  # noqa: BLE001 — a crashed task must not kill the queue
                 logger.exception("window %s task crashed", self.window_id)
             finally:
+                self._current_handle = None
                 self._current = None
                 self._status("idle")
 

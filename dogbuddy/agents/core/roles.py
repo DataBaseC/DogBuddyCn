@@ -136,6 +136,9 @@ ADMIN_TOOLS = [
     # "建个群组让他们自己聊"，管理员**没有任何 group 工具**，只能退化成
     # "共享工作区 + 多窗口圆桌"土办法 → DB 0 群组 → 前端群组页永远空白。
     "group_create", "group_list", "group_assign", "group_channel_post",
+    # v0.10.37（P0）：**启动/查看/取消运行** —— owner 在对话里驱动编排的唯一入口
+    # （以前管理员没有任何"运行"工具，只能靠 task_create+task_run_now 绕，结果变成定时任务）
+    "group_run", "window_dispatch", "run_list", "run_cancel", "run_status",
     # self-upgrade of the running deployment (NOT delegable to an employee window)
     "self_version", "self_update",
     # v0.10.29（owner 实测）：**宿主机运维**。`server_exec` 声明 `required_scope="system"`
