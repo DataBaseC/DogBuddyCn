@@ -1309,3 +1309,31 @@ ToolContext 带上它；`main.py` 用既有的 `self.panel`（`_build_panel()` �
 
 记忆量级也会被 `max_interval` 夹住（240s 的记忆回来是 120s），避免历史惩罚把等待又拉长。
 设置页「限速重试」卡片可以直接改这几项。
+
+---
+
+## 26. 第十九轮：限速暂停后**人工派单没人叫醒**（2026-10-23，`0.10.32`）
+
+owner："他好像卡住了。" 生产事实：
+
+```
+14:03:10  worker-1  [限速暂停] 服务端要求等待 600 秒（heavy 档）；本轮暂停，不是失败，
+                    稍后会自动重试。        ← 这句话对人工派单是**假的**
+14:03 → 14:34  worker-1 一直 idle，没有任何后续动作
+```
+
+**根因**：v0.10.28 把长限速从"睡 600s"改成"立刻暂停"，但**只有定时任务有调度器重排**
+（`mark_rate_limited` 会把 `next_run_at` 排到 60s 后）。`dispatch_manual` 没有调度器
+—— 被暂停后就没人叫醒它。改动本身是对的（不再占着调用栈），只是**少了一半**：
+"暂停"必须配"自动续跑"。
+
+**修法**：
+1. `WindowManager.dispatch_manual()` 记住最后一次人工派单（prompt + 续跑次数）；
+2. 新增 `requeue_after_rate_limit(window_id, delay=60)`：排一个 60s 后的任务再次派单，
+   审计记 `window:requeue_rate_limited`；次数用尽（`RATE_LIMIT_REQUEUE_MAX=15`）→
+   记 `window:requeue_giveup` 并**明确放弃**，提示"换模型/换 key，或稍后手动重发"；
+3. `main._on_run_finished()`：`status == "rate_limited" and manual` 时调用它，
+   并 `admin.notify_user()` 如实告诉用户"已自动续跑第 N 次 / 已停止自动续跑"；
+4. 群组运行仍按原样（成员被限速如实标 `rate_limited`，由用户决定是否重跑）。
+
+基线：662 passed / 4 skipped；`audit_ui --strict` exit 0。

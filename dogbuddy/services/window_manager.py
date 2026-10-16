@@ -79,6 +79,13 @@ class WindowRuntime:
 
 
 class WindowManager:
+    """Manages window runtimes (queue + session + registry) and dispatch."""
+
+    #: 限速暂停后自动续跑的最大次数（之后交回给人决定）
+    RATE_LIMIT_REQUEUE_MAX = 15
+    #: 自动续跑的间隔（秒）。限速窗口通常是分钟级，早点回来试更划算；
+    #: 每次尝试被打回也只是一次"立刻暂停"，不占着调用栈。
+    RATE_LIMIT_REQUEUE_DELAY = 60.0
     def __init__(
         self,
         db: Any,
@@ -124,6 +131,9 @@ class WindowManager:
         self.builder = ContextBuilder(memory_service=memory)
         self.threshold = threshold
         self.max_context_tokens = max_context_tokens
+        #: v0.10.32：人工派单的"最后一次任务"，限速暂停后据此自动续跑
+        #: （worker_id → {"prompt":…, "attempts": n}）
+        self._manual_last: dict[str, dict[str, Any]] = {}
         # injected rule for "which model will this window actually use"
         # (AppConfig.effective_model) — keeps the console from inventing its own
         self.model_resolver = model_resolver
@@ -579,8 +589,59 @@ class WindowManager:
             self.bus.emit(Event(type=JOB_FAILED, payload=payload))
 
     def dispatch_manual(self, window_id: str, prompt: str) -> None:
-        """Manual (human-initiated) run — head-of-queue, fire-and-forget."""
+        """Manual (human-initiated) run — head-of-queue, fire-and-forget.
+
+        v0.10.32：记住这次人工派单，供**限速暂停后自动续跑**用。以前只有定时任务
+        会被调度器重排（`mark_rate_limited` → 60s 后再来），人工派单被限速暂停后
+        **没人再叫醒它** —— worker-1 因此停在 14:03 半个小时，owner 看到的就是
+        "他好像卡住了"。
+        """
+        self._manual_last[window_id] = {"prompt": prompt, "attempts": 0}
         self.dispatch(window_id, prompt, urgent=True)
+
+    def requeue_after_rate_limit(self, window_id: str, delay: float | None = None) -> str:
+        """限速暂停后把人工派单**再排一次**（自动续跑）。
+
+        返回给人看的一句话（已排队 / 已放弃），由调用方（main）如实告诉用户。
+        放弃条件：`RATE_LIMIT_REQUEUE_MAX` 次之后仍被限速 —— 那时硬撑只是烧配额，
+        应该让人来决定（换模型/换 key/等）。
+        """
+        delay = self.RATE_LIMIT_REQUEUE_DELAY if delay is None else float(delay)
+        rec = self._manual_last.get(window_id)
+        if not rec:
+            return "没有可续跑的人工派单（可能是定时任务，调度器会自己重排）"
+        if not rec.get("prompt"):
+            return "上次派单内容为空，不自动续跑"
+        attempts = int(rec.get("attempts", 0)) + 1
+        if attempts > self.RATE_LIMIT_REQUEUE_MAX:
+            self._manual_last.pop(window_id, None)
+            self.db.audit("system", "window:requeue_giveup",
+                          f"{window_id} 限速持续，已停止自动续跑"
+                          f"（试了 {self.RATE_LIMIT_REQUEUE_MAX} 次）")
+            return (f"限速持续（已自动续跑 {self.RATE_LIMIT_REQUEUE_MAX} 次仍被限速），"
+                    f"**停止自动续跑**。请换模型/换 key，或稍后手动重发。")
+        rec["attempts"] = attempts
+        prompt = rec["prompt"]
+        self.db.audit("system", "window:requeue_rate_limited",
+                      f"{window_id} 第 {attempts} 次自动续跑（{delay:.0f}s 后）")
+
+        async def _later() -> None:
+            try:
+                await asyncio.sleep(max(0.0, float(delay)))
+                self.dispatch(window_id, prompt, urgent=True)
+            except asyncio.CancelledError:  # pragma: no cover — 关停时取消
+                raise
+            except Exception:  # noqa: BLE001 — 续跑失败不能炸事件循环
+                logger.warning("rate-limit requeue failed for %s", window_id, exc_info=True)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 没有事件循环（脚本/测试）→ 直接同步重排，不假装延迟
+            self.dispatch(window_id, prompt, urgent=True)
+            return f"已立即续跑（第 {attempts} 次；当前无事件循环，延迟被跳过）"
+        loop.create_task(_later())
+        return f"已自动续跑（第 {attempts} 次，{delay:.0f}s 后）"
 
     def _make_default_runner(self, rt: WindowRuntime) -> Callable[[TaskItem], Any]:
         async def runner(task: TaskItem) -> None:

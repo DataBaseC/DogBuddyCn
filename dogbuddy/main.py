@@ -383,22 +383,43 @@ class DogBuddyApp:
             logger.debug("rate_limit resume emit failed", exc_info=True)
 
     def _on_run_finished(self, event: Any) -> None:
-        """一次运行结束 → 清掉"限速等待中"徽标。
+        """一次运行结束 → 清掉"限速等待中"徽标；**人工派单被限速则自动续跑**。
 
         v0.10.15：这个徽标以前只有"开始等待"没有"结束"。模型掉线/重试耗尽之后，
         顶部一直挂着"限速等待中"，而任务其实早就不在了（owner 实测）。终态事件一到就清。
+
+        v0.10.32（owner："他好像卡住了"）：v0.10.28 把长限速改成"暂停、不睡在请求里"，
+        但**只有定时任务有调度器重排**（`mark_rate_limited` → 60s 后再来）。人工派单被
+        暂停后就没人叫醒它 —— worker-1 的长任务 14:03 停住、半小时没动静。
+        现在人工派单由这里自动续跑（最多 `RATE_LIMIT_REQUEUE_MAX` 次）并如实告知用户。
         """
-        if not self._rate_limit.get("waiting"):
+        payload = dict(getattr(event, "payload", None) or {})
+        if self._rate_limit.get("waiting"):
+            self._rate_limit = {"waiting": False, "attempt": 0, "window_id": ""}
+            self._last_rate_limit_wait = 0.0
+            try:
+                self.bus.emit(Event(type="rate_limit.status",
+                                    payload={"attempt": 0, "delay": 0, "profile": "",
+                                             "waiting": False,
+                                             "reason": payload.get("error_code", "")}))
+            except Exception:  # noqa: BLE001
+                logger.debug("rate_limit clear emit failed", exc_info=True)
+        # ---- 限速暂停的人工派单：自动续跑 ----
+        if payload.get("status") != "rate_limited" or not payload.get("manual"):
             return
-        self._rate_limit = {"waiting": False, "attempt": 0, "window_id": ""}
-        self._last_rate_limit_wait = 0.0
+        wid = str(payload.get("window_id") or "")
+        if not wid:
+            return
         try:
-            self.bus.emit(Event(type="rate_limit.status",
-                                payload={"attempt": 0, "delay": 0,
-                                         "profile": "", "waiting": False,
-                                         "reason": (event.payload or {}).get("error_code", "")}))
+            note = self.windows.requeue_after_rate_limit(wid)
+        except Exception as e:  # noqa: BLE001 — 续跑失败不能炸总线
+            logger.warning("rate-limit requeue failed for %s", wid, exc_info=True)
+            note = f"自动续跑失败：{e}"
+        logger.info("限速暂停后自动续跑 %s：%s", wid, note)
+        try:
+            self.admin.notify_user(f"「{payload.get('window_name') or wid}」被限速暂停。{note}")
         except Exception:  # noqa: BLE001
-            logger.debug("rate_limit clear emit failed", exc_info=True)
+            logger.debug("notify requeue failed", exc_info=True)
 
     def _on_llm_severity(self, profile: str, severity: Any, delay: float,
                          exc: Any = None, info: dict | None = None) -> None:
