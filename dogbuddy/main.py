@@ -219,6 +219,9 @@ class DogBuddyApp:
             files=self.files, admin=self.admin, app_config=config,
             decisions=self.decisions, sse=self.sse, groups=self.groups, models=self.models,
             iterations=self.iterations, iteration_exec=self.iteration_exec,
+            # v0.10.37：Web 层用的是**独立的服务包**（不是 app 本身）—— 漏了这条，
+            # `GET /api/runs` 会 503「运行台账未启用」，而运行其实跑得好好的（刚实测到）
+            runs=self.runs,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)

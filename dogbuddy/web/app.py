@@ -57,6 +57,10 @@ class WebServices:
     def __init__(self, **kw: Any):
         self.db = kw.get("db")
         self.windows = kw.get("windows")
+        #: v0.10.37：运行台账（`/api/runs`、`/api/status.active_runs` 用）。
+        #: 注意 Web 层拿到的是**独立服务包**（`WebServices`），不是 app 本身 ——
+        #: 忘了在这里登记就会 503「运行台账未启用」，而运行其实跑得好好的。
+        self.runs = kw.get("runs")
         self.jobs = kw.get("jobs")
         self.sessions = kw.get("sessions")
         self.workspaces = kw.get("workspaces")

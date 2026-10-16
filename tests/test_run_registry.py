@@ -199,3 +199,21 @@ def test_progress_report_能看到群组运行(tmp_path):
     assert "前端模板站" in data["text"], data["text"]
     assert data["live_runs"] == 1
     db.close()
+
+
+def test_Web层必须能拿到运行台账(tmp_path, monkeypatch):
+    """v0.10.37 实测踩到的坑：Web 层用的是**独立服务包** `WebServices`，
+    `main.py` 里忘了把它传进去 → `GET /api/runs` 503「运行台账未启用」，
+    而运行其实跑得好好的（管理端/控制台都看不到，最坏的一种失败：静默）。"""
+    from dogbuddy.main import DogBuddyApp
+    from dogbuddy.config import AppConfig, LLMConfig, PathsConfig, WebConfig
+
+    monkeypatch.setenv("DOGBUDDY_CONFIG", str(tmp_path / "config.yaml"))
+    cfg = AppConfig(llm=LLMConfig(base_url="", api_key="", model=""),
+                    web=WebConfig(auth_token="tok", port=8129),
+                    paths=PathsConfig(data_dir=str(tmp_path / "data"),
+                                      workspaces_dir=str(tmp_path / "ws")))
+    cfg.gateway.enabled = False
+    app = DogBuddyApp(cfg)
+    assert app.web_services.runs is app.runs, "Web 服务包必须带上 runs（否则 /api/runs 503）"
+    assert app.windows.runs is app.runs and app.groups.runs is app.runs
