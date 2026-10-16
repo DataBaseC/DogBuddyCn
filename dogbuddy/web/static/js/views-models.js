@@ -55,10 +55,15 @@
 
   function row(m) {
     var isCur = m.is_current;
+    /* v0.10.21：同名模型可以共存（不同端点各一条）。同名时把**端点**显式标出来，
+       否则两条重名条目在列表里看起来一模一样（owner：「新增的会覆盖掉原来的」）。 */
+    var dup = (state.dupNames && state.dupNames[m.model]) > 1;
     return '<tr' + (isCur ? ' class="mdl-row-cur"' : '') + '>' +
       '<td><div class="mdl-name">' + U.esc(m.display_name || m.model) +
       (isCur ? ' <span class="badge badge-green">当前</span>' : '') +
       (m.enabled ? '' : ' <span class="badge badge-grey">已停用</span>') + '</div>' +
+      (dup ? '<span class="badge badge-amber" title="目录里有同名的另一条，靠端点区分">同名 · ' +
+        U.esc(m.endpoint_host || m.endpoint || '?') + '</span> ' : '') +
       '<div class="card-sub mono">' + U.esc(m.id) + '</div></td>' +
       '<td>' + U.esc(m.provider || '') + '<div class="card-sub mono">' + U.esc(m.base_url || '—') + '</div>' +
       (m.has_api_key
@@ -95,6 +100,11 @@
       });
       return;
     }
+    /* 同名计数：给 row() 用来决定是否显示「同名 · 端点」标签 */
+    state.dupNames = {};
+    state.models.forEach(function (m) {
+      state.dupNames[m.model] = (state.dupNames[m.model] || 0) + 1;
+    });
     host.innerHTML = '<div class="table-wrap"><table class="table mdl-table">' +
       '<thead><tr><th>模型</th><th>来源</th><th>备注（能力与限制）</th>' +
       '<th>标签</th><th>上下文</th><th class="th-actions">操作</th></tr></thead>' +
@@ -322,8 +332,15 @@
               body.querySelector('#mdl-f-activate').checked;
             var p = isNew ? apiModels().create(payload) : apiModels().update(m.id, payload);
             p.then(function (r) {
-              U.toast('success', isNew ? '已加入目录' : '已保存');
               var saved = (r && r.model) || {};
+              /* v0.10.21：同名模型但**端点不同** → 服务端另存了一条（两条共存），
+                 而不是把原来那条的地址改掉。把这件事说清楚，别让用户以为又是覆盖。 */
+              if (isNew && saved.endpoint_conflict) {
+                U.toast('success', '已加入目录：同名模型指向别的地址，已另存为「' +
+                  (saved.id || '') + '」，原来那条不受影响');
+              } else {
+                U.toast('success', isNew ? '已加入目录' : '已保存');
+              }
               if (wantActivate && saved.id) {
                 return apiModels().activate(saved.id).then(function (a) {
                   var res = (a && a.result) || {};
@@ -452,36 +469,58 @@
   }
 
   function importModels() {
+    /* v0.10.21：拉取**过多**是真的（SiliconFlow 一次回 99 条），而且留空会静默
+       拿"当前/全局 key"去拉 —— 于是"顺手把默认 key 那家的模型也拉进来了"。
+       改成两步：先拉（只看不写），再勾选要导入的；顶部明说这次用的端点与密钥来源。 */
+    var fetched = [];
     U.modal({
       title: '拉取并导入模型',
-      body: '<div class="card-sub" style="margin-bottom:10px">从当前（或指定）LLM 服务商拉取模型列表，' +
-        '批量加入目录。<b>已存在条目的备注不会被覆盖。</b>带密钥拉取时，新条目会记下这把密钥，' +
-        '这样跨服务商也能直接「设为当前」。</div>' +
+      wide: true,
+      body: '<div class="card-sub" style="margin-bottom:10px">' +
+        '<b>第一步「拉取列表」只看不写</b>；第二步勾选要进目录的，点「只导入勾选的」。' +
+        '已存在条目<b>不会被改写</b>（备注、地址、密钥都保留）；同名但地址不同的模型会<b>另存一条</b>。</div>' +
         '<div class="field"><span class="field-label">服务商预设</span>' +
         '<div class="mdl-chips" id="mdl-i-presets">' + presetChips() + '</div></div>' +
-        '<div class="field"><span class="field-label">API 地址（留空=用当前）</span>' +
+        '<div class="field"><span class="field-label">API 地址（留空 = 用当前生效的地址）</span>' +
         '<input class="input mono" id="mdl-i-base" value=""></div>' +
-        '<div class="field"><span class="field-label">API Key（留空=用全局密钥）</span>' +
+        '<div class="field"><span class="field-label">API Key（留空 = 用全局密钥）</span>' +
         '<input class="input mono" id="mdl-i-key" type="password" value="" placeholder="另一家服务商就填这里"></div>' +
-        '<div class="field"><span class="field-label">provider（留空=用当前）</span>' +
-        '<input class="input mono" id="mdl-i-provider" value=""></div>',
+        '<div class="field"><span class="field-label">provider（留空 = 用当前）</span>' +
+        '<input class="input mono" id="mdl-i-provider" value=""></div>' +
+        '<div class="mdl-chips" style="align-items:center;margin-bottom:6px">' +
+        '<button class="btn btn-soft btn-sm" id="mdl-i-fetch" type="button">' + U.icon('refresh', 'sm') + '拉取列表（只看不写）</button>' +
+        '<input class="input mono" id="mdl-i-q" style="max-width:220px" placeholder="过滤：如 deepseek / qwen">' +
+        '<button class="btn btn-ghost btn-sm" id="mdl-i-all" type="button">全选</button>' +
+        '<button class="btn btn-ghost btn-sm" id="mdl-i-none" type="button">清空</button>' +
+        '</div>' +
+        '<div class="hint" id="mdl-i-info">还没拉取。留空地址会拿「当前生效」的端点与密钥去拉。</div>' +
+        '<div id="mdl-i-list" class="mdl-pick-list"></div>',
       buttons: [
         { label: '取消', cls: 'btn-ghost' },
         {
-          label: '拉取', cls: 'btn-primary',
+          label: '只导入勾选的', cls: 'btn-primary',
           onClick: function (body) {
+            var picked = U.$$('#mdl-i-list input[type=checkbox]').filter(function (c) { return c.checked; })
+              .map(function (c) { return c.getAttribute('data-model'); });
             var payload = {
               provider: body.querySelector('#mdl-i-provider').value.trim(),
               base_url: body.querySelector('#mdl-i-base').value.trim()
             };
             var key = body.querySelector('#mdl-i-key').value.trim();
             if (key) payload.api_key = key;
+            if (!picked.length) { U.toast('warn', '先拉取列表并勾选至少一个模型'); return false; }
+            payload.only = picked;
             apiModels().import(payload).then(function (r) {
               var res = (r && r.result) || {};
-              U.toast('success', '拉取 ' + (res.fetched || 0) + ' 个，新增 ' + ((res.added || []).length) +
-                ' 个，保留备注 ' + (res.kept_notes || 0) + ' 条');
+              var msg = '导入 ' + picked.length + ' 个：新增 ' + ((res.added || []).length) +
+                '，已存在保留 ' + (res.refreshed || []).length +
+                (res.kept_notes ? '（其中 ' + res.kept_notes + ' 条备注原样保留）' : '');
+              if ((res.conflicts || []).length) {
+                msg += '；' + res.conflicts.length + ' 个同名不同地址 → 已另存新条目';
+              }
+              U.toast('success', msg);
               return load();
-            }).catch(function (e) { U.toast('error', e.message); });
+            }).catch(function (e) { U.toast('error', e.message); return false; });
           }
         }
       ]
@@ -499,6 +538,64 @@
         });
       });
     }
+
+    function renderPick() {
+      var host = U.$('#mdl-i-list');
+      if (!host) return;
+      var q = (U.$('#mdl-i-q').value || '').trim().toLowerCase();
+      var rows = fetched.filter(function (d) { return !q || d.id.toLowerCase().indexOf(q) >= 0; });
+      if (!rows.length) { host.innerHTML = ''; return; }
+      host.innerHTML = rows.map(function (d) {
+        return '<label class="mdl-pick"><input type="checkbox" data-model="' + U.esc(d.id) + '">' +
+          '<span class="mono">' + U.esc(d.id) + '</span>' +
+          (Number(d.context_window) > 0
+            ? '<span class="badge badge-grey">ctx ' + U.esc(String(d.context_window)) + '</span>' : '') +
+          '</label>';
+      }).join('');
+    }
+
+    var fetchBtn = U.$('#mdl-i-fetch');
+    if (fetchBtn) {
+      fetchBtn.addEventListener('click', function () {
+        var info = U.$('#mdl-i-info');
+        var base = U.$('#mdl-i-base').value.trim();
+        var provider = U.$('#mdl-i-provider').value.trim();
+        var key = U.$('#mdl-i-key').value.trim();
+        if (info) info.textContent = '拉取中…（用的端点：' + (base || '当前生效的地址') + '）';
+        /* 只看不写：走 /settings/models，不落库 */
+        A.settings.models(provider || undefined, base || undefined, key || undefined)
+          .then(function (r) {
+            if (r && r.error) {
+              if (info) info.textContent = '拉取失败：' + r.error;
+              U.toast('error', '拉取失败：' + r.error);
+              return;
+            }
+            fetched = (r && r.details) || [];
+            renderPick();
+            var ctxCount = fetched.filter(function (d) { return Number(d.context_window) > 0; }).length;
+            if (info) {
+              info.textContent = '共 ' + fetched.length + ' 个模型' +
+                (ctxCount ? '（' + ctxCount + ' 个带上下文长度，导入时自动填入）' : '（这家没报上下文长度）') +
+                ' · 校验通过：端点 ' + (r.used_endpoint || base || '当前生效') +
+                ' · 密钥来源：' + (key ? '本次填写的' : '全局密钥');
+            }
+            if (!fetched.length) U.toast('warn', '没拉到模型：检查地址与密钥（本地部署还要确认同网段）');
+          })
+          .catch(function (e) { if (info) info.textContent = '拉取失败：' + e.message; });
+      });
+    }
+    ['#mdl-i-q'].forEach(function (sel) {
+      var q = U.$(sel);
+      if (q) q.addEventListener('input', renderPick);
+    });
+    var all = U.$('#mdl-i-all');
+    if (all) all.addEventListener('click', function () {
+      U.$$('#mdl-i-list input[type=checkbox]').forEach(function (c) { c.checked = true; });
+    });
+    var none = U.$('#mdl-i-none');
+    if (none) none.addEventListener('click', function () {
+      U.$$('#mdl-i-list input[type=checkbox]').forEach(function (c) { c.checked = false; });
+    });
   }
 
   function ensureBound() {

@@ -256,6 +256,7 @@ class RetryPolicy:
         memory: RetryMemory | None = None,
         profile: str = "",
         on_severity: Callable[[RateLimitSeverity, float, BaseException | None], Any] | None = None,
+        on_success: Callable[[], Any] | None = None,
         adaptive: bool = True,
         recovery_step: float | None = None,
         heavy_bonus: int = 5,
@@ -270,6 +271,11 @@ class RetryPolicy:
         self.memory = memory
         self.profile = profile or ""
         self.on_severity = on_severity
+        # v0.10.21：限速徽标以前"只亮不灭"——唯一清它的钩子是 `window.run_finished`
+        # 事件，而**群组运行、管理员对话、工具调用都不发这个事件**（owner 实测：
+        # 退避早结束了，顶部还挂着"限速等待中"）。真正的结束信号是"这次调用成功了"，
+        # 所以补 `on_success`：等待过至少一次之后，一旦调用成功就回调（清徽标）。
+        self.on_success = on_success
         self.adaptive = adaptive
         # 加性恢复步长：默认半个基准间隔（连续成功就把间隔往回收）
         self.recovery_step = float(recovery_step if recovery_step is not None
@@ -373,6 +379,11 @@ class RetryPolicy:
                 await self._sleep(delay)
             else:
                 self._note_success()
+                if self.waits and self.on_success:
+                    try:
+                        self.on_success()
+                    except Exception:  # noqa: BLE001 — 状态上报绝不能打断成功路径
+                        logger.debug("on_success hook failed", exc_info=True)
                 return result
         raise RetryExhausted(last or RuntimeError("unknown"), attempt)
 
@@ -392,7 +403,7 @@ class RetryPolicy:
     @classmethod
     def from_config(cls, cfg: Any, on_wait: Callable[[int, float], Any] | None = None,
                     *, memory: RetryMemory | None = None, profile: str = "",
-                    on_severity: Any = None,
+                    on_severity: Any = None, on_success: Callable[[], Any] | None = None,
                     sleep: Callable[[float], Awaitable[None]] | None = None) -> "RetryPolicy":
         return cls(
             base_interval=cfg.base_interval,
@@ -403,5 +414,6 @@ class RetryPolicy:
             memory=memory,
             profile=profile,
             on_severity=on_severity,
+            on_success=on_success,
             sleep=sleep,
         )

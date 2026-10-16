@@ -93,7 +93,8 @@ class DogBuddyApp:
         # named LLM config sets → providers (windows/jobs may bind a profile)
         self.profiles = LLMProfileRegistry(config, on_wait_hook=self._on_llm_wait,
                                            retry_memory=self.retry_memory,
-                                           on_severity_hook=self._on_llm_severity)
+                                           on_severity_hook=self._on_llm_severity,
+                                           on_resume_hook=self._on_llm_resumed)
         # v0.10.15：工位从模型目录里选的模型，用条目自己的 provider/base_url/密钥
         # （否则"换了个模型"其实还是打到 profile 那个端点，换服务商时必然 401/404）
         self.profiles.model_lookup = self.db.get_model_by_name
@@ -329,6 +330,26 @@ class DogBuddyApp:
                             payload={"attempt": attempt, "delay": delay, "profile": profile}))
         # T8.8: 记下最近一次等待时长，供迭代速度计算"模型越慢→迭代越慢"
         self._last_rate_limit_wait = float(delay or 0.0)
+
+    def _on_llm_resumed(self, profile: str = "") -> None:
+        """一次"等过限速之后真的成功了" → 灭掉"限速等待中"徽标。
+
+        v0.10.21（owner 实测 + 群组实测）：清徽标的旧钩子是 `window.run_finished`
+        事件，而**群组运行、管理员对话、工具调用都不发它**，于是退避早就结束、
+        任务早已跑完，页面顶部还挂着"限速等待中"（owner 原话："显示的还是正在输入
+        （上方提示限速等待中），但是确实是掉线了"）。真正的结束信号是"这次调用成功"。
+        """
+        if not self._rate_limit.get("waiting"):
+            return
+        self._rate_limit = {"waiting": False, "attempt": 0, "window_id": ""}
+        self._last_rate_limit_wait = 0.0
+        try:
+            self.bus.emit(Event(type="rate_limit.status",
+                                payload={"attempt": 0, "delay": 0,
+                                         "profile": profile or "",
+                                         "waiting": False, "reason": "resumed"}))
+        except Exception:  # noqa: BLE001
+            logger.debug("rate_limit resume emit failed", exc_info=True)
 
     def _on_run_finished(self, event: Any) -> None:
         """一次运行结束 → 清掉"限速等待中"徽标。

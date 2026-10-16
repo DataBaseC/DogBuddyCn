@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from ..config import SECRET_MASK, is_masked_secret, mask_secret
 
@@ -76,6 +77,53 @@ def make_model_id(provider: str, model: str) -> str:
     return safe
 
 
+def _safe_id(raw: str) -> str:
+    """把任意串收敛成路径安全的 id（id 会出现在 `PATCH /api/models/{id}` 里）。"""
+    return "".join(ch if ch.isalnum() or ch in "-_.:@" else "_" for ch in raw)[:110]
+
+
+def endpoint_of(base_url: str) -> str:
+    """`base_url` 的规范化**端点标识**：`host[:port][/path]`（去 scheme、尾斜杠、小写）。
+
+    为什么需要它：目录条目的 id 只由 `provider + model` 决定，**不含地址**。
+    于是"同一个模型名、不同地址"的两条必然撞 id —— 新增/重拉时把原来那条的
+    `base_url` 静默改掉（owner 实测："我好像新增的会覆盖掉原来的"），而后来的
+    请求还带着上一家的 key → 401。用端点做区分后两条可以共存。
+    """
+    raw = str(base_url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw if "://" in raw else "http://" + raw)
+    except ValueError:
+        return raw.lower()
+    host = (parts.netloc or "").lower()
+    path = (parts.path or "").rstrip("/")
+    return f"{host}{path}"
+
+
+def fetch_error_hint(exc: Any) -> str:
+    """把"拉不到模型列表"的底层异常翻译成一句人能用的提示。
+
+    本地部署（LM Studio / Ollama / vLLM）最常见的失败原因**不是**"模型不存在"，
+    而是端点根本连不上：服务器与它不在同一网段、没开局域网服务、防火墙。
+    owner 实测：LM Studio 在 `192.168.3.78:1234`，而服务器只有 `192.168.1.2/24`
+    （路由表里只有 192.168.1.0/24）→ 100% 丢包，但界面上看起来像"模型不识别"。
+    """
+    name = type(exc).__name__.lower() if not isinstance(exc, str) else ""
+    text = str(exc).lower()
+    unreachable = ("timeout" in name or "connect" in name or "network" in name
+                   or "timeout" in text or "connect" in text or "refused" in text
+                   or "unreachable" in text or "no route" in text
+                   or "getaddrinfo" in text or "name or service" in text)
+    if not unreachable:
+        return ""
+    return ("（端点连不上，**不是模型不存在**：服务器访问不了这个地址。"
+            "本地 LM Studio/Ollama 常见原因：① 与服务器不在同一网段；"
+            "② LM Studio 未开 Serve on Local Network；③ 防火墙/端口未放行。"
+            "可在服务器上 `curl <base_url>/models` 自检。）")
+
+
 class ModelService:
     def __init__(self, db: Any, app_config: Any = None,
                  persist: Callable[[], str] | None = None,
@@ -99,9 +147,13 @@ class ModelService:
 
     @staticmethod
     def _public(entry: dict[str, Any]) -> dict[str, Any]:
-        """出接口的形状：**永不回传明文密钥**，只回掩码 + 是否自带。"""
+        """出接口的形状：**永不回传明文密钥**，只回掩码 + 是否自带 + 端点。"""
         raw = entry.get("api_key") or ""
-        return {"api_key": mask_key(raw), "has_api_key": bool(raw.strip())}
+        ep = endpoint_of(entry.get("base_url") or "")
+        return {"api_key": mask_key(raw), "has_api_key": bool(raw.strip()),
+                # 端点与密钥来源给前端显示：同名模型靠它区分（"新增覆盖原来的"的可见化）
+                "endpoint": ep, "endpoint_host": ep.split("/")[0],
+                "key_source": "entry" if raw.strip() else "global"}
 
     def current(self) -> dict[str, Any]:
         """当前实际生效的模型（运行时配置，可能与目录里的 is_default 不同步）。"""
@@ -163,7 +215,8 @@ class ModelService:
         try:
             details = await self._fetch_meta(cfg.llm.provider, cfg.llm.base_url, cfg.llm.api_key)
         except Exception as e:  # noqa: BLE001 — 校验失败要说原因，不能吞
-            return {"ok": False, "model": model, "error": str(e)}
+            return {"ok": False, "model": model, "error": str(e) + fetch_error_hint(e),
+                    "hint": fetch_error_hint(e)}
         ids = [str(d.get("id") or "") for d in (details or [])]
         tail = model.split("/")[-1].lower()
         near = [i for i in ids if tail[:6] and tail[:6] in i.lower()][:5]
@@ -171,15 +224,48 @@ class ModelService:
                 "in_provider_list": model in ids, "similar": near}
 
     # ------------------------------------------------------------- 写
+    def _resolve_id(self, provider: str, model: str, base_url: str,
+                    explicit: str = "") -> tuple[str, str]:
+        """决定目录条目该用哪个 id；返回 `(id, 端点冲突说明)`。
+
+        显式 id（PATCH/更新已有条目）原样使用。否则 = `make_model_id(provider, model)`
+        这个"同名同 provider 只有一条"的旧口径——**这正是覆盖的根源**。
+        现在补一条规则：若同名条目已存在、且指向**另一个端点**，就追加 `@<host>`
+        另开一条，两条共存（前端用「端点」列/标签区分）。同一个端点的重复新增
+        仍然幂等（沿用原条目）。
+        """
+        if explicit:
+            return explicit, ""
+        base = make_model_id(provider, model)
+        row = self.db.get_model(base)
+        if row is None:
+            return base, ""
+        new_ep = endpoint_of(base_url)
+        old_ep = endpoint_of(row.get("base_url") or "")
+        if not new_ep or not old_ep or new_ep == old_ep:
+            return base, ""
+        host = new_ep.split("/")[0] or "alt"
+        safe = _safe_id(f"{base}@{host}")
+        n = 1
+        while True:
+            row = self.db.get_model(safe)
+            if row is None or endpoint_of(row.get("base_url") or "") == new_ep:
+                break
+            n += 1
+            safe = _safe_id(f"{base}@{host}-{n}")
+        return safe, f"同名条目已指向 {old_ep or '(空)'}，本条另存为 {safe}（新端点 {new_ep}）"
+
     def upsert(self, **fields: Any) -> dict[str, Any]:
         model = str(fields.get("model") or "").strip()
         provider = str(fields.get("provider") or "openai_compat").strip()
-        mid = str(fields.get("id") or "").strip() or make_model_id(provider, model)
+        entry_id, conflict = self._resolve_id(
+            provider, model, str(fields.get("base_url") or ""),
+            str(fields.get("id") or "").strip())
         entry = {k: v for k, v in fields.items() if v is not None}
         entry.pop("_was", None)
-        existed = self.db.get_model(mid) is not None
-        entry["id"] = mid
-        entry["model"] = model or mid
+        existed = self.db.get_model(entry_id) is not None
+        entry["id"] = entry_id
+        entry["model"] = model or entry_id
         entry.setdefault("provider", provider)
         # 密钥：留空 = 保持不变；回传掩码 = 保持不变（前端会把掩码原样回传）
         key = str(entry.get("api_key") or "").strip()
@@ -191,8 +277,11 @@ class ModelService:
             entry["enabled"] = 1 if entry["enabled"] else 0
         saved = self.db.upsert_model(entry)
         self.db.audit("web", "model:upsert",
-                      f"{mid} ({'更新' if existed else '新建'}) key={'自带' if saved.get('api_key') else '全局'}")
-        return {**saved, **self._public(saved)}
+                      f"{entry_id} ({'更新' if existed else '新建'}) "
+                      f"key={'自带' if saved.get('api_key') else '全局'}"
+                      + (f" | {conflict}" if conflict else ""))
+        return {**saved, **self._public(saved),
+                "endpoint_conflict": bool(conflict), "conflict_detail": conflict}
 
     def update(self, model_id: str, **fields: Any) -> dict[str, Any]:
         if self.db.get_model(model_id) is None:
@@ -263,18 +352,29 @@ class ModelService:
 
     # ------------------------------------------------------------- 导入
     async def import_fetched(self, provider: str | None = None, base_url: str | None = None,
-                             api_key: str | None = None) -> dict[str, Any]:
+                             api_key: str | None = None,
+                             only: list[str] | None = None, q: str = "") -> dict[str, Any]:
         """从 provider 拉模型列表并入库。**绝不覆盖已存在的 note**。
 
         v0.10.12：能拿到服务商给的上下文长度就写进条目（`context_window`）；
         **只填"还没有值"的条目**——用户手填过的数一律不覆盖。
         服务商没给（`0`）就留空，表示"继承服务商/全局默认"，不替它编一个数。
+
+        v0.10.21（owner 实测）：
+        * `q` / `only` —— 拉取**过多**是真的（SiliconFlow 一次 99 条）。
+          先按关键词过滤，或只导入前端勾选的那些；`filtered_from` 回报原始条数。
+        * **不再改已存在条目的 `base_url`/`provider`** —— 以前重拉会把同名条目的
+          端点悄悄改成这次的地址，而 key 仍是上一家的 → 之后必然 401。
+          端点不同 = 另一条，走 `_resolve_id` 另存（`conflicts` 里回报）。
+        * 返回值带 `used_base_url`/`key_source`：让界面能明说"这次是拿**哪个端点、
+          哪把 key** 拉的"，不再出现"顺手把默认 key 的模型也拉进来了"这种黑盒。
         """
         if self._fetch_meta is None and self._fetch is None:
             raise RuntimeError("未接入模型列表拉取能力")
         cfg = self.app
         used_provider = provider or (cfg.llm.provider if cfg else "openai_compat")
         used_base = base_url or (cfg.llm.base_url if cfg else "")
+        key_source = "entry" if (api_key or "").strip() else "global"
         ctx_of: dict[str, int] = {}
         if self._fetch_meta is not None:
             meta = await self._fetch_meta(provider, base_url, api_key)
@@ -284,10 +384,20 @@ class ModelService:
         else:
             names = await self._fetch(provider, base_url, api_key)
         names = [n for n in names if n]
+        fetched_total = len(names)
+        only_set = {str(x).strip() for x in (only or []) if str(x).strip()}
+        if only_set:
+            names = [n for n in names if n in only_set]
+        ql = str(q or "").strip().lower()
+        if ql:
+            names = [n for n in names if ql in n.lower()]
         existing = {r["id"]: r for r in self.db.list_models()}
-        added, refreshed, kept_notes, ctx_filled = [], [], 0, 0
+        added, refreshed, kept_notes, ctx_filled, conflicts = [], [], 0, 0, []
         for name in names:
-            mid = make_model_id(used_provider, name)
+            mid, conflict = self._resolve_id(used_provider, name, used_base)
+            if conflict:
+                # 同名但另一个端点 → 另存一条，**不动原来那条**
+                conflicts.append({"model": name, "id": mid, "detail": conflict})
             entry = existing.get(mid)
             ctx = ctx_of.get(name, 0)
             if entry is None:
@@ -303,7 +413,12 @@ class ModelService:
                 self.db.upsert_model(new_entry)
                 added.append(name)
             else:
-                patch: dict[str, Any] = {"id": mid, "provider": used_provider, "base_url": used_base}
+                patch: dict[str, Any] = {"id": mid}
+                # 端点/服务商只在**空**的时候补——绝不改写用户已经配好的那条
+                if not (entry.get("base_url") or "").strip():
+                    patch["base_url"] = used_base
+                if not (entry.get("provider") or "").strip():
+                    patch["provider"] = used_provider
                 if entry.get("source") != "manual":
                     patch["source"] = "fetched"
                 if ctx > 0 and not int(entry.get("context_window") or 0):
@@ -314,8 +429,14 @@ class ModelService:
                 if (entry.get("note") or "").strip():
                     kept_notes += 1
         self.db.audit("web", "model:import",
-                      f"provider={used_provider} fetched={len(names)} added={len(added)} "
-                      f"refreshed={len(refreshed)} ctx_filled={ctx_filled}")
+                      f"provider={used_provider} base={used_base or '-'} key={key_source} "
+                      f"fetched={fetched_total} imported={len(names)} added={len(added)} "
+                      f"refreshed={len(refreshed)} ctx_filled={ctx_filled} "
+                      f"endpoint_conflicts={len(conflicts)}")
         return {"fetched": len(names), "added": added, "refreshed": refreshed,
                 "kept_notes": kept_notes, "context_filled": ctx_filled,
-                "provider": used_provider, "base_url": used_base}
+                "provider": used_provider, "base_url": used_base,
+                # v0.10.21：把"这次到底用了哪个端点 / 哪把 key / 过滤掉多少"说清楚
+                "used_base_url": used_base, "key_source": key_source,
+                "filtered_from": fetched_total, "filtered": fetched_total - len(names),
+                "conflicts": conflicts}

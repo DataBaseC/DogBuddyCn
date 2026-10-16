@@ -232,7 +232,16 @@ def router(svc, auth_deps) -> APIRouter:
             else:
                 details = await _meta(provider, base_url, api_key)
         except Exception as e:  # noqa: BLE001 — readable error to the console
-            return {"models": [], "details": [], "error": str(e)}
+            from ...services.model_service import endpoint_of, fetch_error_hint
+            # v0.10.21：把"用的哪个端点"和"连不上 vs 真没有"一起说清楚——
+            # 本地部署时界面上的"模型不识别"十有八九只是端点连不上。
+            return {"models": [], "details": [], "error": str(e) + fetch_error_hint(e),
+                    "hint": fetch_error_hint(e),
+                    "used_base_url": base_url or (entry.get("base_url") if entry else "")
+                    or (cfg.llm.base_url if not profile else ""),
+                    "used_endpoint": endpoint_of(
+                        base_url or (entry.get("base_url") if entry else "")
+                        or (cfg.llm.base_url if not profile else ""))}
         return {"models": [m["id"] for m in details], "details": details, "error": ""}
 
     @r.post("/settings/test_llm", dependencies=auth_deps)

@@ -35,17 +35,22 @@ class LLMProfileRegistry:
     def __init__(self, app_config: Any,
                  on_wait_hook: Callable[[str, int, float], Any] | None = None,
                  retry_memory: Any = None,
-                 on_severity_hook: Callable[[str, Any, float, Any], Any] | None = None):
+                 on_severity_hook: Callable[[str, Any, float, Any], Any] | None = None,
+                 on_resume_hook: Callable[[str], Any] | None = None):
         """on_wait_hook(profile_name, attempt, delay) — surfaced for UI rate-limit status.
 
         T8.7/T8.8：`retry_memory` 让每个 profile 记住上次退避量级；
         `on_severity_hook(profile, severity, delay, exc)` 把限速严重度抛给上层
         （UI 徽标 / 报告 / 项目迭代降速）。
+        v0.10.21：`on_resume_hook(profile)` 在"等待后这次调用**成功**"时回调，
+        用来灭掉"限速等待中"徽标（以前只有 `window.run_finished` 会灭它，
+        群组运行/管理员对话/工具路径永远不灭）。
         """
         self.cfg = app_config
         self.on_wait_hook = on_wait_hook
         self.retry_memory = retry_memory
         self.on_severity_hook = on_severity_hook
+        self.on_resume_hook = on_resume_hook
         # v0.10.15：工位从模型目录里选模型时，条目自带的 provider/base_url/密钥要生效。
         # 否则"选了一个配置好的模型"只是换了个名字，请求还是打到 profile 那个端点
         # （换个服务商的模型时会 404/401，还很难看出原因）。
@@ -150,9 +155,17 @@ class LLMProfileRegistry:
             except Exception:  # noqa: BLE001 — bad override values fall back to profile
                 retry_cfg = section.retry
         # T8.7: 每 profile 一份退避记忆（"上次退避多久才成功"），下次从该量级起跳
+        def on_resume() -> None:
+            if self.on_resume_hook:
+                try:
+                    self.on_resume_hook(name)
+                except Exception:  # noqa: BLE001 — 状态上报不能打断成功路径
+                    pass
+
         retry = RetryPolicy.from_config(retry_cfg, on_wait=on_wait,
                                         memory=self.retry_memory, profile=name,
-                                        on_severity=on_severity)
+                                        on_severity=on_severity,
+                                        on_success=on_resume)
         temperature = ovr.get("temperature", section.temperature)
         timeout = ovr.get("request_timeout", section.request_timeout)
         # v0.10.15：工位从**模型目录**里挑的模型，用条目自己的端点与密钥。

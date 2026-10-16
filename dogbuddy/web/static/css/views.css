@@ -1220,3 +1220,25 @@ tr.history-row td { background: rgba(255, 255, 255, 0.02); padding: 0 12px 14px;
    所以换行必须靠 CSS —— 否则整段挤成一行。 */
 .stream-text { white-space: pre-wrap; word-break: break-word; }
 .chat-body .stream-text { display: inline; }
+
+/* v0.10.21 模型导入：拉取后勾选（"拉取过多"的对策）。
+   以前只有"全量导入"，SiliconFlow 一次 99 条就全进目录了。 */
+.mdl-pick-list {
+  max-height: 300px;
+  overflow: auto;
+  margin-top: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+}
+.mdl-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+.mdl-pick:last-child { border-bottom: 0; }
+.mdl-pick:hover { background: rgba(255, 255, 255, 0.04); }
+.mdl-pick input { flex: 0 0 auto; }
+.mdl-pick span.mono { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

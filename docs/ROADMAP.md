@@ -996,3 +996,53 @@ qa-env 因此烧掉大量轮次、最终撞 `max iterations reached`（25 轮/43
 `/etc/dogbuddy/config.yaml` 明文密钥 + worker env 内 `DOGBUDDY_PANEL_TOKEN`
 可 root 执行）——静态检查器的固有局限，真修需要容器/只读挂载级方案。
 
+
+---
+
+## 18. 第十一轮：群组真机验收 + 模型配置三处硬伤（2026-10-16，`0.10.21`）
+
+owner 交付了 3 个新工位（worker-1 deepseek-v4-flash / worker-2 sensenova-6.8-flash-lite /
+worker-3 继承），让我在**真机 + 真限速**下验收群组，并提了三条模型配置反馈。
+本节把验收证据与随之修掉的三处硬伤记下来。
+
+### 18.1 群组真机验收（通过）
+
+`能力测试 [9174e4b248cc]`：管理员**自己**用 `group_create`/`group_assign` 建的群
+（12.2s，未触发限速）→ `POST /groups/{id}/run` 一轮真实任务 → 三名成员全部 `ok`：
+
+| 证据 | 值 |
+|---|---|
+| 产物 | `ws1/hello.txt`=`hello-from-worker-1`、`ws2/…-2`、`ws3/hello-from-worker` |
+| 频道 | 20 条消息（worker-1/2 各 6 条、worker-3 8 条），组长产出 3 人汇总 |
+| 总耗时 | 400.3s（HTTP 200） |
+| 限速 | `rate_limit.status {attempt:1, delay:340.0}`，severity=**heavy** → 原地等 340s 后**成功续跑**，未记失败 |
+| 缓存命中 | worker-1 `6144/608 = 91.0%`、worker-2 `6144/616 = 90.9%`、worker-3(SiliconFlow) `0/7307 = 0%` |
+
+缓存命中数据在真实 provider 上拿到了非零值（SenseNova 报 cache 字段，SiliconFlow 不报）
+—— §17.4 那条"换成会报缓存的 provider 才看得见"得到实证。
+
+### 18.2 模型配置三处硬伤
+
+| 现象（owner 原话） | 根因 | 修法 |
+|---|---|---|
+| "我好像新增的会覆盖掉原来的" | 目录条目 id 只由 `provider+model` 决定（`make_model_id`），**不含端点**：同名模型换地址必然撞 id，第二条把第一条的 `base_url` 静默改掉，而 key 没跟着换 → 之后请求带着上一家的密钥打到新端点 → **401**（圆桌实测 worker-1/worker-2 的 401 正是这条） | `ModelService._resolve_id()`：同名条目已指向另一个端点时另存 `...@host`，两条共存；`upsert` 回报 `endpoint_conflict`；`_public()` 出 `endpoint/endpoint_host/key_source`；前端列表给同名条目打「同名 · 端点」标签、新增时明确提示"已另存" |
+| "拉取模型有时候拉取过多" | `import_fetched` 无任何过滤，SiliconFlow 一次 99 条全入库 | `POST /models/import` 新增 `q`（关键词）与 `only`（只导勾选的）；前端改成**两步**：先「拉取列表（只看不写）」→ 勾选 → 「只导入勾选的」（`mdl-pick` 复选框 + 过滤框 + 全选/清空） |
+| "把默认 key 的模型也拉取了" | 导入接口留空即静默回落到"当前生效"的端点与密钥，用户看不到用了谁 | 响应回报 `used_base_url`/`key_source`/`filtered_from`/`filtered`/`conflicts`；前端顶部明说"这次用的端点 + 密钥来源"；**并且不再改写已存在条目的 `base_url`/`provider`**（只在空值时补） |
+| "本地 lmstudio 部署的模型不识别" | 实测**不是应用问题**：服务器只有 `192.168.1.2/24`（路由表仅 `192.168.1.0/24`），而 LM Studio 在 `192.168.3.78:1234` → ping 100% 丢包、curl 连接超时。界面却把"连不上"呈现成"模型不存在" | 新增 `fetch_error_hint()`：连接类错误一律附人话（同网段 / Serve on Local Network / 防火墙 / 先在服务器 `curl <base_url>/models` 自检），并回报 `used_endpoint` |
+
+### 18.3 顺带修掉：限速徽标"等完不灭"
+
+群组实测暴露：退避 340s 早已结束、任务跑完、HTTP 已返回 200，`/api/status` 里
+`rate_limit.waiting` **仍是 true**。根因：清徽标的钩子挂在 `window.run_finished`
+事件上，而**群组运行、管理员对话、工具调用都不发这个事件**（owner 之前报的
+"上方提示限速等待中，但是确实掉线了"同源）。
+
+修法：`RetryPolicy` 新增 `on_success`——等待过至少一次之后一旦调用成功就回调，
+`LLMProfileRegistry(on_resume_hook=…)` → `main._on_llm_resumed()` 灭徽标并发
+`rate_limit.status{waiting:false, reason:"resumed"}`。这条覆盖**所有**调用路径，
+不再依赖某个事件恰好被人发出。
+
+### 18.4 基线
+
+614 passed / 4 skipped（+13：身份/导入 8、限速恢复 5）；`audit_ui --strict` exit 0；
+bundle 已重建。

@@ -47,6 +47,10 @@ class ImportIn(BaseModel):
     provider: str | None = None
     base_url: str | None = None
     api_key: str | None = None
+    # v0.10.21（owner 实测）：拉取**过多**是真的（SiliconFlow 一次 99 条）。
+    # 允许先按关键词过滤、或只导入前端勾选的那些，别把整家目录一股脑灌进来。
+    q: str = ""
+    only: list[str] | None = None
 
 
 def router(svc, auth_deps) -> APIRouter:
@@ -130,12 +134,16 @@ def router(svc, auth_deps) -> APIRouter:
 
     @r.post("/models/import", dependencies=auth_deps)
     async def import_models(body: ImportIn) -> dict:
-        """从 provider 拉取模型列表批量入库（已存在的保留用户备注）。"""
+        """从 provider 拉取模型列表批量入库（已存在的保留用户备注与端点）。"""
         m = _m()
         try:
-            result = await m.import_fetched(body.provider, body.base_url, body.api_key)
+            result = await m.import_fetched(body.provider, body.base_url, body.api_key,
+                                            only=body.only, q=body.q)
         except Exception as e:  # noqa: BLE001 — 拉取失败要给出人话
-            raise HTTPException(status_code=502, detail=f"拉取模型列表失败：{e}") from e
+            from ...services.model_service import fetch_error_hint
+            raise HTTPException(
+                status_code=502,
+                detail=f"拉取模型列表失败：{e}{fetch_error_hint(e)}") from e
         return {"result": result, "models": m.catalog(), "summary": m.summary()}
 
     return r
