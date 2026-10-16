@@ -390,7 +390,9 @@ def test_退避记忆接进_profile_registry(tmp_path):
     reg = LLMProfileRegistry(AppConfig(llm=LLMConfig(base_url="http://x/v1", api_key="k")),
                              retry_memory=mem)
     slow = reg.provider_for("slow")
-    assert slow.retry.current_interval == 240.0, "同端点同 key 的 provider 应从记忆量级起跳"
+    # v0.10.31：记住的量级会被 `max_interval`（默认已降到 120s）夹住 ——
+    # owner 明确要求"等待时间缩短点"，所以记忆不能把 240s 原样带回来。
+    assert slow.retry.current_interval == slow.retry.max_interval,         f"应从记忆量级起跳但被 max_interval 夹住：{slow.retry.current_interval}"
     assert slow.retry.memory_key == "x|k", slow.retry.memory_key
     # 换一把 key / 换一个端点 → 干净起跳（不被别人的 600s 传染）
     other = LLMProfileRegistry(

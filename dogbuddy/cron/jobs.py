@@ -342,9 +342,14 @@ class JobStore:
         return job.fail_count, auto_paused
 
     def mark_rate_limited(self, job: Job) -> None:
-        """Rate-limit waiting is NOT a failure — just reschedule soon."""
+        """Rate-limit waiting is NOT a failure — just reschedule soon.
+
+        v0.10.31：v0.10.28 起"长等待不睡在请求里，而是暂停交给调度"，那 5 分钟的
+        重排间隔就成了新的等待成本（owner："等待时间缩短点，太折磨了"）。
+        缩短到 60 秒：限速窗口通常就是分钟级，早点回来试更划算。
+        """
         job.last_run_at = _now().isoformat()
-        job.next_run_at = (_now() + timedelta(minutes=5)).isoformat()
+        job.next_run_at = (_now() + timedelta(seconds=60)).isoformat()
         self.repo.upsert_job(job)
 
     def mark_timeout(self, job: Job) -> None:
