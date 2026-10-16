@@ -221,4 +221,5 @@ def test_frontend_shows_the_admin_model_in_chat_and_models_page():
     assert "u.model" in chat, "对话页没显示管理员模型"
     assert 'id="chat-model-go"' in html and "App.go('models')" in chat
     assert "管理员当前模型" in models and "设为管理员模型" in models
-    assert "管理员当前模型" in settings
+    # v0.10.27：设置页的 LLM 卡片已删，"当前模型"只在对话页/模型页显示
+    assert "管理员当前模型" not in settings

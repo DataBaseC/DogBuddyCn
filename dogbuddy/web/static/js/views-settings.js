@@ -1,6 +1,9 @@
 /* ============================================================
    DogBuddyCn 控制台 · views-settings.js
-   设置（LLM 接入 / LLM 配置套·views-profiles.js / 限速重试 / 面板对接 / 网关与回报 / 通知通道 / 白名单 / 安全）
+   设置（限速重试 / 面板对接 / 网关与回报 / 通知通道 / 白名单 / 安全）
+   v0.10.27（owner）：**删除 LLM 兜底配置 与 LLM 配置套 两张卡片** ——
+   模型（含密钥/地址/上下文）只有一个来源：模型管理页的目录。
+   配置套的后端能力与表单下拉（views-profiles.js）保留。
    首次设置向导（7 步：provider → base_url → api_key → 拉取模型 → 选模型 → 测试连接 → 保存）
    ============================================================ */
 (function (global) {
@@ -58,11 +61,13 @@
       if (!host) return;
       var d = Settings.data || {};
       var llm = d.llm || {}, panel = d.panel || {}, gw = d.gateway || {}, rep = d.report || {};
-      var Profiles = (global.DogBuddyViews || {}).Profiles;
       var Approval = (global.DogBuddyViews || {}).Approval;
+      /* v0.10.27（owner）：**删掉「LLM 兜底配置」与「LLM 配置套」两张卡片** ——
+         模型只有一个来源：模型管理页的目录（密钥、地址、上下文都在条目上，
+         `activate()` 写运行时）。这里只剩与模型无关的运维设置。
+         注：配置套（profiles）**后端能力保留**（`/api/settings/profiles`、
+         工位/任务的 `llm_profile` 字段），只是不再在设置页提供编辑入口。 */
       host.innerHTML =
-        Settings.cardLLM(llm) +
-        (Profiles ? Profiles.cardHTML() : '') +
         Settings.cardRetry(llm.retry || {}) +
         Settings.cardPanel(panel) +
         Settings.cardGateway(gw, rep) +
@@ -71,54 +76,10 @@
         (Approval ? Approval.cardHTML() : '') +
         Settings.cardSecurity();
       Settings.bind();
-      if (Profiles) Profiles.bind();
       if (Approval) Approval.bind();
     },
 
     /* ---------- 卡片模板 ---------- */
-    cardLLM: function (llm) {
-      return '<div class="card set-card" data-group="llm">' +
-        '<div class="set-card-head"><span class="set-card-icon">' + U.icon('cpu', 'sm') + '</span>' +
-        '<div><h3>LLM 兜底配置</h3><p>服务商 · 地址 · 兜底密钥 · 参数 —— <b>管理员用的模型、以及每个模型的上下文，都在「模型管理」页</b></p></div></div>' +
-        '<div class="set-card-body">' +
-        '<div class="field"><span class="field-label">服务商 Provider</span>' +
-        '<select class="select" id="set-provider">' +
-        PROVIDERS.map(function (p) {
-          return '<option value="' + p.value + '"' + (llm.provider === p.value ? ' selected' : '') + '>' + p.label + '</option>';
-        }).join('') + '</select></div>' +
-        '<div class="field"><span class="field-label">Base URL</span>' +
-        '<input class="input mono" id="set-base-url" value="' + U.esc(llm.base_url || '') + '" placeholder="https://api.openai.com/v1"></div>' +
-        '<div class="field"><span class="field-label">全局 API Key（已停用）</span>' +
-        '<input class="input mono" id="set-api-key" type="password" value="" disabled ' +
-        'placeholder="' + U.esc(llm.api_key || '（未设置）') + '">' +
-        '<div class="hint">v0.10.25：**这个全局密钥框已停用** —— 密钥统一在「模型管理」页的' +
-        '**模型条目**上配置（点「新增模型」或那一行的编辑，填 API Key），' +
-        '点「设为管理员模型」时会连同密钥一起切换。这里只读显示当前生效的密钥掩码。' +
-        '</div></div>' +
-        '<div class="set-row" style="border:0;padding-top:2px;gap:10px">' +
-        '<span class="hint">管理员当前模型：<b class="mono">' + U.esc(llm.model || '(未设置)') + '</b> · ' +
-        '换模型请到「模型管理」页点「设为管理员模型」（每个模型可自带密钥与上下文）</span>' +
-        '<button class="btn btn-soft btn-sm" id="set-goto-models" type="button">打开模型管理</button></div>' +
-        '<div class="set-row" style="border:0;padding-top:2px">' +
-        '<button class="btn btn-soft btn-sm" id="set-test-llm" type="button">' + U.icon('zap', 'sm') + '测试兜底配置</button>' +
-        '<span class="hint" id="set-test-result">只测「地址 + 密钥」能否连上并列出模型，不做对话</span></div>' +
-        '<button class="adv-toggle" id="set-adv-toggle" type="button">高级参数' + U.icon('chevron-d', 'sm') + '</button>' +
-        '<div class="hidden" id="set-adv">' +
-        '<div class="set-two">' +
-        '<div class="field"><span class="field-label">temperature</span>' +
-        '<input class="input num" id="set-temperature" type="number" step="0.1" value="' + U.esc(llm.temperature !== undefined ? llm.temperature : 0.7) + '"></div>' +
-        '<div class="field"><span class="field-label">max_context_tokens</span>' +
-        '<input class="input num" id="set-max-ctx" type="number" value="' + U.esc(llm.max_context_tokens || 128000) + '"></div>' +
-        '</div><div class="set-two">' +
-        '<div class="field"><span class="field-label">compact_threshold</span>' +
-        '<input class="input num" id="set-compact" type="number" step="0.05" value="' + U.esc(llm.compact_threshold !== undefined ? llm.compact_threshold : 0.7) + '"></div>' +
-        '<div class="field"><span class="field-label">request_timeout（秒）</span>' +
-        '<input class="input num" id="set-timeout" type="number" value="' + U.esc(llm.request_timeout || 120) + '"></div>' +
-        '</div></div></div>' +
-        '<div class="set-card-foot"><span class="hint">api_key 掩码时不回传，留空即保持已保存值。</span>' +
-        '<div class="spacer"></div><button class="btn btn-primary btn-sm" data-save="llm">保存该组</button></div></div>';
-    },
-
     cardRetry: function (r) {
       return '<div class="card set-card" data-group="retry">' +
         '<div class="set-card-head"><span class="set-card-icon">' + U.icon('refresh', 'sm') + '</span>' +
@@ -256,30 +217,9 @@
     },
 
     /* ---------- 交互绑定 ---------- */
-    bind: function () {
-      /* 高级折叠 */
-      var advBtn = document.getElementById('set-adv-toggle');
-      if (advBtn) {
-        advBtn.addEventListener('click', function () {
-          advBtn.classList.toggle('open');
-          var adv = document.getElementById('set-adv');
-          if (adv) adv.classList.toggle('hidden');
-        });
-      }
-      /* 模型本身在「模型管理」页维护：这里只留"去那边"的入口 + 兜底配置连通性测试 */
-      var gotoModels = document.getElementById('set-goto-models');
-      if (gotoModels) {
-        gotoModels.addEventListener('click', function () {
-          if (global.App && global.App.go) global.App.go('models');
-        });
-      }
-      var testBtn = document.getElementById('set-test-llm');
-      if (testBtn) {
-        testBtn.addEventListener('click', function () {
-          Settings.runTest(testBtn, document.getElementById('set-test-result'));
-        });
-      }
-    },
+    /* v0.10.27：LLM 兜底卡片的三个监听（高级折叠 / 打开模型管理 / 测试兜底配置）
+       随卡片一起移除 —— 模型、地址、密钥都归「模型管理」页。 */
+    bind: function () {},
 
     renderBackoff: function () {
       var host = document.getElementById('set-backoff-preview');
@@ -299,57 +239,10 @@
       }).join('') + '<div class="backoff-bar" style="flex:0"><i style="height:0"></i><span>→ max ' + max + 's</span></div>';
     },
 
-    runTest: function (btn, out) {
-      var payload = {};
-      var p = document.getElementById('set-provider');
-      var b = document.getElementById('set-base-url');
-      var k = document.getElementById('set-api-key');
-      if (p) payload.provider = p.value;
-      if (b && b.value.trim()) payload.base_url = b.value.trim();
-      if (k && k.value.trim()) payload.api_key = k.value.trim();
-      /* 不传模型：这里测的是"兜底配置能不能连上 + 能列出多少模型"；
-         按模型测连接在模型管理页（那条可以自带密钥） */
-      if (btn) { btn.disabled = true; btn.textContent = '测试中…'; }
-      if (out) out.textContent = '正在测试连接…';
-      A.settings.testLLM(payload).then(function (r) {
-        if (r.ok) {
-          U.toast('success', '连接成功 · ' + (r.latency_ms || 0) + 'ms');
-          if (out) {
-            out.innerHTML = '<span style="color:var(--ok)">连接成功</span> · 延迟 ' +
-              U.esc(r.latency_ms || 0) + 'ms · 模型 ' + U.esc(r.model_count || 0) + ' 个' +
-              (r.chat_sample ? '<br>样例回复：' + U.esc(String(r.chat_sample).slice(0, 120)) : '');
-          }
-        } else {
-          U.toast('error', '连接失败：' + (r.message || '未知错误'));
-          if (out) {
-            out.innerHTML = '<span style="color:var(--err)">失败</span> · ' +
-              U.esc(r.message || '') + (r.chat_error ? ' · ' + U.esc(r.chat_error) : '');
-          }
-        }
-      }).catch(function (e) {
-        U.toast('error', '测试失败：' + e.message);
-        if (out) out.textContent = '测试失败：' + e.message;
-      }).then(function () {
-        if (btn) { btn.disabled = false; btn.textContent = '测试连接'; }
-      });
-    },
-
     saveGroup: function (group) {
       var body = {};
       try {
-        if (group === 'llm') {
-          /* v0.10.25：全局密钥已停用 —— 这里不再读取/提交它（密钥归「模型管理」页的条目）。
-             旧代码会读 #set-api-key，现在那个框是 disabled 的，读也读不到。 */
-          var payload = {
-            provider: document.getElementById('set-provider').value,
-            base_url: document.getElementById('set-base-url').value.trim(),
-            temperature: Number(document.getElementById('set-temperature').value),
-            max_context_tokens: Number(document.getElementById('set-max-ctx').value),
-            compact_threshold: Number(document.getElementById('set-compact').value),
-            request_timeout: Number(document.getElementById('set-timeout').value)
-          };
-          body.llm = payload;
-        } else if (group === 'retry') {
+        if (group === 'retry') {
           body.llm = {
             retry: {
               base_interval: Number(document.getElementById('set-rbase').value),

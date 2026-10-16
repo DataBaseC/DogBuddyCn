@@ -78,12 +78,19 @@ def test_向导把密钥落成模型条目而不是塞给设置页():
     assert "if (state.api_key) entry.api_key = state.api_key;" in js, "密钥要落在条目上"
     assert "A.models.activate(mid)" in js, "保存后要「设为当前」（连同密钥切换）"
     assert "payload.api_key = state.api_key" not in js, "向导不能再把密钥塞给设置页"
-    assert "id=\"set-api-key\" type=\"password\" value=\"\" disabled" in js, "全局密钥框必须禁用"
+    # v0.10.27：整张 LLM 兜底卡片（含那个已停用的密钥框）都删了 —— 比"禁用"更彻底
+    assert "set-api-key" not in js, "全局密钥框应随卡片一起删除"
+    assert 'data-group="llm"' not in js, "LLM 兜底卡片整张都没了"
 
 
-def test_全局密钥框不会再被保存流程读取():
+def test_设置页不再有全局密钥入口():
+    """v0.10.27（owner）：设置页的「LLM 兜底配置」整张卡删了，密钥只在模型条目上。"""
     js = (Path(__file__).resolve().parents[1] /
           "dogbuddy/web/static/js/views-settings.js").read_text(encoding="utf-8")
-    # 保存流程里不能出现读取该输入框的值
-    assert "document.getElementById('set-api-key').value" not in js, \
-        "已停用的全局密钥框不该再被读取"
+    assert "set-api-key" not in js and "set-provider" not in js and "set-base-url" not in js, \
+        "设置页不该再有 LLM 凭证/地址输入"
+    assert "cardLLM" not in js, "卡片函数应已删除"
+    # 后端拒绝仍然保留（防有人绕过界面直接调接口）
+    route = (Path(__file__).resolve().parents[1] /
+             "dogbuddy/web/routes/settings.py").read_text(encoding="utf-8")
+    assert "全局 API Key 已在设置页停用" in route

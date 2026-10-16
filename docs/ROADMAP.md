@@ -1199,3 +1199,29 @@ owner："把设置页里全局 llm key 这个给禁用了，我感觉一点用�
 没选模型时退回"只存兜底地址"并提示去模型管理页新增条目。
 另：`endpointHost()` 提到 `ui.js`（模型页与向导共用同一口径），并加两条静态守卫测试钉住
 "向导不得再往设置页塞密钥"。
+
+---
+
+## 23. 第十六轮：删掉设置页的「LLM 兜底配置」与「LLM 配置套」两张卡（2026-10-23，`0.10.27`）
+
+owner："所以设置里的兜底配置和 LLM 配置套可以删了。"
+
+**模型只有一个来源**：模型管理页的目录（密钥、地址、上下文都在条目上，`activate()` 写运行时）。
+设置页从此只剩与模型无关的运维设置。
+
+| 删除 | 说明 |
+|---|---|
+| `Settings.cardLLM`（LLM 兜底配置） | 连同 `#set-provider` / `#set-base-url` / 已停用的 `#set-api-key` / 高级参数（temperature、max_context_tokens、compact_threshold、request_timeout）/ 「测试兜底配置」按钮 / 三个绑定监听（高级折叠、打开模型管理、测试兜底）一并删除 |
+| `Profiles.cardHTML()`（LLM 配置套） | 设置页不再渲染其编辑卡片 |
+
+**保留**（重要）：
+* `views-profiles.js` **模块保留** —— 工位/任务表单里的"配置套"下拉仍然由
+  `ProfilesMod.fillSelect` 提供；后端 `/api/settings/profiles` 与 `llm_profile` 字段不动。
+  只是不再有设置页那个编辑入口（实验阶段没人用配置套：所有工位 `llm_profile=""`）。
+* `PUT /api/settings` 的 `llm` 段保留（限速重试卡片仍走它；向导"没选模型"时也用它存地址），
+  但写全局密钥仍然 **400**（上一轮的停用规则不放松）。
+* temperature / compact_threshold / max_context_tokens / request_timeout 现在只在
+  **工位参数页**按工位调（每个模型条目的 `context_window` 决定 `max_context_tokens`），
+  全局默认值保持不动。
+
+基线：644 passed / 4 skipped；`audit_ui --strict` exit 0；bundle 已重建。

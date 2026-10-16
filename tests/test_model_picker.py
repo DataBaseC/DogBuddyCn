@@ -111,18 +111,35 @@ def test_no_datalist_left_anywhere():
 
 
 def test_settings_no_longer_edits_models():
-    """合并入口：设置页只留"打开模型管理"+"测兜底配置"，不再有第二套模型编辑。"""
+    """模型只有一个来源：模型管理页。
+
+    历史：v0.10.x 先把设置页的模型输入框/拉取按钮合并掉（只留「打开模型管理」+
+    「测兜底配置」）；v0.10.27（owner）连整张 **LLM 兜底配置** 卡片也删了
+    （连同全局密钥框），所以现在设置页**一个模型相关输入都没有**。
+    """
     s = _js("views-settings.js")
     assert 'id="set-model"' not in s, "设置页又有模型输入框了"
     assert "set-fetch-models" not in s, "设置页又有拉取按钮了"
-    assert 'id="set-goto-models"' in s, "缺「打开模型管理」入口"
-    assert "App.go('models')" in s
-    # 兜底配置的连通性测试还在，但**不做对话**（按模型测连接在模型页）
-    assert 'id="set-test-llm"' in s
+    assert 'id="set-provider"' not in s and 'id="set-base-url"' not in s, \
+        "设置页又有服务商/地址输入框了（应归模型管理页）"
+    assert 'id="set-test-llm"' not in s, "「测试兜底配置」随卡片一起删了"
+    assert "cardLLM" not in s and 'data-group="llm"' not in s, "LLM 兜底卡片必须已删除"
     # "保存该组" 的 payload 不再带 model（模型只在模型页维护）；
     # 向导那一步会把填的模型收进目录，那里的 payload.model 是允许的
     assert "model: document.getElementById('set-model').value" not in s
-    assert "换模型请到「模型管理」页点「设为管理员模型」" in s
+
+
+def test_settings_no_longer_renders_the_profiles_card():
+    """owner：设置页的「LLM 配置套」卡片也删了。
+
+    注意：**后端能力与模块保留** —— 工位/任务表单里的"配置套"下拉仍由
+    `views-profiles.js` 提供（`ProfilesMod.fillSelect`），只是设置页不再有编辑卡片。
+    """
+    s = _js("views-settings.js")
+    assert "Profiles.cardHTML()" not in s, "设置页不该再渲染配置套卡片"
+    assert "Profiles.bind()" not in s
+    main = _js("views-main.js")
+    assert "ProfilesMod.fillSelect" in main, "工位表单的配置套下拉不能一起被删掉"
 
 
 def test_api_client_passes_model_ref_through():
