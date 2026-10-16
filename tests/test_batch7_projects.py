@@ -448,3 +448,33 @@ def test_T7_6_列表含汇总与可见根(tmp_path, monkeypatch):
         d = client.get("/api/projects").json()
         assert d["summary"]["total"] == 1
         assert any(str(tmp_path / "a") in r for r in d["workspaces"])
+
+
+def test_群组挂项目的工位也要在项目页显示(tmp_path, monkeypatch):
+    """v0.10.35（owner 实测）："我能看到项目，但是前端根本没有显示工位被挂在"。
+
+    工位有两条挂载路径：① 直接 `window.project_id`；② **通过群组**（群组挂了项目）。
+    初版 DTO 只统计 ① → 群组挂项目时项目页 `windows: []`、`window_count: 0`，
+    看起来什么都没挂上，实际有 3 个工位正在这个项目里干活。
+    """
+    app, client = _client(tmp_path, monkeypatch)
+    with client:
+        proj = client.post("/api/projects", json={
+            "name": "共享2", "root_path": str(tmp_path / "shared2")}).json()["project"]
+        w = app.windows.create("组员甲", "worker_programmer", str(tmp_path / "gw2"))
+        direct = app.windows.create("直属", "worker_programmer", str(tmp_path / "gw3"))
+        g = client.post("/api/groups", json={
+            "name": "队", "project_id": proj["id"]}).json()
+        client.post(f"/api/groups/{g['id']}/members", json={"window": w.id, "role": "lead"})
+        client.post(f"/api/projects/mount", json={"window_id": direct.id,
+                                                  "project_id": proj["id"]})
+
+        p = [x for x in client.get("/api/projects").json()["projects"]
+             if x["id"] == proj["id"]][0]
+        assert [x["name"] for x in p["windows"]] == ["直属"]
+        gm = p["group_members"]
+        assert [x["name"] for x in gm] == ["组员甲"], p
+        assert gm[0]["via"] == "group" and gm[0]["group_name"] == "队"
+        assert gm[0]["group_role"] == "lead"
+        assert p["window_count"] == 2, "项目页的「工位 N 个」要把群组成员算上"
+        assert (p["direct_window_count"], p["group_window_count"]) == (1, 1)

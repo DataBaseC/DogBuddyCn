@@ -187,3 +187,38 @@ def test_群组运行把组长身份与群组上下文交给工具(tmp_path, mon
     assert out["steps"][1].get("skipped"), out["steps"][1]
     assert [c[0] for c in coord.calls] == ["m2"]
     db.close()
+
+
+def test_群组运行时成员状态翻成running再翻回来(tmp_path, monkeypatch):
+    """v0.10.34（owner："你在哪跑呢，我咋没看见"）：群组运行必须**可见**。
+
+    以前群组运行不碰工位状态：控制台工位页一直是 idle，群组页只有"点按钮的人"
+    能看到转圈，用 API/脚本触发的运行完全不可见 —— owner 因此以为任务卡住了。
+    """
+    import dogbuddy.agents.core.loop as loop_mod
+    from dogbuddy.agents.core.loop import AgentResult
+
+    db, gm, g = _stack(tmp_path)
+    seen_status: list[tuple[str, str]] = []
+
+    class CaptureLoop:
+        def __init__(self, *a, **k):
+            pass
+
+        async def run(self, prompt, ctx):
+            seen_status.append((ctx.window_id, db.get_window(ctx.window_id).status))
+            return AgentResult(content="ok", stop_reason="done")
+
+    monkeypatch.setattr(loop_mod, "AgentLoop", CaptureLoop)
+    _run(gm.run(g.id, "任务"))
+    assert seen_status, "至少要跑一轮"
+    assert all(st == "running" for _, st in seen_status), \
+        f"运行中必须是 running（控制台才看得见）：{seen_status}"
+    # 全部跑完后回到 idle（谁都不许一直挂着"运行中"）
+    for wid in ("lead", "m2", "m3"):
+        assert db.get_window(wid).status == "idle", wid
+    # 审计里能看到"开跑"（进行中的运行以前在审计里查不到）
+    rows = [dict(r) for r in db._conn.execute(
+        "SELECT action, detail FROM audit_log WHERE action='group:run_start'")]
+    assert rows and "members=" in rows[0]["detail"], rows
+    db.close()

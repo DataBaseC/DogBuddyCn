@@ -38,16 +38,45 @@ class MountIn(BaseModel):
 def _dto(p: Any, db: Any) -> dict:
     windows = [w for w in db.list_windows() if (getattr(w, "project_id", "") or "") == p.id]
     groups = [g for g in db.list_groups() if (getattr(g, "project_id", "") or "") == p.id]
+    # v0.10.35（owner："我能看到项目，但是前端根本没有显示工位被挂在"）：
+    # 工位有**两条**挂载路径 —— ① 直接 `window.project_id`；② **通过群组**（群组挂了
+    # 项目，成员就在这个项目的共享工作区里干活）。初版只统计 ①，于是"群组挂项目"时
+    # 项目页显示 `windows: []` / `window_count: 0` —— 看起来什么都没挂上，
+    # 实际上有 3 个工位正在这个项目里跑（owner 看到的就是这个）。
+    direct_ids = {w.id for w in windows}
+    group_members: list[dict] = []
+    for g in groups:
+        try:
+            rows = db.list_group_members(g.id)
+        except Exception:  # noqa: BLE001 — 成员查询失败不该让整个项目页报错
+            rows = []
+        for m in rows:
+            if m.window_id in direct_ids:
+                continue          # 直接挂载的已在 windows 里，不重复列
+            w = db.get_window(m.window_id)
+            if w is None:
+                continue
+            group_members.append({
+                "id": w.id, "name": w.name, "subdir": getattr(w, "subdir", "") or "",
+                "via": "group", "group_id": g.id, "group_name": g.name,
+                "group_role": getattr(m, "role", "") or "member",
+            })
     return {
         "id": p.id, "name": p.name, "root_path": p.root_path,
         "params": p.params or {}, "created_at": p.created_at, "updated_at": p.updated_at,
         # T9.4：该项目的主管（指挥链的中间层）；空 = 无主管（事件直连管理员）
         "owner_supervisor_id": getattr(p, "owner_supervisor_id", "") or "",
         "owner_supervisor_name": _supervisor_name(db, p),
-        "windows": [{"id": w.id, "name": w.name, "subdir": getattr(w, "subdir", "") or ""}
+        "windows": [{"id": w.id, "name": w.name, "subdir": getattr(w, "subdir", "") or "",
+                     "via": "direct"}
                     for w in windows],
+        #: 通过群组进来的工位（前端要显示"谁在这个项目里干活"）
+        "group_members": group_members,
         "groups": [{"id": g.id, "name": g.name} for g in groups],
-        "window_count": len(windows), "group_count": len(groups),
+        "window_count": len(windows) + len(group_members),
+        "direct_window_count": len(windows),
+        "group_window_count": len(group_members),
+        "group_count": len(groups),
     }
 
 

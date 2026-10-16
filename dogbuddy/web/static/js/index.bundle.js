@@ -4429,11 +4429,22 @@
   }
 
   function projectCard(p) {
+    /* v0.10.35（owner："我能看到项目，但是前端根本没有显示工位被挂在"）：
+       工位有两条挂载路径 —— 直接挂载（可解挂）与**通过群组**进来的（成员在群组的
+       共享工作区里干活）；以前只画前者，群组挂项目时项目页显示"还没有工位挂载"。 */
     var wins = (p.windows || []).map(function (w) {
       return '<span class="chip">' + U.esc(w.name) +
         (w.subdir ? '<span class="mono chip-sub">/' + U.esc(w.subdir) + '</span>' : '') +
         ' <button class="chip-x" data-unmount="' + U.esc(w.id) + '" title="解挂">×</button></span>';
-    }).join(' ') || '<span class="card-sub">还没有工位挂载</span>';
+    }).join(' ');
+    var viaGroup = (p.group_members || []).map(function (w) {
+      var role = (w.group_role === 'lead') ? '组长' : '组员';
+      return '<span class="chip chip-blue" title="通过群组「' + U.esc(w.group_name || '') +
+        '」在本项目共享工作区里干活（在群组页解绑）">' + U.esc(w.name) +
+        '<span class="chip-sub">' + role + ' · ' + U.esc(w.group_name || '') + '</span></span>';
+    }).join(' ');
+    var allWins = [wins, viaGroup].filter(Boolean).join(' ') ||
+      '<span class="card-sub">还没有工位挂载</span>';
     var groups = (p.groups || []).map(function (g) {
       return '<span class="chip chip-grey">群组 ' + U.esc(g.name) + '</span>';
     }).join(' ');
@@ -4452,10 +4463,13 @@
       '</div></div>' +
       '<div class="prj-meta">' +
       '<span class="card-sub">默认参数 ' + pcount + ' 项</span>' +
-      '<span class="card-sub">工位 ' + (p.window_count || 0) + ' 个</span>' +
+      '<span class="card-sub">工位 ' + (p.window_count || 0) + ' 个' +
+      ((p.group_window_count || 0)
+        ? '（直接 ' + (p.direct_window_count || 0) + ' · 群组 ' + p.group_window_count + '）'
+        : '') + '</span>' +
       (groups ? '<span class="card-sub">' + groups + '</span>' : '') +
       '</div>' +
-      '<div class="prj-wins">' + wins + '</div>' +
+      '<div class="prj-wins">' + allWins + '</div>' +
       iterBlock(p) +
       '</div></div>';
   }
@@ -4586,8 +4600,10 @@
         '<div class="field"><span class="field-label">预算上限 tokens（可选，0=不限）</span>' +
         '<input class="input" id="it-budget" type="number" min="0" value="0"></div>' +
         '</div>' +
-        '<div class="card-sub">参与工位：' + (mounted.length
-          ? U.esc((p.windows || []).map(function (w) { return w.name; }).join('、'))
+        '<div class="card-sub">参与工位：' + ((p.windows || []).length + (p.group_members || []).length
+          ? U.esc((p.windows || []).map(function (w) { return w.name; })
+              .concat((p.group_members || []).map(function (w) {
+                return w.name + '（群组 ' + (w.group_name || '') + '）'; })).join('、'))
           : '<b>该项目还没有挂工位</b>——先去挂工位再来开迭代') + '</div>' +
         '<div class="hint">系统会按<b>员工画像 + 模型能力 + 当前限速严重度</b>自动推节奏：' +
         '模型越慢、工位越保守、正在被限速 → 迭代越慢（避免排队雪崩）。</div>',

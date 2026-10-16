@@ -296,6 +296,10 @@ class GroupManager:
                 except OSError:
                     logger.warning("shared workspace not creatable: %s", shared_ws)
         steps: list[dict] = []
+        # v0.10.34：开跑就留痕（以前只有跑完的 group:run，进行中的运行在审计里查不到）
+        self.db.audit("system", "group:run_start",
+                      f"{g.id} {g.name} members={len(order)} "
+                      f"order={','.join(order)} prompt={prompt[:80]}")
         for wid in order:
             w = self.db.get_window(wid)
             if w is None:
@@ -311,6 +315,14 @@ class GroupManager:
                               "summary": "（该成员已由组长派活执行，接力轮跳过）"})
                 continue
             rt = self.windows._rt(wid)
+            # v0.10.34（owner："你在哪跑呢，我咋没看见"）：群组运行时**没有任何地方显示
+            # "运行中"** —— 工位状态一直是 idle、群组页只有点按钮的人能看到转圈，
+            # 用 API/脚本触发的运行完全不可见（owner 因此以为"卡住了"）。
+            # 这里把参与成员的状态翻成 running，结束再翻回来（控制台工位页立刻可见）。
+            try:
+                self.windows._set_status(wid, "running")
+            except Exception:  # noqa: BLE001 — 状态显示不能影响运行
+                logger.debug("set running status failed", exc_info=True)
             recap, recap_stats = self._recap_block(g.id, start_id)
             recap_total["chars"] += recap_stats["chars"]
             recap_total["tokens"] += recap_stats["tokens"]
@@ -416,6 +428,12 @@ class GroupManager:
                               "recap_tokens": recap_stats["tokens"],
                               "prompt_chars": len(step_prompt),
                               "summary": f"[step failed] {e}"})
+            finally:
+                # 这一步结束：把状态翻回 idle（哪怕超时/异常也不能一直挂着"运行中"）
+                try:
+                    self.windows._set_status(wid, "idle")
+                except Exception:  # noqa: BLE001
+                    logger.debug("reset idle status failed", exc_info=True)
         summary = next((s["summary"] for s in reversed(steps) if s["is_lead"] and s["ok"]),
                        (steps[-1]["summary"] if steps else ""))
         limited_n = sum(1 for s in steps if s.get("rate_limited"))
