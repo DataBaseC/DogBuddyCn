@@ -137,15 +137,24 @@ def test_AIMD_乘性放缓_加性恢复():
     _run(policy.call(fn))
     # 三次限速：10→20→40→80（乘性），随后一次成功：80-5=75（加性恢复）
     assert spy.slept == [20.0, 40.0, 80.0], spy.slept
-    assert policy.current_interval == 75.0, "成功一次只减一个步长，不该一步回到基准"
+    # v0.10.28：恢复改成**比例式**（每 2 次成功减半）——旧的加性 -5s/次
+    # 从 600s 回到基准要约 118 次成功，实测几乎永不恢复。
+    assert policy.current_interval == 80.0, "一次成功不该立刻回到基准"
+    policy._note_success()
+    assert policy.current_interval == 40.0, "第二次成功减半"
 
 
 def test_AIMD_恢复不会低于基准():
-    policy = RetryPolicy(base_interval=10, recovery_step=100)
+    """比例式恢复也不能掉到基准以下。"""
+    policy = RetryPolicy(base_interval=10)
     policy.waits = 1
     policy.current_interval = 20
-    policy._note_success()
+    policy._note_success()          # 第 1 次成功：不动
+    policy._note_success()          # 第 2 次成功：减半 20→10
     assert policy.current_interval == 10.0
+    policy._note_success()
+    policy._note_success()
+    assert policy.current_interval == 10.0, "不能低于 base_interval"
 
 
 def test_服务端给的值可以突破_max_interval():
@@ -375,11 +384,17 @@ def test_退避记忆接进_profile_registry(tmp_path):
     from dogbuddy.llm.profile_registry import LLMProfileRegistry
 
     mem = RetryMemory(tmp_path / "mem.json")
-    mem.note_wait("slow", 240.0, "heavy")
+    # v0.10.28：记忆按 **(端点|key 尾)** 分桶（不再是 profile 名 —— 那会让
+    # 管理员被限速时把 600s 传染给所有工位）。
+    mem.note_wait("x|k", 240.0, "heavy")
     reg = LLMProfileRegistry(AppConfig(llm=LLMConfig(base_url="http://x/v1", api_key="k")),
                              retry_memory=mem)
     slow = reg.provider_for("slow")
-    fast = reg.provider_for(None)
-    assert slow.retry.current_interval == 240.0, "绑 slow 的 provider 应从记忆量级起跳"
-    assert fast.retry.current_interval == fast.retry.base_interval
+    assert slow.retry.current_interval == 240.0, "同端点同 key 的 provider 应从记忆量级起跳"
+    assert slow.retry.memory_key == "x|k", slow.retry.memory_key
+    # 换一把 key / 换一个端点 → 干净起跳（不被别人的 600s 传染）
+    other = LLMProfileRegistry(
+        AppConfig(llm=LLMConfig(base_url="http://y/v1", api_key="other-key-9")),
+        retry_memory=mem).provider_for(None)
+    assert other.retry.current_interval == other.retry.base_interval
     assert slow.retry.profile == "slow"

@@ -32,6 +32,14 @@ class RetryConfig(BaseModel):
     max_interval: float = Field(default=300.0, ge=1.0, description="backoff cap seconds")
     max_retries: int = Field(default=5, ge=0, le=50)
     backoff: Literal["exp", "fixed"] = "exp"
+    #: v0.10.28：**在线等待上限**（秒）。服务端要求等更久时不再睡在请求里，而是抛
+    #: `RateLimitPaused` 交给调度器稍后重跑（定时任务会自己排到 5 分钟后重试）。
+    #: 把 600s 的 `Retry-After` 睡在调用栈里，会把 HTTP 请求、工位串行队列一起拖住
+    #: （实测：一轮群组任务因此挂了几十分钟）。
+    inline_cap: float = Field(default=90.0, ge=0.0, description="max inline sleep seconds")
+    #: v0.10.28：一次调用**累计等待预算**（秒）。等过头就说明"这不是等一会儿能好的事"，
+    #: 交给调度重跑（实测最坏情形是 heavy 档 10 次 × 600s = 100 分钟）。
+    wait_budget: float = Field(default=300.0, ge=0.0, description="total inline wait budget seconds")
 
 
 class LLMKeyConfig(BaseModel):

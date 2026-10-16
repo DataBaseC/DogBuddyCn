@@ -326,11 +326,38 @@ class DogBuddyApp:
         except Exception:  # noqa: BLE001 — 退化通知失败不能炸总线
             logger.warning("admin notify failed for hierarchical fallback", exc_info=True)
 
-    def _on_llm_wait(self, profile: str, attempt: int, delay: float) -> None:
-        """Rate-limit backoff surfaced for the console badge (per profile)."""
-        self._rate_limit = {"waiting": True, "attempt": attempt, "window_id": profile or ""}
+    def _on_llm_wait(self, profile: str, attempt: int, delay: float,
+                     info: dict | None = None) -> None:
+        """Rate-limit backoff surfaced for the console badge (per profile).
+
+        v0.10.28（可解释性）：把"**为什么等、等多久、是睡还是暂停**"一起记下来 ——
+        以前只有 `waiting/delay/severity`，生产上一个 600s 的等待**无法归因**
+        （是服务端给的 Retry-After，还是我们自己 AIMD 推的？没人知道）。
+        """
+        info = dict(info or {})
+        # "等待中"= 真的在原地等；"已暂停"（长等待改走调度）不算 waiting，
+        # 由 `rate_limit.paused` 事件表达（与既有的封禁级语义一致）。
+        paused_now = info.get("action") == "paused"
+        self._rate_limit = {
+            "waiting": not paused_now,
+            "attempt": attempt, "window_id": profile or "",
+            "severity": info.get("severity", ""), "delay": float(delay or 0.0),
+            "source": info.get("source", ""),                 # server-retry-after | aimd
+            "retry_after": info.get("retry_after"),
+            "key_tail": info.get("key_tail", ""),
+            "endpoint": (info.get("memory_key") or "").split("|")[0],
+            "interval": info.get("interval"),
+            "wait_budget": info.get("waited_total"),
+            "action": info.get("action", "slept"),            # slept | paused
+            "reason": info.get("reason", ""),
+        }
+        self._rate_limit_severity = str(info.get("severity") or "")
         self.bus.emit(Event(type="rate_limit.status",
-                            payload={"attempt": attempt, "delay": delay, "profile": profile}))
+                            payload={"attempt": attempt, "delay": delay, "profile": profile,
+                                     **{k: self._rate_limit[k] for k in
+                                        ("severity", "source", "retry_after", "key_tail",
+                                         "endpoint", "interval", "action", "reason",
+                                         "wait_budget")}}))
         # T8.8: 记下最近一次等待时长，供迭代速度计算"模型越慢→迭代越慢"
         self._last_rate_limit_wait = float(delay or 0.0)
 
@@ -373,28 +400,45 @@ class DogBuddyApp:
             logger.debug("rate_limit clear emit failed", exc_info=True)
 
     def _on_llm_severity(self, profile: str, severity: Any, delay: float,
-                         exc: Any = None) -> None:
+                         exc: Any = None, info: dict | None = None) -> None:
         """T8.8：限速严重度分档上报 + 联动。
 
         * light  秒级：仅刷新徽标
         * heavy  分钟级：刷新徽标 + 打出"建议放慢迭代"标记（T8.5 会读）
         * banned 小时级：发出 `rate_limit.paused`，UI 明确显示"已暂停，等待重试"
           ——**区别于 fail 暂停**，调度器把该任务标成 `rate_limited`
+
+        v0.10.28：`action == "paused"`（长等待改为不睡在请求里）时**同样**发
+        `rate_limit.paused` —— 语义就是"任务已挂起，等调度重试"，与 severity 无关；
+        并且**合并**（而不是覆盖）`_on_llm_wait` 写下的解释性字段。
         """
+        info = dict(info or {})
         name = getattr(severity, "value", str(severity))
         self._rate_limit_severity = name
         # 供 T8.5 迭代加速/降速判断："模型越慢 → 迭代越慢"
         self._last_rate_limit_wait = float(delay or 0.0)
-        self._rate_limit = {"waiting": name != "banned", "attempt": 0,
-                            "window_id": profile or "", "severity": name,
-                            "delay": float(delay or 0.0)}
-        if name == "banned":
+        merged = dict(self._rate_limit)
+        paused = info.get("action") == "paused" or name == "banned"
+        merged.update({"waiting": not paused,
+                       "attempt": int(info.get("attempt") or merged.get("attempt") or 0),
+                       "window_id": profile or "", "severity": name,
+                       "delay": float(delay or 0.0)})
+        for k in ("source", "retry_after", "key_tail", "interval", "action", "reason",
+                  "wait_budget"):
+            if k in info:
+                merged[k] = info[k]
+        if info.get("memory_key"):
+            merged["endpoint"] = str(info["memory_key"]).split("|")[0]
+        self._rate_limit = merged
+        if paused:
             self.bus.emit(Event(type="rate_limit.paused",
                                 payload={"profile": profile, "severity": name,
                                          "delay": float(delay or 0.0),
-                                         "reason": str(exc or "")[:300]}))
-            logger.warning("限速封禁级：profile=%s 需等待 %.0fs，任务已暂停（非失败）",
-                           profile or "(默认)", delay or 0.0)
+                                         "action": merged.get("action", ""),
+                                         "reason": merged.get("reason") or str(exc or "")[:300]}))
+            logger.warning("限速暂停：profile=%s 需等待 %.0fs（%s）—— 任务已挂起，等调度重试",
+                           profile or "(默认)", delay or 0.0,
+                           merged.get("reason") or name)
         elif name == "heavy":
             logger.warning("限速重档：profile=%s 需等待 %.0fs，建议放慢迭代节奏",
                            profile or "(默认)", delay or 0.0)

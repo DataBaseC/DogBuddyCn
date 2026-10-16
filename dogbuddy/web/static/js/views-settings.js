@@ -100,6 +100,17 @@
         ['exponential', 'fixed', 'linear'].map(function (b) {
           return '<option' + (r.backoff === b ? ' selected' : '') + '>' + b + '</option>';
         }).join('') + '</select></div></div>' +
+        /* v0.10.28：服务端要求等更久时**不再睡在请求里** —— 超过这两个值就
+           "暂停 + 交给调度稍后重跑"（定时任务 5 分钟后自动重试；交互立刻拿到答复）。 */
+        '<div class="set-two">' +
+        '<div class="field"><span class="field-label">在线等待上限（秒）</span>' +
+        '<input class="input num" id="set-rcap" type="number" value="' +
+        U.esc(r.inline_cap !== undefined ? r.inline_cap : 90) + '">' +
+        '<div class="hint">超过就暂停重排，不占着请求等（服务端常见 600s）</div></div>' +
+        '<div class="field"><span class="field-label">单次等待预算（秒）</span>' +
+        '<input class="input num" id="set-rbudget" type="number" value="' +
+        U.esc(r.wait_budget !== undefined ? r.wait_budget : 300) + '">' +
+        '<div class="hint">一次调用累计等多久就放弃原地重试</div></div></div>' +
         '<div class="backoff-preview" id="set-backoff-preview"></div></div>' +
         '<div class="set-card-foot"><div class="spacer"></div>' +
         '<button class="btn btn-primary btn-sm" data-save="retry">保存该组</button></div></div>';
@@ -248,7 +259,10 @@
               base_interval: Number(document.getElementById('set-rbase').value),
               max_interval: Number(document.getElementById('set-rmax').value),
               max_retries: Number(document.getElementById('set-rretries').value),
-              backoff: document.getElementById('set-rbackoff').value
+              backoff: document.getElementById('set-rbackoff').value,
+              /* v0.10.28：长等待不睡在请求里 —— 超过就在线等待上限/预算时暂停重排 */
+              inline_cap: Number(document.getElementById('set-rcap').value),
+              wait_budget: Number(document.getElementById('set-rbudget').value)
             }
           };
         } else if (group === 'panel') {

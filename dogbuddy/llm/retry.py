@@ -178,11 +178,21 @@ def retry_after_from(exc: BaseException) -> float | None:
 
 # --------------------------------------------------------------------------- 记忆
 class RetryMemory:
-    """按 profile 记住"上次退避多久才成功"，下次直接从该量级起跳（T8.7③）。
+    """按 **(端点, key)** 记住"上次退避多久才成功"，下次直接从该量级起跳（T8.7③）。
 
     落在一个小 JSON 文件里（默认 data_dir/retry_memory.json）；读失败一律当空，
     写失败只记日志——退避记忆坏掉不该影响正常调用。
+
+    v0.10.28 三处修正（生产实测暴露）：
+    1. **分桶键**以前是 profile 名（默认全是 `""`）→ 管理员被限速会把 600s 传染给
+       所有工位。现在由调用方传 **(端点|key 尾)**，各把 key 互不影响。
+    2. **TTL**：距离上次被限速超过 `TTL_SECONDS` 就作废，惩罚不该无限期挂着。
+    3. **schema 版本**：旧文件（没有时间戳、可能就是那个被灌到 600s 的）直接丢弃。
     """
+
+    #: 距上次等待超过这么久 → 该桶作废（回到基准间隔）
+    TTL_SECONDS = 900.0
+    SCHEMA = 2
 
     def __init__(self, path: str | os.PathLike | None = None):
         self.path = Path(path) if path else None
@@ -194,8 +204,11 @@ class RetryMemory:
             return
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                self._data = {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)}
+            if not isinstance(raw, dict) or raw.get("__schema") != self.SCHEMA:
+                logger.info("retry memory schema 不符（旧文件），丢弃重建")
+                return
+            self._data = {str(k): dict(v) for k, v in raw.items()
+                          if isinstance(v, dict) and not str(k).startswith("__")}
         except Exception:  # noqa: BLE001 — 记忆损坏就当没有
             logger.warning("retry memory unreadable, starting fresh", exc_info=True)
             self._data = {}
@@ -205,16 +218,33 @@ class RetryMemory:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"__schema": self.SCHEMA, **self._data}
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=2),
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                            encoding="utf-8")
             os.replace(tmp, self.path)
         except Exception:  # noqa: BLE001 — 写失败不影响调用
             logger.warning("retry memory write failed", exc_info=True)
 
+    def _stale(self, key: str, entry: dict[str, Any]) -> bool:
+        """老到可以忘掉了？（没有任何"上次等待时间"的旧桶一律丢弃）"""
+        at = entry.get("at")
+        if at is None:
+            self._data.pop(key, None)
+            return True
+        try:
+            return (time.time() - float(at)) > self.TTL_SECONDS
+        except (TypeError, ValueError):
+            self._data.pop(key, None)
+            return True
+
     def last_interval(self, profile: str) -> float | None:
-        entry = self._data.get(profile or "")
+        key = profile or ""
+        entry = self._data.get(key)
         if not entry:
+            return None
+        if self._stale(key, entry):
+            self._flush()
             return None
         val = entry.get("last_interval")
         try:
@@ -228,6 +258,7 @@ class RetryMemory:
         entry["last_interval"] = round(float(interval), 3)
         entry["last_severity"] = severity
         entry["waits"] = int(entry.get("waits", 0)) + 1
+        entry["at"] = time.time()
         self._flush()
 
     def note_success(self, profile: str, interval: float) -> None:
@@ -235,6 +266,7 @@ class RetryMemory:
         entry = self._data.setdefault(key, {})
         entry["last_success_interval"] = round(float(interval), 3)
         entry["successes"] = int(entry.get("successes", 0)) + 1
+        entry["at"] = time.time()
         self._flush()
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
@@ -257,6 +289,9 @@ class RetryPolicy:
         profile: str = "",
         on_severity: Callable[[RateLimitSeverity, float, BaseException | None], Any] | None = None,
         on_success: Callable[[], Any] | None = None,
+        inline_cap: float | None = None,
+        wait_budget: float | None = None,
+        memory_key: str | None = None,
         adaptive: bool = True,
         recovery_step: float | None = None,
         heavy_bonus: int = 5,
@@ -271,6 +306,15 @@ class RetryPolicy:
         self.memory = memory
         self.profile = profile or ""
         self.on_severity = on_severity
+        #: v0.10.28：退避记忆的**分桶键**（(端点,key 尾)）；默认退回 profile 名。
+        #: 以前只有 profile，而所有工位/管理员共用 `""` —— 一个调用者被限速，
+        #: 600s 会传染给全部调用者（生产实测）。
+        self.memory_key = memory_key if memory_key is not None else self.profile
+        #: v0.10.28：在线等待上限 / 累计等待预算。超过就**不睡**，抛 RateLimitPaused
+        #: 交给调度器（定时任务会自己排到 5 分钟后；交互路径立刻拿到明确答复）。
+        self.inline_cap = None if inline_cap is None else float(inline_cap)
+        self.wait_budget = None if wait_budget is None else float(wait_budget)
+        self.waited_total = 0.0
         # v0.10.21：限速徽标以前"只亮不灭"——唯一清它的钩子是 `window.run_finished`
         # 事件，而**群组运行、管理员对话、工具调用都不发这个事件**（owner 实测：
         # 退避早结束了，顶部还挂着"限速等待中"）。真正的结束信号是"这次调用成功了"，
@@ -283,12 +327,14 @@ class RetryPolicy:
         self.heavy_bonus = max(0, int(heavy_bonus))
         self.banned_bonus = max(0, int(banned_bonus))
         self._sleep = sleep or asyncio.sleep
-        # AIMD 当前间隔：起跳点优先用该 profile 的历史记忆
-        remembered = self.memory.last_interval(self.profile) if self.memory else None
+        # AIMD 当前间隔：起跳点优先用**该分桶**的历史记忆（(端点,key)，不是 profile）
+        remembered = self.memory.last_interval(self.memory_key) if self.memory else None
         self.current_interval = self._clamp(remembered if remembered is not None
                                             else self.base_interval)
         self.last_severity: RateLimitSeverity | None = None
         self.waits = 0
+        #: 比例恢复用：距上次被限速后连续成功了几次
+        self._successes_since_wait = 0
         self.severities: list[RateLimitSeverity] = []
 
     # ---- helpers
@@ -335,12 +381,20 @@ class RetryPolicy:
         return float(self.current_interval)
 
     def _note_success(self) -> None:
-        """加性恢复：连续成功就把间隔往回收（不会一步回到基准）。"""
+        """**比例式**恢复：连续 2 次成功后间隔减半（不会一步回到基准）。
+
+        v0.10.28：原来是**加性**的 `interval -= max(1, base/2)` = 5 秒/次 ——
+        从 600s 回到基准要约 118 次成功，而每次成功前还得先等一次，实际上
+        **几乎永不恢复**（生产实测：重试记忆被灌到 600s 后再也没降下来）。
+        """
+        self._successes_since_wait += 1
         if self.waits == 0:
             return
-        self.current_interval = self._clamp(self.current_interval - self.recovery_step)
+        if self._successes_since_wait % 2 == 0:
+            self.current_interval = self._clamp(
+                max(self.base_interval, self.current_interval * 0.5))
         if self.memory:
-            self.memory.note_success(self.profile, self.current_interval)
+            self.memory.note_success(self.memory_key, self.current_interval)
 
     # ---- 主循环
     async def call(self, fn: Callable[[], Awaitable[T]]) -> T:
@@ -360,25 +414,51 @@ class RetryPolicy:
                 severity = severity_for(delay)
                 self.last_severity = severity
                 self.severities.append(severity)
+                self.waits += 0  # (waits 在 _bump_interval 里 +1)
+                self._successes_since_wait = 0
                 if self.memory:
-                    self.memory.note_wait(self.profile, self.current_interval,
+                    self.memory.note_wait(self.memory_key, self.current_interval,
                                           severity=severity.value)
 
-                logger.warning("LLM retryable failure (%s) → %s, wait %.0fs "
-                               "(attempt %d, server_hint=%s)",
-                               e, severity.value, delay, attempt,
-                               f"{server_wait:.0f}s" if server_wait is not None else "none")
-                self._emit_wait(attempt, delay, severity, e)
+                # v0.10.28：**长等待不睡在请求里**。判断顺序很重要：
+                #   1) 服务端要等 > inline_cap  → 暂停，交给调度（定时任务 5 分钟后重试）
+                #   2) 本次调用累计等待将超过 wait_budget → 同上
+                #   3) 封禁档（≥30min）→ 同上（原有行为）
+                # 只有在 cap/budget 之内的"短等待"才原地 sleep 重试。
+                pause_reason = ""
+                if self.inline_cap is not None and delay > self.inline_cap:
+                    pause_reason = (f"服务端要求等待 {delay:.0f}s，超过在线等待上限 "
+                                    f"{self.inline_cap:.0f}s")
+                elif (self.wait_budget is not None
+                        and self.waited_total + delay > self.wait_budget):
+                    pause_reason = (f"本次调用已等待 {self.waited_total:.0f}s，再加 "
+                                    f"{delay:.0f}s 会超过等待预算 {self.wait_budget:.0f}s")
+                elif severity is RateLimitSeverity.BANNED:
+                    pause_reason = f"封禁级限速（需等待 {delay:.0f}s）"
 
-                # 封禁级：不原地等，交给调度器暂停 + 通知（不算失败）
-                if severity is RateLimitSeverity.BANNED:
-                    raise RateLimitPaused(delay, last, severity)
+                logger.warning("LLM retryable failure (%s) → %s, wait %.0fs "
+                               "(attempt %d, server_hint=%s)%s",
+                               e, severity.value, delay, attempt,
+                               f"{server_wait:.0f}s" if server_wait is not None else "none",
+                               f" → 暂停：{pause_reason}" if pause_reason else "")
+                self._emit_wait(attempt, delay, severity, e,
+                                source="server-retry-after" if server_wait is not None else "aimd",
+                                server_wait=server_wait,
+                                action="paused" if pause_reason else "slept",
+                                reason=pause_reason)
+
+                if pause_reason:
+                    exc = RateLimitPaused(delay, last, severity)
+                    exc.reason = pause_reason  # 供上层原样转述给用户
+                    raise exc
 
                 if attempt >= self.effective_max_retries():
                     break
+                self.waited_total += delay
                 await self._sleep(delay)
             else:
                 self._note_success()
+                self.waited_total = 0.0
                 if self.waits and self.on_success:
                     try:
                         self.on_success()
@@ -388,21 +468,40 @@ class RetryPolicy:
         raise RetryExhausted(last or RuntimeError("unknown"), attempt)
 
     def _emit_wait(self, attempt: int, delay: float,
-                   severity: RateLimitSeverity, exc: BaseException | None) -> None:
+                   severity: RateLimitSeverity, exc: BaseException | None,
+                   *, source: str = "", server_wait: float | None = None,
+                   action: str = "", reason: str = "") -> None:
+        """把"为什么等、等多久、是睡还是暂停"一并抛给上层（可解释性）。"""
+        info = {"attempt": attempt, "delay": float(delay), "severity": severity.value,
+                "source": source, "retry_after": server_wait,
+                "interval": round(float(self.current_interval), 3),
+                "memory_key": self.memory_key, "waited_total": round(self.waited_total, 3),
+                "action": action or "slept", "reason": reason}
         if self.on_wait:
             try:
-                self.on_wait(attempt, delay)
-            except Exception:  # noqa: BLE001 — 状态上报绝不能打断等待
+                self.on_wait(attempt, delay, info)
+            except TypeError:  # 旧的两参数钩子
+                try:
+                    self.on_wait(attempt, delay)
+                except Exception:  # noqa: BLE001 — 状态上报绝不能打断等待
+                    pass
+            except Exception:  # noqa: BLE001
                 pass
         if self.on_severity:
             try:
-                self.on_severity(severity, delay, exc)
+                self.on_severity(severity, delay, exc, info)
+            except TypeError:  # 旧的三参数钩子
+                try:
+                    self.on_severity(severity, delay, exc)
+                except Exception:  # noqa: BLE001
+                    pass
             except Exception:  # noqa: BLE001
                 pass
 
     @classmethod
     def from_config(cls, cfg: Any, on_wait: Callable[[int, float], Any] | None = None,
                     *, memory: RetryMemory | None = None, profile: str = "",
+                    memory_key: str | None = None,
                     on_severity: Any = None, on_success: Callable[[], Any] | None = None,
                     sleep: Callable[[float], Awaitable[None]] | None = None) -> "RetryPolicy":
         return cls(
@@ -413,6 +512,9 @@ class RetryPolicy:
             on_wait=on_wait,
             memory=memory,
             profile=profile,
+            memory_key=memory_key,
+            inline_cap=getattr(cfg, "inline_cap", None),
+            wait_budget=getattr(cfg, "wait_budget", None),
             on_severity=on_severity,
             on_success=on_success,
             sleep=sleep,

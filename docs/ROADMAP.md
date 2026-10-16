@@ -1225,3 +1225,37 @@ owner："所以设置里的兜底配置和 LLM 配置套可以删了。"
   全局默认值保持不动。
 
 基线：644 passed / 4 skipped；`audit_ui --strict` exit 0；bundle 已重建。
+
+---
+
+## 24. 第十七轮：长限速"不再睡在请求里" + 退避记忆按 (端点,key) 分桶（2026-10-23，`0.10.28`）
+
+owner："600 秒是不是太长了"。生产实测（SenseNova `Retry-After: 600` / `inference exceeds
+tpm/rpm limit`）暴露的不是一个参数，而是四个放大器：
+
+| # | 旧行为 | 后果 |
+|---|---|---|
+| A | 单次调用内 `await sleep(600)` | HTTP 请求挂着、工位串行队列堵着、界面零进展 |
+| B | heavy 档重试预算按**次数**（5+5=10 次）× 每次 600s | 单次调用最坏 **100 分钟** |
+| C | 恢复是**加性 5 秒**（600→595→…） | 回到基准要约 118 次成功，实测**几乎永不恢复** |
+| D | 退避记忆按 **profile** 分桶（默认全是 `""`） | 管理员被限速把 600s **传染给所有工位** |
+
+修法：
+
+1. **P0 长等待改"暂停 + 调度"**（`llm/retry.py`）：新增 `inline_cap`（默认 90s）与
+   `wait_budget`（默认 300s，可被工位 `params.retry` 覆盖，也可在设置页「限速重试」改）。
+   超过任一阈值 → 抛 `RateLimitPaused`（**不 sleep**）。定时任务会自己排到 5 分钟后重试
+   （`mark_rate_limited`），交互路径立刻拿到明确答复。短等待仍在原地重试。
+2. **P1 分桶 + 比例恢复 + TTL**：记忆键改成 `端点|key尾4`（`_memory_key()`）；
+   恢复改成"每 2 次成功减半"（600→300→150→…→10）；记忆加 900s TTL 与 schema 版本
+   （旧文件直接丢弃，避免那个 600s 又回来）。
+3. **P3.1 可解释**：`rate_limit.status` 现在带 `source`（server-retry-after / aimd）、
+   `retry_after`、`key_tail`、`endpoint`、`interval`、`action`（slept/paused）、`reason`
+   —— 以前一个 600s 的等待**无法归因**。
+4. **群组运行如实记**：成员被限速时 `step.rate_limited=true`（不再混进"失败"），
+   summary 前缀 `[限速暂停 N/M 名成员]`，审计记 `rate_limited=N`。
+
+实测收益（同一场景）：服务端要 600s 时，调用**在 1 秒内**返回"已暂停"，而不是挂 600s；
+`inline_cap=90` / `wait_budget=300` 都是可配的。
+
+基线：655 passed / 4 skipped；`audit_ui --strict` exit 0。

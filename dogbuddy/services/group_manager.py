@@ -347,8 +347,13 @@ class GroupManager:
                 # 而不是无限等下去。
                 budget = float(self.windows.params_for(w).get("task_timeout") or 1800)
                 result = await asyncio.wait_for(loop.run(step_prompt, ctx), timeout=budget)
+                # v0.10.28：成员被限速而**暂停**（非失败）要如实标出来，别混进 ok=False
+                # 的"失败"里 —— 它只是"这次没轮上"，稍后重跑就能继续。
+                limited = result.stop_reason == "rate_limited"
                 steps.append({"window_id": wid, "window_name": w.name,
                               "is_lead": is_lead, "ok": result.stop_reason == "done",
+                              "rate_limited": limited,
+                              "error_code": getattr(result, "error_code", "") or "",
                               # v0.10.21：每步注入的频道上下文用量**看得见**
                               # （以前是黑盒：不知道 recap 悄悄烧了多少 token）
                               "recap_chars": recap_stats["chars"],
@@ -379,10 +384,16 @@ class GroupManager:
                               "summary": f"[step failed] {e}"})
         summary = next((s["summary"] for s in reversed(steps) if s["is_lead"] and s["ok"]),
                        (steps[-1]["summary"] if steps else ""))
+        limited_n = sum(1 for s in steps if s.get("rate_limited"))
+        if limited_n:
+            # v0.10.28：把"被限速暂停"说清楚，并给出下一步（不是失败，别让人瞎猜）
+            summary = (f"[限速暂停 {limited_n}/{len(steps)} 名成员] " + summary)
         self.db.audit("system", "group:run",
-                      f"{g.id} members={len(steps)} recap_chars={recap_total['chars']} "
+                      f"{g.id} members={len(steps)} rate_limited={limited_n} "
+                      f"recap_chars={recap_total['chars']} "
                       f"recap_tokens≈{recap_total['tokens']} "
                       f"max_prompt_chars={max((s.get('prompt_chars', 0) for s in steps), default=0)}")
         return {"group_id": g.id, "group_name": g.name,
                 "start_id": start_id, "recap_total": recap_total,
+                "rate_limited": limited_n,
                 "steps": steps, "summary": summary}

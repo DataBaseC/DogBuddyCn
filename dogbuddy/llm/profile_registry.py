@@ -124,6 +124,21 @@ class LLMProfileRegistry:
                 self._cache.pop(key, None)
 
     # ------------------------------------------------------------- build
+    def _memory_key(self, name: str, base_url: str, api_key: str) -> str:
+        """退避记忆的分桶键：**(端点 | key 尾 4 位)**，算不出来才退回 profile 名。
+
+        v0.10.28：以前只有 profile 名，而所有工位/管理员默认都是 `""` ——
+        一个调用者被限速，600s 会瞬间传染给全部调用者（生产实测）。
+        """
+        ep = str(base_url or "").strip().lower()
+        if "://" in ep:
+            ep = ep.split("://", 1)[1]
+        ep = ep.split("/")[0]
+        tail = "".join(ch for ch in str(api_key or "") if ch.isalnum())[-4:]
+        if ep or tail:
+            return f"{ep or '?'}|{tail or 'global'}"
+        return name or ""
+
     def _build(self, profile: str | None, model: str | None = None,
                overrides: dict | None = None) -> Any:
         section = self.cfg.llm_for(profile)
@@ -131,18 +146,46 @@ class LLMProfileRegistry:
         effective_model = self.cfg.effective_model(profile, model or "")
         ovr = overrides or {}
 
-        def on_wait(attempt: int, delay: float) -> None:
+        # v0.10.15：工位从**模型目录**里挑的模型，用条目自己的端点与密钥。
+        # 目录条目的字段都是"可空"：空就退回 profile —— 绝不用空串覆盖已配好的值。
+        # （v0.10.28：这段提前到 RetryPolicy 之前——退避记忆要按 端点|key 分桶。）
+        entry = self._entry_for(effective_model)
+        provider_name = str((entry or {}).get("provider") or section.provider or "")
+        base_url = str((entry or {}).get("base_url") or section.base_url or "")
+        api_key = str((entry or {}).get("api_key") or section.api_key or "")
+        if entry is not None:
+            logger.debug("模型目录条目生效：model=%s provider=%s base_url=%s",
+                         effective_model, provider_name, base_url)
+        mem_key = self._memory_key(name, base_url, api_key)
+        key_tail = "".join(ch for ch in api_key if ch.isalnum())[-4:]
+
+        def on_wait(attempt: int, delay: float, info: dict | None = None) -> None:
             if self.on_wait_hook:
                 try:
-                    self.on_wait_hook(name, attempt, delay)
+                    self.on_wait_hook(name, attempt, delay, dict(info or {},
+                                                                 key_tail=key_tail,
+                                                                 memory_key=mem_key))
+                except TypeError:  # 旧的 3 参数钩子
+                    try:
+                        self.on_wait_hook(name, attempt, delay)
+                    except Exception:  # noqa: BLE001
+                        pass
                 except Exception:  # noqa: BLE001 — status reporting never breaks the wait
                     pass
 
-        def on_severity(severity: Any, delay: float, exc: Any) -> None:
+        def on_severity(severity: Any, delay: float, exc: Any,
+                        info: dict | None = None) -> None:
             """T8.8: 把限速严重度往上抛（UI 徽标 / 报告 / 迭代降速都用它）。"""
             if self.on_severity_hook:
                 try:
-                    self.on_severity_hook(name, severity, delay, exc)
+                    self.on_severity_hook(name, severity, delay, exc,
+                                          dict(info or {}, key_tail=key_tail,
+                                               memory_key=mem_key))
+                except TypeError:
+                    try:
+                        self.on_severity_hook(name, severity, delay, exc)
+                    except Exception:  # noqa: BLE001
+                        pass
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -164,19 +207,11 @@ class LLMProfileRegistry:
 
         retry = RetryPolicy.from_config(retry_cfg, on_wait=on_wait,
                                         memory=self.retry_memory, profile=name,
+                                        memory_key=mem_key,
                                         on_severity=on_severity,
                                         on_success=on_resume)
         temperature = ovr.get("temperature", section.temperature)
         timeout = ovr.get("request_timeout", section.request_timeout)
-        # v0.10.15：工位从**模型目录**里挑的模型，用条目自己的端点与密钥。
-        # 目录条目的字段都是"可空"：空就退回 profile —— 绝不用空串覆盖已配好的值。
-        entry = self._entry_for(effective_model)
-        provider_name = str((entry or {}).get("provider") or section.provider or "")
-        base_url = str((entry or {}).get("base_url") or section.base_url or "")
-        api_key = str((entry or {}).get("api_key") or section.api_key or "")
-        if entry is not None:
-            logger.debug("模型目录条目生效：model=%s provider=%s base_url=%s",
-                         effective_model, provider_name, base_url)
         if provider_name.lower() == "ollama":
             return OllamaProvider(
                 base_url=section.ollama_base_url or base_url,
