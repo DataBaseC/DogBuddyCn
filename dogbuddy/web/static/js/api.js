@@ -229,7 +229,10 @@
       /* POST /api/models/adopt-current → 把正在运行的模型收进目录 */
       adoptCurrent: function () { return request('POST', '/api/models/adopt-current'); },
       /* GET /api/models/verify-current → 当前模型在不在服务商返回的列表里 */
-      verifyCurrent: function () { return request('GET', '/api/models/verify-current'); },
+      /* v0.10.21：probe=1 → 再发一个 1-token 真调用，验"能不能用"（列表里有但套餐不含 = 403） */
+      verifyCurrent: function (probe) {
+        return request('GET', '/api/models/verify-current' + (probe ? '?probe=1' : ''));
+      },
       /* POST /api/models/import {provider,base_url,api_key} → 拉取列表批量入库 */
       import: function (body) { return request('POST', '/api/models/import', body || {}); }
     },

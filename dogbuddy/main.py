@@ -142,7 +142,10 @@ class DogBuddyApp:
         # 模型目录（模型管理页）：目录是备选清单，activate() 才写运行时配置并落盘
         self.models = ModelService(self.db, config, persist=self.persist_config,
                                    fetch_models=self.config_svc.fetch_models,
-                                   fetch_meta=self.config_svc.fetch_models_meta)
+                                   fetch_meta=self.config_svc.fetch_models_meta,
+                                   # v0.10.21：「验证」按钮要验"能不能真调用"
+                                   # （列表里有但套餐不含 = 403，列表校验看不出）
+                                   probe=self.config_svc.test_llm)
         # P2-3：传**函数**而不是当前列表——运行中新建的工位目录要能立刻被允许
         self.files = FileService(self._file_roots)
         # T8.5/T8.6：项目迭代计划 + 执行器（到点拉项目团队进共享工作区跑一轮）

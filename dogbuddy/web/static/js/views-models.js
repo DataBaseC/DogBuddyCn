@@ -167,12 +167,24 @@
     }
     if (kind === 'verify-current') {
       var out = U.$('#mdl-verify-out');
-      if (out) out.textContent = '正在向服务商校验…';
-      A.models.verifyCurrent().then(function (r) {
+      if (out) out.textContent = '正在向服务商校验（并真发一次 1-token 调用）…';
+      /* v0.10.21：以前只查"在不在列表"→ "列表里有但套餐不含"会显示绿灯，
+         真跑任务才 403（owner 实测 ds4.1）。现在顺带验一次真调用。 */
+      A.models.verifyCurrent(true).then(function (r) {
         if (!out) return;
         if (r.error) { out.textContent = '校验失败：' + r.error; return; }
+        var probe = r.probe || {};
+        if (r.in_provider_list && r.usable === false) {
+          out.innerHTML = '<span style="color:var(--warn,#fcd34d)">⚠️ 在服务商列表里，但真调用被拒：</span>' +
+            U.esc(probe.error || '') +
+            '<div class="card-sub">列表校验看不出这种情况（套餐/额度不含该模型）。' +
+            '要么在服务商侧开通，要么换个模型。</div>';
+          return;
+        }
         out.innerHTML = r.in_provider_list
-          ? '<span style="color:var(--ok)">✅ 服务商列表里有这个模型</span>（共 ' + r.model_count + ' 个模型）'
+          ? '<span style="color:var(--ok)">✅ 服务商列表里有这个模型</span>（共 ' + r.model_count + ' 个模型）' +
+            (r.usable ? '，真调用也通了' + (probe.latency_ms ? '（' + probe.latency_ms + 'ms）' : '')
+                      : '')
           : '<span style="color:var(--danger)">❌ 服务商列表里**没有** ' + U.esc(r.model) + '</span>' +
             (r.similar && r.similar.length
               ? '（相近的：' + r.similar.map(U.esc).join('、') + '）'

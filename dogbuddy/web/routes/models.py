@@ -128,9 +128,13 @@ def router(svc, auth_deps) -> APIRouter:
         return {"model": saved, "models": m.catalog(), "summary": m.summary()}
 
     @r.get("/models/verify-current", dependencies=auth_deps)
-    async def verify_current() -> dict:
-        """当前模型真的在服务商列表里吗（拼错/下线会静默 400）。"""
-        return await _m().verify_current()
+    async def verify_current(probe: bool = False) -> dict:
+        """当前模型真的在服务商列表里吗（拼错/下线会静默 400）。
+
+        v0.10.21：`probe=1` 再发一个 1-token 真调用 —— "在列表里"不等于"能用"
+        （owner 实测 ds4.1：列表里有，套餐不含，一调 403 permission_denied）。
+        """
+        return await _m().verify_current(probe=probe)
 
     @r.post("/models/import", dependencies=auth_deps)
     async def import_models(body: ImportIn) -> dict:

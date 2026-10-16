@@ -19,6 +19,7 @@ concurrent writers would interleave turns into nonsense. This also sidesteps
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,15 @@ from ..db import new_id
 from ..ports import Group
 
 logger = logging.getLogger("dogbuddy.services.groups")
+
+#: 群组编排提示词的签名。带它的消息**不进共享频道**、也不进 recap ——
+#: 否则"提示词里有 recap、recap 又读回提示词"会自指增长（实测 3 人一轮
+#: recap 重复注入 ≈3523 tokens，最后一条提示词被撑到 3028 字符 / 嵌套 10 层）。
+GROUP_STEP_MARK = "【共享频道任务"
+#: recap 的**字符预算**（÷3 ≈ tokens）。按"条数"截断对嵌套内容毫无意义。
+RECAP_BUDGET_CHARS = 3600
+#: 单条消息进 recap 的截断长度
+RECAP_ITEM_CHARS = 300
 
 
 class GroupManager:
@@ -159,14 +169,89 @@ class GroupManager:
         return sorted(set.intersection(*sets))
 
 
-    def _channel_recap(self, gid: str, limit: int = 30) -> str:
-        msgs = self.db.list_group_messages(gid, limit)
-        if not msgs:
-            return "(频道暂无历史记录)"
+    # ------------------------------------------------------------ 频道摘要
+    def _readable_line(self, m: Any, names: dict[str, str]) -> str | None:
+        """频道里**哪条消息值得进 recap**。"""
+        content = str(getattr(m, "content", "") or "").strip()
+        if not content:
+            return None
+        # 编排提示词不是产出，而且它自带上一轮的 recap → 会让 recap 自指增长
+        if GROUP_STEP_MARK in content:
+            return None
+        who = names.get(getattr(m, "window_id", ""), getattr(m, "window_id", ""))
+        body = content[:RECAP_ITEM_CHARS]
+        if len(content) > RECAP_ITEM_CHARS:
+            body += "…"
+        return f"[{who}] {getattr(m, 'role', '')}: {body}"
+
+    @staticmethod
+    def _fit_budget(lines: list[str], budget: int, keep_min: int = 3) -> tuple[list[str], int]:
+        """按**字符预算**裁（÷3 ≈ tokens）。先丢最旧的，但不丢掉最后 keep_min 条。"""
+        def size(xs: list[str]) -> int:
+            return sum(len(x) + 1 for x in xs)
+
+        dropped = 0
+        while len(lines) > keep_min and size(lines) > budget:
+            lines.pop(0)
+            dropped += 1
+        return lines, dropped
+
+    def _channel_recap(self, gid: str, *, since_id: int = 0, upto_id: int = 0,
+                       budget: int = RECAP_BUDGET_CHARS) -> tuple[str, dict[str, Any]]:
+        """频道摘要（v0.10.21 重写）。
+
+        旧实现每次都给**全量最近 30 条 × 400 字符**，而且把编排提示词也算进去 ——
+        于是"提示词里有 recap、recap 又读回提示词"，自指增长。实测一次 3 人群组任务
+        重复注入 ≈10571 字符 ≈3523 tokens，最后一条提示词被撑到 3028 字符（嵌套 10 层）。
+
+        新实现三条规则：
+        1. **只取产出**（跳过带签名的编排提示词）；
+        2. **增量**：`since_id` 之后的新消息（本轮此前成员的产出）；`upto_id` 之前的是
+           有界历史尾部（预算减半）；
+        3. **按字符预算裁**，不是按条数——并对省略量给出可行动的提示。
+        """
+        msgs = self.db.list_group_messages(gid, 200)
         names = {w.id: w.name for w in self.db.list_windows()}
-        lines = [f"[{names.get(m.window_id, m.window_id)}] {m.role}: {m.content[:400]}"
-                 for m in msgs]
-        return "\n".join(lines[-limit:])
+        lines: list[str] = []
+        for m in msgs:
+            mid = int(getattr(m, "id", 0) or 0)
+            if since_id and mid <= since_id:
+                continue
+            if upto_id and mid > upto_id:
+                continue
+            line = self._readable_line(m, names)
+            if line:
+                lines.append(line)
+        lines, dropped = self._fit_budget(lines, budget)
+        stats = {"chars": sum(len(x) + 1 for x in lines), "lines": len(lines), "dropped": dropped}
+        if not lines:
+            return "", stats
+        text = "\n".join(lines)
+        if dropped:
+            text += (f"\n…（更早的 {dropped} 条已省略；要全文请读工作区里的频道记录，"
+                     f"或让管理员用 group_list 查）")
+        return text, stats
+
+    def _last_channel_id(self, gid: str) -> int:
+        """频道里最新的消息 id（本轮"水位线"）。"""
+        msgs = self.db.list_group_messages(gid, 1)
+        return int(getattr(msgs[-1], "id", 0) or 0) if msgs else 0
+
+    def _recap_block(self, gid: str, start_id: int) -> tuple[str, dict[str, Any]]:
+        """拼出本步要注入的频道上下文：本轮增量 + 有界历史尾部。"""
+        delta, d_stats = self._channel_recap(gid, since_id=start_id)
+        tail, t_stats = self._channel_recap(gid, upto_id=start_id,
+                                            budget=RECAP_BUDGET_CHARS // 2)
+        parts: list[str] = []
+        if delta:
+            parts.append("--- 本轮此前成员的产出 ---\n" + delta)
+        if tail:
+            parts.append("--- 更早的频道要点（已按预算截断）---\n" + tail)
+        stats = {"chars": d_stats["chars"] + t_stats["chars"],
+                 "tokens": (d_stats["chars"] + t_stats["chars"]) // 3,
+                 "delta_lines": d_stats["lines"], "tail_lines": t_stats["lines"],
+                 "dropped": d_stats["dropped"] + t_stats["dropped"]}
+        return ("\n\n".join(parts) if parts else "(频道暂无历史记录)"), stats
 
     async def run(self, group_ref: str, prompt: str) -> dict:
         """One group task: members接力 one turn each, lead summarizes (T3.2)."""
@@ -183,6 +268,11 @@ class GroupManager:
             order.append(lead_id)  # lead goes last (summary turn)
         if not order:
             raise ValueError(f"group {g.name} has no members")
+
+        # v0.10.21：本轮水位线 —— 每个成员只读"本轮此前成员的新产出"，
+        # 而不是把整条频道历史重发一遍（N 个人 → N 倍重复）。
+        start_id = self._last_channel_id(g.id)
+        recap_total = {"chars": 0, "tokens": 0}
 
         tools = self._strict_tools(order)
         # T7.3: 群组挂载的项目 → 共享工作区（成员共用项目根目录）
@@ -203,16 +293,20 @@ class GroupManager:
                 continue
             rt = self.windows._rt(wid)
             is_lead = wid == lead_id
-            recap = self._channel_recap(g.id)
+            recap, recap_stats = self._recap_block(g.id, start_id)
+            recap_total["chars"] += recap_stats["chars"]
+            recap_total["tokens"] += recap_stats["tokens"]
             step_prompt = (
-                f"【共享频道任务 · 工位「{w.name}」】\n"
+                f"{GROUP_STEP_MARK} · 工位「{w.name}」】\n"
                 f"总任务：{prompt}\n\n"
-                f"--- 共享频道最新记录 ---\n{recap}\n---\n\n"
-                + ("你是组长，请基于频道记录汇总各方产出，给出最终交付（简洁、可执行）。"
+                f"{recap}\n---\n\n"
+                + ("你是组长，请基于本期产出汇总各方结果，给出最终交付（简洁、可执行）。"
                    if is_lead else
-                   "你是组员，请接着频道记录完成你负责的部分；只输出你的产出与必要的下一步建议，"
+                   "你是组员，请完成你负责的部分；只输出你的产出与必要的下一步建议，"
                    "不要重复别人已说的内容。")
             )
+            # 这条编排提示词不该进共享频道（否则被下一个成员读回来 → 自指增长）
+            rt.session.channel_mute = {"marker": GROUP_STEP_MARK, "left": 1}
             role_spec = get_role(w.role)
             # `_strict_tools` 返回 `[]`（交集为空）时**必须一个工具都不给**；
             # 返回 None（算不出来）才退回该角色自己的白名单。初版 `[]` 会被
@@ -245,16 +339,50 @@ class GroupManager:
                 extra={"trust": (w.params or {}).get("trust", "normal"),
                        "project_id": getattr(w, "project_id", "") or ""})
             try:
-                result = await loop.run(step_prompt, ctx)
+                # v0.10.22：单成员**挂钟预算**。限速退避是"无限耐心"的（heavy 档会
+                # 追加重试预算，实测单次退避就 600s），一次群组运行因此可能挂几分钟
+                # 到几小时，而且**没有取消入口**（owner 实测：统一模型后 5 分钟只跑完
+                # 1/3 个成员，全程挂在 600s 等待里）。这里用已有的 `task_timeout`
+                # （默认 1800s）给每个成员封顶：到点就停这一步、如实记成 timeout，
+                # 而不是无限等下去。
+                budget = float(self.windows.params_for(w).get("task_timeout") or 1800)
+                result = await asyncio.wait_for(loop.run(step_prompt, ctx), timeout=budget)
                 steps.append({"window_id": wid, "window_name": w.name,
                               "is_lead": is_lead, "ok": result.stop_reason == "done",
+                              # v0.10.21：每步注入的频道上下文用量**看得见**
+                              # （以前是黑盒：不知道 recap 悄悄烧了多少 token）
+                              "recap_chars": recap_stats["chars"],
+                              "recap_tokens": recap_stats["tokens"],
+                              "recap_lines": recap_stats["delta_lines"],
+                              "recap_history_lines": recap_stats["tail_lines"],
+                              "recap_dropped": recap_stats["dropped"],
+                              "prompt_chars": len(step_prompt),
                               "summary": (result.content or "")[:1000]})
+            except asyncio.TimeoutError:
+                logger.warning("group %s step %s exceeded budget %.0fs (rate-limit waits?)",
+                               g.id, wid, budget)
+                steps.append({"window_id": wid, "window_name": w.name, "is_lead": is_lead,
+                              "ok": False, "timeout": True,
+                              "recap_chars": recap_stats["chars"],
+                              "recap_tokens": recap_stats["tokens"],
+                              "prompt_chars": len(step_prompt),
+                              "summary": (f"[超时] 该成员在 {budget:.0f}s 内没跑完"
+                                          f"（多为限速退避吃掉了预算）。"
+                                          f"要放宽就调该工位的 task_timeout。")})
             except Exception as e:  # noqa: BLE001 — one member failing doesn't kill the run
                 logger.exception("group %s step failed for %s", g.id, wid)
                 steps.append({"window_id": wid, "window_name": w.name,
                               "is_lead": is_lead, "ok": False,
+                              "recap_chars": recap_stats["chars"],
+                              "recap_tokens": recap_stats["tokens"],
+                              "prompt_chars": len(step_prompt),
                               "summary": f"[step failed] {e}"})
         summary = next((s["summary"] for s in reversed(steps) if s["is_lead"] and s["ok"]),
                        (steps[-1]["summary"] if steps else ""))
+        self.db.audit("system", "group:run",
+                      f"{g.id} members={len(steps)} recap_chars={recap_total['chars']} "
+                      f"recap_tokens≈{recap_total['tokens']} "
+                      f"max_prompt_chars={max((s.get('prompt_chars', 0) for s in steps), default=0)}")
         return {"group_id": g.id, "group_name": g.name,
+                "start_id": start_id, "recap_total": recap_total,
                 "steps": steps, "summary": summary}

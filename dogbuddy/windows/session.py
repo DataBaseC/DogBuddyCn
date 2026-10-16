@@ -57,6 +57,17 @@ class WindowSession:
                meta: dict[str, Any] | None = None) -> Message:
         # T3.1: a window bound to a shared channel contributes its messages there
         group_id = getattr(self.window, "group_id", "") or ""
+        # v0.10.21：群组**编排提示词**不是成员的产出，不进共享频道。
+        # 不拦的话它会自指增长：提示词里有 recap、recap 又从频道读回提示词 ——
+        # 实测 3 人一轮把最后一条提示词撑到 3028 字符、recap 重复注入 ≈3523 tokens
+        # （嵌套深度 10 层）。`channel_mute` 由 GroupManager 在每步开跑前设置，
+        # 只静音"恰好那一条"带签名的 user 消息（不劫持正常的 user 输入）。
+        mute = getattr(self, "channel_mute", None)
+        if (group_id and role == "user" and isinstance(mute, dict)
+                and mute.get("left", 0) > 0
+                and str(mute.get("marker") or "") in str(content or "")):
+            group_id = ""
+            mute["left"] = int(mute.get("left", 0)) - 1
         return self.messages.add_message(self.window.id, role, content, tokens, meta,
                                          group_id=group_id)
 

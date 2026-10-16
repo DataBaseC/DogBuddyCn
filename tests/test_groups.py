@@ -141,10 +141,16 @@ def test_group_run_relay_and_summary(tmp_path):
     assert len(result["steps"]) == 2
     assert result["summary"] == "汇总：接口+实现完成，待集成测试"
     assert all(s["ok"] for s in result["steps"])
-    # 每轮 user 提示 + assistant 产出都进频道（2 轮 × 2 条）
+    # v0.10.21：只有**产出**进频道，编排提示词不进（2 轮 × 1 条）。
+    # 旧口径把 user 提示也写进频道，于是提示词里有 recap、recap 又读回提示词，
+    # 自指增长（owner 实测：一轮重复注入 ≈3523 tokens、最后一条提示词 3028 字符）。
     channel = groups.channel("team-a")
-    assert len(channel) == 4
+    assert len(channel) == 2, [m["content"][:40] for m in channel]
     assert {m["window_name"] for m in channel} == {"alice", "bob"}
+    assert all(m["role"] == "assistant" for m in channel)
+    # 每步都回报注入了多少频道上下文（token 花在哪看得见）
+    assert result["steps"][0]["recap_tokens"] >= 0
+    assert "recap_total" in result
 
 
 def test_group_run_requires_members(tmp_path):

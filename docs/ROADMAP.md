@@ -1046,3 +1046,67 @@ worker-3 继承），让我在**真机 + 真限速**下验收群组，并提了�
 
 614 passed / 4 skipped（+13：身份/导入 8、限速恢复 5）；`audit_ui --strict` exit 0；
 bundle 已重建。
+
+---
+
+## 19. 第十二轮：群组频道 recap 的 token 优化 + 验证按钮真调用 + 统一模型实验（2026-10-16，`0.10.22`）
+
+owner 四条反馈：①"将群聊记录重新全发一遍会浪费很多的 token"；②"4.1 有但是无法用"；
+③"统一后会非常慢，你可以试一下"；④ LM Studio 不整了。逐条落地。
+
+### 19.1 recap 的 token 浪费：根因是**自指嵌套**（最优先）
+
+生产实测（群组 `9174e4b248cc` 一次 3 人任务）：
+
+| 证据 | 值 |
+|---|---|
+| 频道消息 | 20 条，其中 **6 条（30%）是编排提示词本身** |
+| 提示词长度 | 385 → 915 → 1403 → 1910 → 2471 → **3028** 字符（逐条膨胀） |
+| 嵌套深度 | 最后一条里出现 10 次同样的提示词签名 —— 提示词里有 recap、recap 又读回提示词 |
+| 按旧口径模拟 | recap 每次注入 402 / 958 / 1462 / 2018 / 2579 / 3152 字符 |
+| 一轮合计 | **≈10571 字符 ≈ 3523 tokens** 纯粹的重复 |
+
+旧实现 `group_manager._channel_recap()`：每次给"最近 30 条 × 每条 400 字符"的全量，
+而且把编排提示词也算成频道内容；`WindowSession.append` 又把每条提示词写进频道
+（T3.1 的"工会话进频道"没有区分**输入**与**产出**）。
+
+修法（四条）：
+1. **提示词不进频道**：`WindowSession.append` 认 `session.channel_mute = {marker,left}`，
+   只静音"恰好那一条带签名的编排提示词"（不劫持正常 user 输入）；recap 侧同样过滤签名。
+2. **增量**：`run()` 开始时取频道最新 id 作水位，每个成员只读"本轮此前成员的产出"；
+   跨轮次的上下文由一条**有界历史尾部**（预算减半）承载。
+3. **按字符预算裁**（÷3 ≈ token），不是按条数：默认 3600 字符 / 尾部 1800；超出丢最旧的
+   （保留最后 3 条），并给出"更早的 N 条已省略"的可行动提示。
+4. **可见性**：每一步回报 `recap_chars/recap_tokens/recap_lines/recap_dropped/prompt_chars`，
+   审计写 `group:run` 汇总 —— 谁烧了多少 token 不再黑盒。
+
+### 19.2 「验证」按钮：只查"在不在列表"不够（ds4.1 实测）
+
+`deepseek-v4.1-flash` 在 SenseNova 的 `/v1/models` 里，但这把 key 一调就是
+`403 permission_denied_error: model is not available in the current token plan`（code 7）——
+**列表校验显示绿灯，真跑任务才炸**。现在 `/models/verify-current?probe=1` 会再发一个
+1-token 真调用（复用 `test_connection`，`max_retries=0` 快速失败），并在"在列表里但调用被拒"
+时给出 warning + 原因；前端「验证」按钮走 `probe=1`，默认路径不花这次调用。
+
+### 19.3 统一模型实验：不只是"慢"，是**级联退避**
+
+owner 说"统一后会非常慢，你可以试一下"。实测（三个工位全部指向 `deepseek-v4-flash`，
+同一把 key，干净群组，任务与混合模型那次逐字相同）：
+
+* 运行 **9 分钟**后，第一名成员**连第一条产出都还没出来**（频道里只有那条编排提示词）；
+* `/api/status` = `{waiting: true, severity: "heavy", delay: 600.0}`；
+* `/var/lib/dogbuddy/retry_memory.json` = `{"": {"last_interval": 600.0, "last_severity": "heavy", "waits": 7, "successes": 6}}`
+  —— 退避基准被抬到 **600 秒**并持续生效；
+* 对照：混合模型那次（3 个不同 provider）**400.3s 跑完三人**，其中包含一次 340s 退避。
+
+**结论：不要统一。** 多 provider 分散的不只是能力差异，更是限速预算；同一个 key 上串行
+三个成员会把退避推高到分钟级以上。实验跑完前我停掉了客户端（服务端没有取消入口）。
+
+顺带修掉一个由此暴露的运行风险：**群组运行没有总时间上限**（限速退避是"无限耐心"设计，
+heavy 档还追加重试预算），一次运行可以挂几小时。现在每个成员的步骤用已有的
+`task_timeout`（默认 1800s）由 `asyncio.wait_for` 封顶，超时如实记 `timeout: true`
+并告诉用户"要放宽就调该工位的 task_timeout"，不再无限等。
+
+### 19.4 基线
+
+624 passed / 4 skipped（+10：recap 预算 6、验证探测 4）＋群组预算 3；`audit_ui --strict` exit 0。

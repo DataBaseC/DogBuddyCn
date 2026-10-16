@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
@@ -128,12 +129,15 @@ class ModelService:
     def __init__(self, db: Any, app_config: Any = None,
                  persist: Callable[[], str] | None = None,
                  fetch_models: Callable[..., Any] | None = None,
-                 fetch_meta: Callable[..., Any] | None = None):
+                 fetch_meta: Callable[..., Any] | None = None,
+                 probe: Callable[..., Any] | None = None):
         self.db = db
         self.app = app_config
         self._persist = persist
         self._fetch = fetch_models  # async (provider, base_url, api_key) -> list[str]
         self._fetch_meta = fetch_meta  # async (...) -> [{id, context_window}]（服务商没给就是 0）
+        # v0.10.21：真调用探测（= ConfigService.test_llm）——"在列表里"≠"能用"
+        self._probe = probe
 
     # ------------------------------------------------------------- 读
     def catalog(self, enabled_only: bool = False) -> list[dict[str, Any]]:
@@ -200,11 +204,17 @@ class ModelService:
                            source="adopted", enabled=True,
                            note="由控制台从运行配置收进目录")
 
-    async def verify_current(self) -> dict[str, Any]:
-        """校验"当前模型"是否真的存在于服务商返回的列表里。
+    async def verify_current(self, probe: bool = False) -> dict[str, Any]:
+        """校验"当前模型"：只在服务商列表里够不够？**不够**。
 
         防的是另一种静默失败：配置里写了个拼错/已下线的模型名，调用时才 400，
         而界面上看不出任何异常。
+
+        v0.10.21（owner 实测 ds4.1）：还有一种更坑的情况——模型**在**列表里，
+        但这把 key 的套餐不含它，一调就是
+        `403 permission_denied_error: model is not available in the current token plan`。
+        列表校验会显示绿灯，等真跑任务才炸。所以 `probe=True` 时**再发一个 1-token
+        的真调用**，把"能不能用"也验掉（前端「验证」按钮走这条）。
         """
         cfg = self.app
         model = str(getattr(cfg.llm, "model", "") if cfg else "").strip()
@@ -220,8 +230,32 @@ class ModelService:
         ids = [str(d.get("id") or "") for d in (details or [])]
         tail = model.split("/")[-1].lower()
         near = [i for i in ids if tail[:6] and tail[:6] in i.lower()][:5]
-        return {"ok": model in ids, "model": model, "model_count": len(ids),
-                "in_provider_list": model in ids, "similar": near}
+        out: dict[str, Any] = {"ok": model in ids, "model": model, "model_count": len(ids),
+                               "in_provider_list": model in ids, "similar": near}
+        if probe and self._probe is not None:
+            t0 = time.monotonic()
+            try:
+                res = await self._probe(cfg.llm.provider, cfg.llm.base_url,
+                                        cfg.llm.api_key, model)
+            except Exception as e:  # noqa: BLE001 — 探测失败要说原因
+                out["probe"] = {"ok": False, "error": str(e),
+                                "latency_ms": int((time.monotonic() - t0) * 1000)}
+                out["usable"] = False
+                return out
+            chat_err = str(res.get("chat_error") or "")
+            ok = bool(res.get("ok")) and not chat_err
+            out["probe"] = {"ok": ok, "latency_ms": res.get("latency_ms"),
+                            "sample": str(res.get("chat_sample") or "")[:80],
+                            "error": chat_err or ("" if ok else str(res.get("message") or ""))}
+            out["usable"] = ok
+            # 在列表里 + 真调用失败 = 最需要喊出来的那种情况
+            if out["in_provider_list"] and not ok:
+                out["warning"] = ("模型在服务商列表里，但**真调用被拒**："
+                                  f"{chat_err or res.get('message')}。"
+                                  "常见原因：套餐/额度不含该模型（如 SenseNova 的 "
+                                  "`model is not available in the current token plan`）、"
+                                  "或该模型未开通。列表校验看不出这个。")
+        return out
 
     # ------------------------------------------------------------- 写
     def _resolve_id(self, provider: str, model: str, base_url: str,
