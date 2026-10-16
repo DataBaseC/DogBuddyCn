@@ -1259,3 +1259,26 @@ tpm/rpm limit`）暴露的不是一个参数，而是四个放大器：
 `inline_cap=90` / `wait_budget=300` 都是可配的。
 
 基线：655 passed / 4 skipped；`audit_ui --strict` exit 0。
+
+---
+
+## 25. 第十八轮：`server_exec` 装错了工具箱（2026-10-23，`0.10.29`）
+
+owner："先让管理员整理线上工作区。" 结果暴露一个真 bug（管理员自己在对话里如实报告
+"我这个管理接口**没有 server_exec 工具**"，而不是权限被拒）：
+
+| 角色 | 旧状态 | 问题 |
+|---|---|---|
+| 员工（worker） | `WORKER_PROGRAMMER_TOOLS` **含** `server_exec` | 它声明 `required_scope="system"`，员工作用域永远过不了作用域裁决 → 每次调用必然被 fail-closed 拒绝（实测：管理员把"整理工作区"派给 worker-1 → 先被拒 server_exec、再被边界守卫拦绝对路径，任务根本做不到） |
+| 主管（supervisor） | 经 `PROJECT_TOOLS` 继承？否 —— 同样没有 | 同上（project 作用域也过不了 system） |
+| 管理员 | **没有**该工具 | 唯一合法调用者反而不能用 → 宿主机级操作（清工作区、看磁盘/日志、重启服务）无人可做，只能"派给做不了的员工" |
+
+**修法**：
+1. `build_admin_tools()` 末尾装上 `ServerExecTool()`（管理员的独立注册表里），
+   `ADMIN_TOOLS` / `SYSTEM_TOOL_NAMES` 同步登记（不变量测试要求三者一致）；
+2. `WORKER_PROGRAMMER_TOOLS` **移除** `server_exec` —— 挂上只是"白给一个必然被拒的工具"：
+   白烧 schema token（TPM 紧张时尤其亏），还会把模型引向"被拒 → 换个方式绕"的死循环；
+3. 两处系统提示词同步：员工提示词不再承诺 server_exec（并说明越界会被拦、有事找管理员），
+   管理员提示词明确"**宿主机的事只有你能做**，别派给员工"。
+
+基线：656 passed / 4 skipped；`audit_ui --strict` exit 0。

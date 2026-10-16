@@ -143,3 +143,21 @@ def test_普通命令不受面板规则误伤(tmp_path):
     ctx = _ctx(tmp_path, scope=NONE)
     for cmd in ["ls -la", "cat README.md", "git status"]:
         assert gate.check("shell", "shell", {"command": cmd}, ctx).allowed is True
+
+
+def test_管理员才拿得到_server_exec_员工工具箱里不再白给():
+    """v0.10.29（owner 实测）：`server_exec` 声明 system 作用域 —— 唯一合法调用者是
+    管理员。但它以前**只在员工工具箱里**：
+
+    * 员工挂着它 → 每次调用被作用域裁决 fail-closed 拒绝（今天实测：管理员把"整理
+      线上工作区"派给 worker-1 → 先被拒 server_exec、再被边界守卫拦绝对路径，
+      任务根本做不到），还白烧 schema token、把模型引向"被拒→绕行"的死循环；
+    * 管理员**没有**它 → 做不了宿主机级操作，只能把活派给做不了的员工
+      （它自己在对话里如实报告"工具未挂载"）。
+    """
+    from dogbuddy.agents.core.roles import (ADMIN_TOOLS, SUPERVISOR_TOOLS,
+                                            WORKER_PROGRAMMER_TOOLS)
+
+    assert "server_exec" in ADMIN_TOOLS, "只有管理员能过 system 作用域，必须给它"
+    assert "server_exec" not in WORKER_PROGRAMMER_TOOLS, "员工挂着必然是死工具"
+    assert "server_exec" not in SUPERVISOR_TOOLS, "主管是 project 作用域，同样过不了"

@@ -86,6 +86,12 @@ Your job:
 update "yourself" / "the software", use self_version (check) and self_update (upgrade). NEVER \
 dispatch a self-upgrade to an employee window: an employee cannot restart the service, and its \
 sandbox is not the running deployment.
+- EXCEPTION — the HOST itself: you are the ONLY role that may run commands on the server \
+(server_exec, system scope). Use it for host-level chores the owner asks for (tidying \
+/var/lib/dogbuddy/workspaces, inspecting disks/logs, restarting a service). NEVER dispatch such \
+a chore to an employee window: employees have neither system scope (server_exec is refused \
+fail-closed) nor access outside their own workspace (the shell boundary guard blocks absolute \
+paths) — the task cannot succeed.
 
 Style: concise, concrete, action-oriented. Reply in the user's language."""
 
@@ -93,7 +99,9 @@ WORKER_PROGRAMMER_SYSTEM_PROMPT = """You are a programmer employee in a persiste
 A long-running project lives in your workspace; you keep working on it across many task runs.
 
 Your toolbox: read/write/edit files, shell, glob/grep, web_search/web_fetch, todos, checkpoints, \
-explore_subagent (read-only research), ask_user, server_exec (server commands via the panel).
+explore_subagent (read-only research), ask_user. You work INSIDE your workspace: absolute paths \
+outside it are blocked by the boundary guard, and host-level operations (server_exec) are \
+admin-only — use ask_user to ask the admin instead of trying to bypass it.
 
 How to work:
 - The todo list drives your autonomous work ("continue the todos" runs): pick the next undone item, \
@@ -130,6 +138,14 @@ ADMIN_TOOLS = [
     "group_create", "group_list", "group_assign", "group_channel_post",
     # self-upgrade of the running deployment (NOT delegable to an employee window)
     "self_version", "self_update",
+    # v0.10.29（owner 实测）：**宿主机运维**。`server_exec` 声明 `required_scope="system"`
+    # —— 只有管理员能用；但它以前**只在员工工具箱里**，于是：
+    #   ① 员工每次调用都被作用域裁决 fail-closed 拒绝（今天实测：管理员让 worker-1
+    #      整理线上工作区 → worker-1 先被拒 server_exec、再被边界守卫拦绝对路径，
+    #      任务根本做不到）；
+    #   ② 管理员（唯一合法调用者）**没有这个工具**，做不了宿主机级操作，
+    #      只能把活派给做不了的员工（它自己在对话里如实报告了"工具未挂载"）。
+    "server_exec",
 ]
 # 注意：ADMIN_TOOLS 必须**恰好等于** `agents/admin/tools.py` 里注册的工具集
 # （管理员用的是自己独立的注册表，不含通用工具箱；`schedule`/`reschedule`/
@@ -141,7 +157,11 @@ WORKER_PROGRAMMER_TOOLS = [
     "glob", "grep", "web_search", "web_fetch",
     "todo_view", "todo_add", "todo_done",
     "checkpoint_create", "checkpoint_rollback",
-    "explore_subagent", "ask_user", "server_exec",
+    "explore_subagent", "ask_user",
+    # 注：**不给** `server_exec`（v0.10.29）。它声明 `required_scope="system"`，
+    # 员工的作用域永远过不了作用域裁决 → 挂上只是"白给一个必然被拒的工具"：
+    # 白烧 schema token（TPM 紧张时尤其亏），还会把模型引到"被拒→换个方式绕"的死循环
+    # （今天实测：worker-1 被拒后改试 shell，又被边界守卫拦 absolute path）。
     # Batch 8 组一：员工也能给自己排期、自决节奏、有事才通知（权限从紧）
     "schedule", "reschedule", "notify_owner",
     # Batch 8 组二：项目迭代轮次的进展汇报（T8.6 停止条件的唯一依据）

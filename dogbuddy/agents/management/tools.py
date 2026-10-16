@@ -837,6 +837,15 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
                text=_p("string", "message content", True)),
         group_channel_post, "write"))
 
+    # -------------------------------------------- 宿主机运维（v0.10.29）
+    # `server_exec` 声明 `required_scope="system"` —— 只有管理员过得去。但它以前
+    # **只挂在员工工具箱里**，于是员工每次调用都被 fail-closed 拒绝（今天实测：
+    # 管理员把"整理线上工作区"派给 worker-1 → 先被拒 server_exec、再被边界守卫拦
+    # 绝对路径，任务根本做不到），而唯一合法调用者**没有这个工具**（管理员自己在
+    # 对话里如实报告"工具未挂载"）。这里把它装进管理员的注册表。
+    from ...tools.server_exec import ServerExecTool
+    tools.append(ServerExecTool())
+
     return tools
 
 
@@ -849,6 +858,7 @@ SYSTEM_TOOL_NAMES: frozenset[str] = frozenset({
     "self_version", "self_update",    # 自升级：绝不下放给主管
     "memory_write", "memory_recall",  # 全局记忆（主管只有项目/工位记忆）
     "supervisor_command",             # 管理员→主管 的指令下发（T9.4，主管不能命令自己）
+    "server_exec",                    # v0.10.29：宿主机命令（面板 agent API），仅管理员
 })
 
 #: 需要 **project** 作用域的：管本项目里的工位 / 任务 / 上下文 / 工作区
