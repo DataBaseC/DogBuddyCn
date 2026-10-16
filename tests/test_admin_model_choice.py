@@ -132,5 +132,13 @@ def test_admin_has_no_tool_to_fetch_models_from_a_provider():
 
 
 def test_wizard_adopts_the_model_into_the_catalog():
+    """向导填的模型必须落进目录（模型只有一个来源）。
+
+    v0.10.26 起不再用 `adoptCurrent()`（那只登记运行时的模型、**不带密钥**），
+    而是直接建**带密钥的条目**再设为当前 —— 因为全局密钥框已停用，
+    密钥必须落在条目上。这里钉住新的等价（更强）契约。
+    """
     js = (REPO / "dogbuddy/web/static/js/views-settings.js").read_text(encoding="utf-8")
-    assert "A.models.adoptCurrent()" in js, "向导填的模型要落进目录（模型只有一个来源）"
+    assert "A.models.create(entry)" in js, "向导填的模型要落进目录（模型只有一个来源）"
+    assert "A.models.activate(mid)" in js, "落进目录后要设为当前"
+    assert "if (state.api_key) entry.api_key = state.api_key;" in js, "密钥要跟着条目走"

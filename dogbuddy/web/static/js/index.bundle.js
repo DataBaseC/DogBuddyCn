@@ -351,13 +351,23 @@
     return s;
   }
 
+  /* v0.10.26：与后端 `model_service.endpoint_of(...).split('/')[0]` 同口径的 host[:port]。
+     模型页（判断会不会撞上同身份条目）与设置向导（定位要更新哪条条目）都要用。 */
+  function endpointHost(url) {
+    var s = String(url || '').trim();
+    if (!s) return '';
+    var m = s.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/]*)/);
+    return (m ? m[1] : s.split('/')[0]).toLowerCase();
+  }
+
   global.UI = {
     $: $, $$: $$, el: el, esc: esc, icon: icon,
     parseTime: parseTime, fmtTime: fmtTime, fmtClock: fmtClock, fmtDate: fmtDate,
     relTime: relTime, countdown: countdown, fmtSize: fmtSize,
     toast: toast, modal: modal, confirm: confirm, closeTopModal: closeTopModal,
     skeleton: skeleton, empty: empty, debounce: debounce, highlightCode: highlightCode,
-    fmtInt: fmtInt, usageHTML: usageHTML, fillModelSelect: fillModelSelect
+    fmtInt: fmtInt, usageHTML: usageHTML, fillModelSelect: fillModelSelect,
+    endpointHost: endpointHost
   };
 })(window);
 
@@ -3612,32 +3622,62 @@
         return;
       }
       if (state.step === Settings.WIZ_STEPS.length - 1) {
-        /* 保存：PUT /api/settings（api_key 为空不回传） */
-        var payload = {
+        /* v0.10.26：全局密钥框已停用，**向导也不能再往 PUT /api/settings 塞密钥**
+           （服务端会 400）。改为：把向导里填的东西落成**一条模型条目**（带密钥），
+           再「设为当前」—— 这跟"密钥归模型条目"的口径一致，也不会绕过停用。 */
+        var btn = document.getElementById('wz-next');
+        if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+        var entry = {
           provider: state.provider,
           base_url: state.base_url,
           model: state.model
         };
-        if (state.api_key) payload.api_key = state.api_key;
-        var btn = document.getElementById('wz-next');
-        if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
-        A.settings.update({ llm: payload }).then(function () {
-          U.toast('success', 'LLM 配置已保存');
-          state.saved = true;
-          Settings.closeWizard();
-          /* v0.10.17：**模型只有一个来源 —— 模型目录**。向导里填的模型立刻收进目录，
-             免得出现"配置里有个模型、模型页里查不到"的两套说法。 */
-          A.models.adoptCurrent().then(function (r) {
-            var name = (r && r.model && r.model.model) || payload.model;
-            if (name) U.toast('info', '已把 ' + name + ' 纳入模型目录（可在模型页切换/备注）');
-          }).catch(function () { /* 收编失败不影响已保存的配置 */ });
+        if (state.api_key) entry.api_key = state.api_key;
+
+        function saveBare() {
+          /* 没选模型时退回"只存兜底地址"（不带密钥） */
+          return A.settings.update({ llm: {
+            provider: state.provider, base_url: state.base_url, model: state.model } });
+        }
+        function locate() {
+          /* 409（同身份已存在）→ 找到那条，把密钥补上去（掩码/留空不动） */
+          return A.models.list(false).then(function (r) {
+            var host = U.endpointHost(state.base_url);
+            var hit = ((r && r.models) || []).filter(function (m) {
+              return m.model === state.model && (m.endpoint_host || '') === host;
+            })[0];
+            if (!hit) throw new Error('同名条目已存在但定位不到，请到模型管理页处理');
+            var patch = state.api_key ? { api_key: state.api_key } : {};
+            var chain = Object.keys(patch).length ? A.models.update(hit.id, patch) : Promise.resolve();
+            return chain.then(function () { return { model: { id: hit.id } }; });
+          });
+        }
+        var created = state.model
+          ? A.models.create(entry).catch(function () { return locate(); })
+          : saveBare().then(function () { return null; });
+
+        created.then(function (r) {
+          var mid = r && r.model && r.model.id;
+          if (!mid) {
+            U.toast('success', '兜底配置已保存（未选模型：请到「模型管理」页新增条目）');
+            state.saved = true; Settings.closeWizard();
+            return null;
+          }
+          return A.models.activate(mid).then(function (a) {
+            var res = (a && a.result) || {};
+            U.toast('success', '已保存并切换为 ' + (res.model || state.model) +
+              (res.api_key_switched ? '（密钥已随该条目切换）' : '（沿用现有密钥）'));
+            state.saved = true;
+            Settings.closeWizard();
+          });
+        }).then(function () {
           if (global.App) {
             App.refreshStatus().then(function () {
               if (App.reloadView) App.reloadView();
             }).catch(function () { /* 忽略 */ });
           }
         }).catch(function (e) {
-          U.toast('error', '保存失败：' + e.message);
+          U.toast('error', '保存失败：' + (e && e.message ? e.message : e));
           if (btn) { btn.disabled = false; btn.textContent = '保存配置'; }
         });
         return;
@@ -4915,13 +4955,9 @@
   var state = { models: [], current: {}, summary: {}, options: {}, keyword: '', onlyEnabled: false, bound: false };
 
   /* v0.10.23：与后端 `model_service.endpoint_of().split('/')[0]` 同口径的 host[:port]。
-     用来在**提交前**判断"这条会不会撞上同名同端点的既有条目"（撞上会被服务端 409 拒绝）。 */
-  function endpointHostOf(url) {
-    var s = String(url || '').trim();
-    if (!s) return '';
-    var m = s.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/]*)/);
-    return (m ? m[1] : s.split('/')[0]).toLowerCase();
-  }
+     用来在**提交前**判断"这条会不会撞上同身份（同名+同端点+同 key）的既有条目"。
+     v0.10.26：实现搬到 `U.endpointHost`（设置向导也要用），这里只留个别名。 */
+  var endpointHostOf = U.endpointHost;
 
   /* ---------------- 渲染 ---------------- */
   function curLine() {

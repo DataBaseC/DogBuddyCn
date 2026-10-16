@@ -65,3 +65,25 @@ def test_设置页仍回掩码不泄明文(tmp_path, monkeypatch):
         assert masked and masked != "sk-abcdefghijklmnop", f"回传了明文：{masked}"
         assert masked.endswith("mnop"), f"掩码要给末尾几位好辨认：{masked}"
         assert "abcdefghij" not in masked
+
+
+def test_向导把密钥落成模型条目而不是塞给设置页():
+    """v0.10.26：全局密钥停用后，向导**不能**再往 PUT /api/settings 塞密钥（服务端会 400）。
+
+    静态钉住前端：向导保存分支走"建条目（带密钥）→ 设为当前"，不再有 payload.api_key。
+    """
+    js = (Path(__file__).resolve().parents[1] /
+          "dogbuddy/web/static/js/views-settings.js").read_text(encoding="utf-8")
+    assert "A.models.create(entry)" in js, "向导要建模型条目"
+    assert "if (state.api_key) entry.api_key = state.api_key;" in js, "密钥要落在条目上"
+    assert "A.models.activate(mid)" in js, "保存后要「设为当前」（连同密钥切换）"
+    assert "payload.api_key = state.api_key" not in js, "向导不能再把密钥塞给设置页"
+    assert "id=\"set-api-key\" type=\"password\" value=\"\" disabled" in js, "全局密钥框必须禁用"
+
+
+def test_全局密钥框不会再被保存流程读取():
+    js = (Path(__file__).resolve().parents[1] /
+          "dogbuddy/web/static/js/views-settings.js").read_text(encoding="utf-8")
+    # 保存流程里不能出现读取该输入框的值
+    assert "document.getElementById('set-api-key').value" not in js, \
+        "已停用的全局密钥框不该再被读取"

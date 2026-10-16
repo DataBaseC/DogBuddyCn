@@ -345,12 +345,22 @@
     return s;
   }
 
+  /* v0.10.26：与后端 `model_service.endpoint_of(...).split('/')[0]` 同口径的 host[:port]。
+     模型页（判断会不会撞上同身份条目）与设置向导（定位要更新哪条条目）都要用。 */
+  function endpointHost(url) {
+    var s = String(url || '').trim();
+    if (!s) return '';
+    var m = s.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/]*)/);
+    return (m ? m[1] : s.split('/')[0]).toLowerCase();
+  }
+
   global.UI = {
     $: $, $$: $$, el: el, esc: esc, icon: icon,
     parseTime: parseTime, fmtTime: fmtTime, fmtClock: fmtClock, fmtDate: fmtDate,
     relTime: relTime, countdown: countdown, fmtSize: fmtSize,
     toast: toast, modal: modal, confirm: confirm, closeTopModal: closeTopModal,
     skeleton: skeleton, empty: empty, debounce: debounce, highlightCode: highlightCode,
-    fmtInt: fmtInt, usageHTML: usageHTML, fillModelSelect: fillModelSelect
+    fmtInt: fmtInt, usageHTML: usageHTML, fillModelSelect: fillModelSelect,
+    endpointHost: endpointHost
   };
 })(window);

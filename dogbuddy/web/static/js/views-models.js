@@ -11,13 +11,9 @@
   var state = { models: [], current: {}, summary: {}, options: {}, keyword: '', onlyEnabled: false, bound: false };
 
   /* v0.10.23：与后端 `model_service.endpoint_of().split('/')[0]` 同口径的 host[:port]。
-     用来在**提交前**判断"这条会不会撞上同名同端点的既有条目"（撞上会被服务端 409 拒绝）。 */
-  function endpointHostOf(url) {
-    var s = String(url || '').trim();
-    if (!s) return '';
-    var m = s.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/]*)/);
-    return (m ? m[1] : s.split('/')[0]).toLowerCase();
-  }
+     用来在**提交前**判断"这条会不会撞上同身份（同名+同端点+同 key）的既有条目"。
+     v0.10.26：实现搬到 `U.endpointHost`（设置向导也要用），这里只留个别名。 */
+  var endpointHostOf = U.endpointHost;
 
   /* ---------------- 渲染 ---------------- */
   function curLine() {
