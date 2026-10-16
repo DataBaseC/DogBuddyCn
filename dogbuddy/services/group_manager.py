@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -148,6 +149,114 @@ class GroupManager:
                 "created_at": getattr(m, "created_at", "")}
 
     # -------------------------------------------------------------- runs
+    #: 收尾前"等齐派出去的活 + 步骤级续跑"的**总预算**（秒）。超了就把还没好的
+    #: 如实记成 timeout（任务仍在后台跑），绝不让群组运行无限挂住。
+    DELEGATE_SETTLE_BUDGET = 900.0
+    #: 每个被限速的派单最多由系统重试几次（之后交回给组长/用户）
+    DELEGATE_RETRY_MAX = 3
+    #: 步骤级续跑的退避（秒）：60 → 120 → 240
+    DELEGATE_RETRY_DELAYS = (60.0, 120.0, 240.0)
+
+    def _member_budget(self, window_id: str) -> float:
+        """该工位单轮的挂钟预算（与成员步进用的是同一个 `task_timeout`）。"""
+        w = self.db.get_window(window_id)
+        if w is None:
+            return 1800.0
+        try:
+            return float(self.windows.params_for(w).get("task_timeout") or 1800)
+        except Exception:  # noqa: BLE001
+            return 1800.0
+
+    async def _settle_delegated(self, delegated: list[dict], pending: list) -> dict:
+        """收尾轮之前：**等齐**组长派出去的活；被限速的这一步由系统按退避重试。
+
+        v0.10.36（逻辑复核 W6）：`0.10.33` 的派活有两个洞 ——
+        ① `wait=false` 时收尾汇总会在组员**还没开工**时就跑（结论提前，必然是错的）；
+        ② 组员被限速暂停后（coordinated 派单不计 manual，防重复执行是我特意加的）
+           **没有任何人重试这一步** → 组员那部分活永久缺失，而 run 还显示正常结束。
+        这里两个一起补，并且**不问 LLM**（重试是系统行为，不该靠模型自觉）。
+        """
+        t0 = time.monotonic()
+        stats = {"joined": 0, "retried": 0, "timeout": 0, "budget_exhausted": False}
+
+        def left() -> float:
+            return self.DELEGATE_SETTLE_BUDGET - (time.monotonic() - t0)
+
+        # ① 未决句柄（wait=false 排队的）先等齐。用 shield：等超时**不取消**组员的活
+        for wid, fut in list(pending):
+            entry = next((d for d in delegated if d["window_id"] == wid), None)
+            if entry is None:
+                pending.remove((wid, fut))
+                continue
+            budget = min(left(), float(entry.get("timeout") or self._member_budget(wid)))
+            if budget <= 0:
+                stats["budget_exhausted"] = True
+                break
+            try:
+                result = await asyncio.wait_for(asyncio.shield(fut), timeout=budget)
+                outcome = self.windows._to_outcome(result)
+            except asyncio.TimeoutError:
+                stats["timeout"] += 1
+                entry["status"] = "timeout"
+                entry["summary"] = (f"等待超过 {budget:.0f}s 仍未结束"
+                                    f"（任务仍在后台队列里跑，不算失败）")
+            except Exception as e:  # noqa: BLE001 — 子任务异常不能带崩群组运行
+                entry["status"] = "failed"
+                entry["summary"] = str(e)
+            else:
+                entry["status"] = str(getattr(outcome, "status", "") or "unknown")
+                entry["summary"] = str(getattr(outcome, "summary", "") or "")
+            stats["joined"] += 1
+            pending.remove((wid, fut))
+
+        # ② 被限速的：系统按退避重试**这一步**（不是整轮，也不问组长）
+        for attempt in range(self.DELEGATE_RETRY_MAX):
+            retryable = [d for d in delegated
+                         if d.get("status") == "rate_limited"
+                         and int(d.get("attempts", 0)) <= attempt]
+            if not retryable:
+                break
+            if left() <= 0:
+                stats["budget_exhausted"] = True
+                break
+            delay = self.DELEGATE_RETRY_DELAYS[min(attempt, len(self.DELEGATE_RETRY_DELAYS) - 1)]
+            await asyncio.sleep(max(0.0, min(delay, left())))
+            for d in retryable:
+                if left() <= 0:
+                    stats["budget_exhausted"] = True
+                    break
+                d["attempts"] = int(d.get("attempts", 0)) + 1
+                logger.info("群组步骤级续跑：%s 第 %d 次（限速暂停）",
+                            d["window_id"], d["attempts"])
+                try:
+                    outcome = await self.windows.dispatch_and_wait(
+                        d["window_id"], d["task"], coordinated=True,
+                        timeout=max(1.0, min(left(), float(d.get("timeout")
+                                                           or self._member_budget(d["window_id"])))))
+                    d["status"] = str(getattr(outcome, "status", "") or "unknown")
+                    d["summary"] = str(getattr(outcome, "summary", "") or "")
+                except Exception as e:  # noqa: BLE001
+                    d["status"] = "failed"
+                    d["summary"] = str(e)
+                stats["retried"] += 1
+
+        # 给收尾轮的组长一份"权威状态"（免得它凭频道里的碎片猜）
+        lines = []
+        for d in delegated:
+            bits = [f"- {d['window_name']}：{d.get('status') or 'unknown'}"]
+            if int(d.get("attempts", 0)):
+                bits.append(f"（限速重试 {d['attempts']} 次）")
+            text = (d.get("summary") or "").strip().replace("\n", " ")
+            if text:
+                bits.append(f" | {text[:200]}")
+            lines.append("".join(bits))
+        note = ("【组长派活的实际结果（权威状态，以此为准）】\n"
+                + "\n".join(lines)
+                + (f"\n（等齐 {stats['joined']} 项，系统续跑 {stats['retried']} 次"
+                   + ("，预算用尽仍有未完成项" if stats["budget_exhausted"] else "")
+                   + "）" if delegated else ""))
+        return {"stats": stats, "note": note}
+
     def _strict_tools(self, member_ids: list[str]) -> list[str] | None:
         """权限取最严：所有成员角色白名单的**交集**。
 
@@ -282,6 +391,10 @@ class GroupManager:
         start_id = self._last_channel_id(g.id)
         recap_total = {"chars": 0, "tokens": 0}
         dispatched: list[str] = []   # 组长已经派过活的成员（接力轮跳过）
+        #: 派单台账 + 未决句柄（**同一个 list 对象**贯穿各步，工具往里写）
+        #: v0.10.36：收尾轮开始前靠它 join 与步骤级续跑（逻辑复核 W6）
+        delegated: list[dict] = []
+        pending_runs: list = []
 
         tools = self._strict_tools(order)
         # T7.3: 群组挂载的项目 → 共享工作区（成员共用项目根目录）
@@ -307,13 +420,30 @@ class GroupManager:
             is_lead = wid == lead_id
             phase = ("plan" if (is_lead and plan_phase and not steps)
                      else "summary" if (is_lead and plan_phase) else "work")
-            # 组长派过活的组员不再跑接力轮（v0.10.33：避免"派了一次 + 接力又一次"）
+            # 组长派过活的组员不再跑接力轮；这一步的真实状态由收尾前的 settle 填
+            # （v0.10.36：以前直接记 `ok=True` + "已派活执行"，等于**假装完成**）
             if phase == "work" and wid in dispatched:
                 steps.append({"window_id": wid, "window_name": w.name, "is_lead": False,
-                              "phase": "skipped", "ok": True,
-                              "skipped": "已由组长派活执行",
-                              "summary": "（该成员已由组长派活执行，接力轮跳过）"})
+                              "phase": "delegated", "ok": None, "delegated": True,
+                              "summary": "（已由组长派活；收尾前会等齐、被限速则由系统重试）"})
                 continue
+            #: 收尾轮之前：先把派出去的活**等齐**，被限速的这一步由系统重试
+            if phase == "summary" and (delegated or pending_runs):
+                settle = await self._settle_delegated(delegated, pending_runs)
+                for s in steps:
+                    if s.get("phase") == "delegated":
+                        d = next((x for x in delegated if x["window_id"] == s["window_id"]), None)
+                        if d is not None:
+                            s["status"] = d.get("status", "")
+                            s["ok"] = d.get("status") == "ok"
+                            s["attempts"] = int(d.get("attempts", 0))
+                            s["summary"] = (d.get("summary") or "")[:1000]
+                delegated_note = settle["note"]
+                logger.info("群组 %s 派活结算：%s", g.id, settle["stats"])
+                self.db.audit("system", "group:delegate_settle",
+                              f"{g.id} {settle['stats']}")
+            else:
+                delegated_note = ""
             rt = self.windows._rt(wid)
             # v0.10.34（owner："你在哪跑呢，我咋没看见"）：群组运行时**没有任何地方显示
             # "运行中"** —— 工位状态一直是 idle、群组页只有点按钮的人能看到转圈，
@@ -342,7 +472,9 @@ class GroupManager:
             step_prompt = (
                 f"{GROUP_STEP_MARK} · 工位「{w.name}」】\n"
                 f"总任务：{prompt}\n\n"
-                f"{recap}\n---\n\n{duty}"
+                f"{recap}\n---\n"
+                + (f"\n{delegated_note}\n" if delegated_note else "")
+                + f"\n{duty}"
             )
             # 这条编排提示词不该进共享频道（否则被下一个成员读回来 → 自指增长）
             rt.session.channel_mute = {"marker": GROUP_STEP_MARK, "left": 1}
@@ -382,7 +514,12 @@ class GroupManager:
                        "group_name": g.name,
                        "is_lead": is_lead,
                        "group_lead_id": lead_id,
-                       "dispatched_windows": dispatched})
+                       "dispatched_windows": dispatched,
+                       # v0.10.36：派单台账与未决句柄（**同一批 list 对象**贯穿各步），
+                       # 收尾前靠它们 join 与步骤级续跑 —— 少了这两条，工具写进的是
+                       # 它自己的临时 list，群组运行永远等不到（装配漏洞的老毛病）
+                       "delegated": delegated,
+                       "pending_runs": pending_runs})
             try:
                 # v0.10.22：单成员**挂钟预算**。限速退避是"无限耐心"的（heavy 档会
                 # 追加重试预算，实测单次退避就 600s），一次群组运行因此可能挂几分钟

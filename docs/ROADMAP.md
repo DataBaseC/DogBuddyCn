@@ -1397,3 +1397,42 @@ owner 连问两句："**你在哪跑呢，我咋没看见**"、"我能看到项�
 （组长/组员 + 群组名），"工位 N 个（直接 x · 群组 y）"；迭代弹窗的"参与工位"也算上群组成员。
 
 基线：672 passed / 4 skipped；`audit_ui --strict` exit 0。
+
+---
+
+## 29. 第二十二轮：组长派活的两处**逻辑漏洞**（2026-10-23，`0.10.36`）
+
+逻辑复核（方案文档《附：逻辑复核 v2》W6）发现 `0.10.33` 的派活**会产出错误结论**：
+
+| 漏洞 | 事实 | 后果 |
+|---|---|---|
+| ① 汇总提前 | `MemberDispatchTool` 无论 `wait` 真假都把自己记进 `dispatched_windows`，接力轮据此**跳过**该成员；随后收尾轮立刻开跑 | `wait=false` 时组员**还没开工**，组长已经"汇总"——结论必然错；且步骤记成 `ok=True` 等于**假装完成** |
+| ② 缺失无人补 | 组员被限速暂停时，coordinated 派单**不计 manual**（防重复执行是我特意加的）→ 没有调度器、也没有自动续跑 | 组员那部分活**永久缺失**，而 run 仍显示正常结束 |
+
+修法（都不问 LLM，纯系统行为）：
+
+1. `WindowManager.dispatch_pending()`：`wait=false` 也返回**可 await 的句柄**（"不阻塞这一轮"≠"等不到"）；
+2. 派单台账 `delegated[]` + 未决句柄 `pending_runs[]` 由 GroupManager 持有并塞进 `ctx.extra`（**同一批 list 对象**贯穿各步 —— 少了这一步工具写的是自己的临时 list，实测就是这么漏的）；
+3. 收尾轮之前 `_settle_delegated()`：先 `join` 未决句柄（`shield`，等超时**不取消**组员的活），
+   再对 `rate_limited` 的条目**按退避重试这一步**（60→120→240s，最多 3 次，总预算 900s）；
+4. 汇总轮拿到**权威状态**提示词（"完成/限速重试 N 次/超时/失败"），而不是凭频道碎片猜；
+5. 步骤记录：`phase="delegated"`，`ok` 由 settle 后的真实状态决定（等不齐 = `timeout`，绝不假装完成）。
+
+## 30. 第二十三轮：员工调工具**要刷新才显示**（2026-10-23，`0.10.36`）
+
+owner 实测："**员工调用工具的时候，并没显示，得刷新一下才行**。"
+
+根因：`WindowSession.append()` **只写库、不广播**；后端唯一的实时通道是
+`window.stream`（助手**文本增量**）。于是 `tool`（工具调用）与 `system`
+（`[限速暂停]`/`[越权拦截]`…）消息**从来不推**，界面只能刷新后重拉 `/messages`。
+
+修法：
+
+* `WindowSession` 增 `on_message` 回调（`append()` 末尾触发，异常一律吞掉——推送绝不能写坏会话）；
+* `WindowManager._boot` 与 `AdminService.session_for` 把它接到事件总线：新事件
+  **`window.message`**，载荷与 `/messages` 的 DTO **同形状**（`id/role/content/created_at/
+  tokens/tool_name/tool_call_id/group_id/meta`），前端可以**直接塞进列表**；
+* 前端 `views-main.js` 订阅 `window.message` → 只在"当前打开的窗口"上插列表（按 id 去重），
+  保持"用户在看历史时不打断滚动"，助手正文落库时收掉半截流式气泡。
+
+基线：680 passed / 4 skipped；`audit_ui --strict` exit 0。

@@ -6,10 +6,13 @@ Pure domain object — repos are injected (ports); no SQL/HTTP here.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..ports import Message, Todo, Window
 from .context import ContextBuilder
+
+logger = logging.getLogger(__name__)
 
 #: 兜底估算：中英混排大约 3 字符 ≈ 1 token。只在**本进程还没拿到真实 usage** 时用
 #: （例如刚重启、还没跑过任何一轮），真实值一到就立刻被替换。
@@ -27,11 +30,17 @@ def _cache_int(*values: Any) -> int | None:
 
 
 class WindowSession:
-    def __init__(self, window: Window, message_repo: Any, todo_repo: Any, compaction_repo: Any):
+    def __init__(self, window: Window, message_repo: Any, todo_repo: Any, compaction_repo: Any,
+                 on_message: Any = None):
         self.window = window
         self.messages = message_repo
         self.todos = todo_repo
         self.compactions = compaction_repo
+        #: v0.10.36：每落一条消息回调一次（控制台实时推送用）。
+        #: owner 实测："员工调用工具的时候，并没显示，得刷新一下才行" ——
+        #: 后端以前只推 `window.stream`（助手**文本增量**），tool/system 消息
+        #: 从来不推，界面只能靠刷新重拉 `/messages`。
+        self.on_message = on_message
         #: 最近一次 LLM 调用回报的 **prompt_tokens**（= 当前上下文占用的真实值）。
         #: 注意它与 `token_usage()` 是**两种语义**：后者是本会话的累计花费（账本），
         #: 前者是"现在上下文有多满"（压缩判据）。曾经两者共用 SUM(tokens)，
@@ -68,8 +77,19 @@ class WindowSession:
                 and str(mute.get("marker") or "") in str(content or "")):
             group_id = ""
             mute["left"] = int(mute.get("left", 0)) - 1
-        return self.messages.add_message(self.window.id, role, content, tokens, meta,
-                                         group_id=group_id)
+        m = self.messages.add_message(self.window.id, role, content, tokens, meta,
+                                      group_id=group_id)
+        self._notify(m)
+        return m
+
+    def _notify(self, msg: Message) -> None:
+        """把刚落的这条消息交给调用方（控制台实时推送）。**绝不能影响正常流程**。"""
+        if not self.on_message:
+            return
+        try:
+            self.on_message(msg)
+        except Exception:  # noqa: BLE001 — 推送失败不能把会话写坏
+            logger.warning("session on_message hook failed", exc_info=True)
 
     def recent(self, limit: int = 200) -> list[Message]:
         return self.messages.list_messages(self.window.id, limit)

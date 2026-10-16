@@ -136,9 +136,34 @@ class AdminService:
         if sess is None:
             window = Window(id=f"admin:{key}", name=f"admin:{key}", role="admin",
                             workspace_path="", model="", mode="AUTO", status="idle")
-            sess = WindowSession(window, self.db, self.db, self.db)
+            # v0.10.36：管理员会话也按消息推送（工具调用/系统提示不再"要刷新才出现"）
+            sess = WindowSession(window, self.db, self.db, self.db,
+                                 on_message=lambda m, _id=window.id: self._emit_message(_id, m))
             self._sessions[key] = sess
         return sess
+
+    def _emit_message(self, window_id: str, m: Any) -> None:
+        """管理员的每条新消息推给控制台（形状与工位一致，前端同一套处理）。"""
+        if not self.bus:
+            return
+        meta = dict(getattr(m, "meta", None) or {})
+        try:
+            self.bus.emit(Event(type="window.message", payload={
+                "window_id": window_id,
+                "message": {
+                    "id": getattr(m, "id", 0),
+                    "role": getattr(m, "role", "") or "",
+                    "content": getattr(m, "content", "") or "",
+                    "created_at": getattr(m, "created_at", "") or "",
+                    "tokens": int(getattr(m, "tokens", 0) or 0),
+                    "tool_name": meta.get("tool_name", ""),
+                    "tool_call_id": meta.get("tool_call_id", ""),
+                    "group_id": getattr(m, "group_id", "") or "",
+                    "meta": meta,
+                },
+            }))
+        except Exception:  # noqa: BLE001 — 推送失败不能影响对话
+            logger.debug("admin message emit failed", exc_info=True)
 
     def active_admins(self) -> list[str]:
         """（兼容旧接口）当前已加载的会话键。v2 只有一个管理员，这里是"已打开的对话"。"""

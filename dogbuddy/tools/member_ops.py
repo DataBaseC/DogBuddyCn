@@ -83,14 +83,32 @@ class MemberDispatchTool:
             return ToolResult.failure("派活能力不可用：调度器未注入（请管理员检查装配）。")
         wait = bool(args.get("wait", True))
         timeout = args.get("timeout")
-        #: 让调用方（GroupManager）知道"这个成员已经被派过活"，避免接力轮重复跑
+        #: 让调用方（GroupManager）知道这次派单：① 接力轮不再重复跑 ② 收尾前要 join
         dispatched = extra.setdefault("dispatched_windows", [])
         if w.id not in dispatched:
             dispatched.append(w.id)
+        #: 派单台账（**共享同一个 list**）：收尾轮开始前靠它 join + 步骤级续跑。
+        #: v0.10.36：以前只记一个 id，`wait=false` 时收尾汇总会在组员还没开工时跑，
+        #: 组员被限速时也没人重试这一步（那两个洞是 owner 那个前端项目的真风险）。
+        entry = {"window_id": w.id, "window_name": w.name, "task": task,
+                 "wait": wait, "status": "queued", "attempts": 0, "summary": "",
+                 "timeout": float(timeout) if timeout else None}
+        extra.setdefault("delegated", []).append(entry)
         if not wait:
-            self.coordinator.dispatch(w.id, task)
+            # 不阻塞组长这一轮，但留下可等待的句柄（收尾前 join）
+            pending = extra.setdefault("pending_runs", [])
+            fut = None
+            if hasattr(self.coordinator, "dispatch_pending"):
+                try:
+                    fut = self.coordinator.dispatch_pending(w.id, task)
+                except Exception as e:  # noqa: BLE001
+                    return ToolResult.failure(f"派活给 {w.name} 失败：{e}")
+            else:  # 兼容：只能 fire-and-forget（收尾时无法 join，会在 run 里记为未知）
+                self.coordinator.dispatch(w.id, task)
+            if fut is not None:
+                pending.append((w.id, fut))
             return ToolResult.success(
-                f"已把任务排给 {w.name}（不等结果）。稍后用 group_channel_post 看它的产出。",
+                f"已把任务排给 {w.name}（不等结果，但**收尾前系统会等它干完**）。",
                 window_id=w.id, waited=False)
         try:
             outcome = await self.coordinator.dispatch_and_wait(
@@ -99,9 +117,13 @@ class MemberDispatchTool:
         except TypeError:  # 兼容没有 coordinated/timeout 参数的实现
             outcome = await self.coordinator.dispatch_and_wait(w.id, task)
         except Exception as e:  # noqa: BLE001 — 派活失败要如实回报，不能把组长带崩
+            entry["status"] = "failed"
+            entry["summary"] = str(e)
             return ToolResult.failure(f"派活给 {w.name} 失败：{e}")
         status = str(getattr(outcome, "status", "") or "")
         summary = str(getattr(outcome, "summary", "") or "")
+        entry["status"] = status or "unknown"
+        entry["summary"] = summary
         note = {
             "ok": "完成",
             "rate_limited": "被限速暂停（非失败，稍后可再派）",

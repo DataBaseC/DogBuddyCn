@@ -558,6 +558,47 @@
     streamKnown: {},
 
     /**
+     * SSE `window.message`：一条新消息已落库（工具调用 / 系统提示 / 助手正文）。
+     *
+     * v0.10.36（owner 实测："员工调用工具的时候，并没显示，得刷新一下才行"）：
+     * 后端以前只推 `window.stream`（助手**文本增量**），`tool` 与 `system` 消息
+     * 从来不推 —— 工具卡片、`[限速暂停]`/`[越权拦截]` 这类提示都只能刷新后从
+     * `/messages` 重拉。现在按消息推送，前端直接插进列表。
+     * @param {Object} payload {window_id, message}
+     * @returns {void}
+     */
+    onMessage: function (payload) {
+      payload = payload || {};
+      var wid = String(payload.window_id || '');
+      var msg = payload.message;
+      if (!wid || !msg) return;
+      /* 只有当前打开的窗口才动列表；其它窗口留给切换时的整表刷新（避免串屏） */
+      if (wid !== String(Windows.selectedId)) return;
+      var id = msg.id;
+      if (id !== undefined && id !== null) {
+        var dup = Windows.messages.some(function (m) { return String(m.id) === String(id); });
+        if (dup) return;
+      }
+      Windows.messages.push(msg);
+      /* 助手正文若已用流式气泡显示，落库后要收掉半截气泡 */
+      if (String(msg.role) === 'assistant') {
+        var st = Windows.streams[wid];
+        if (st && st.text && String(msg.content || '').indexOf(st.text) === 0) {
+          delete Windows.streams[wid];
+        }
+      }
+      var chat = document.getElementById('win-chat');
+      var keep = chat ? (chat.scrollHeight - chat.scrollTop - chat.clientHeight) < 80 : true;
+      if (chat) {
+        chat.innerHTML = Windows.renderMessages();
+        Windows.renderStream();
+        if (keep) chat.scrollTop = chat.scrollHeight;
+      } else {
+        Windows.renderChatOnly();
+      }
+    },
+
+    /**
      * SSE window.stream：把 delta 拼进对应窗口的缓冲并刷新「正在输入…」气泡。
      * SSE 不可用时直接忽略（退回原轮询模式，不留半截气泡）。
      * @param {Object} payload {window_id, delta}
@@ -1174,6 +1215,8 @@
   if (global.SSE) {
     global.SSE.on('window.status', function (p) { Windows.onWindowStatus(p); });
     global.SSE.on('window.stream', function (p) { Windows.onStream(p); });
+    /* v0.10.36：新消息（含工具调用/系统提示）实时插进会话流，不必刷新 */
+    global.SSE.on('window.message', function (p) { Windows.onMessage(p); });
     /* v0.10.15：一次运行结束的终态（有错误码）—— 收到就收起"正在输入…" */
     global.SSE.on('window.run_finished', function (p) { Windows.onRunFinished(p); });
     global.SSE.on('sse.down', function () { Windows.onSseDown(); });

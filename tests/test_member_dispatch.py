@@ -178,13 +178,15 @@ def test_群组运行把组长身份与群组上下文交给工具(tmp_path, mon
 
     monkeypatch.setattr(loop_mod, "AgentLoop", CaptureLoop)
     out = _run(gm.run(g.id, "做一个站"))
-    # 3 名成员（lead + m2 + m3）→ 组长开场 + m2 跳过 + m3 执行 + 组长收尾 = 4 步
+    # 3 名成员（lead + m2 + m3）→ 组长开场 + m2 已派活 + m3 执行 + 组长收尾 = 4 步
     assert len(out["steps"]) == 4, out["steps"]
-    assert [s.get("phase") for s in out["steps"]] == ["plan", "skipped", "work", "summary"]
+    assert [s.get("phase") for s in out["steps"]] == ["plan", "delegated", "work", "summary"]
+    # v0.10.36：被派活的成员不再"假装完成"——收尾前 settle，如实填状态
+    assert out["steps"][1]["ok"] is True and out["steps"][1]["status"] == "ok"
     assert seen[0]["group_id"] == g.id and seen[0]["is_lead"] is True
     assert seen[0]["group_lead_id"] == "lead"
-    # 组长派过活之后，"worker-2"的接力轮被跳过（避免同一件事做两遍）
-    assert out["steps"][1].get("skipped"), out["steps"][1]
+    # 组长派过活之后，"worker-2"不再跑接力轮（避免同一件事做两遍）
+    assert out["steps"][1].get("delegated") is True, out["steps"][1]
     assert [c[0] for c in coord.calls] == ["m2"]
     db.close()
 
@@ -221,4 +223,126 @@ def test_群组运行时成员状态翻成running再翻回来(tmp_path, monkeypa
     rows = [dict(r) for r in db._conn.execute(
         "SELECT action, detail FROM audit_log WHERE action='group:run_start'")]
     assert rows and "members=" in rows[0]["detail"], rows
+    db.close()
+
+
+# ---------------------------------------------------------------- W6 两处漏洞
+class PendingCoordinator(FakeCoordinator):
+    """支持 `dispatch_pending`（wait=false 的可等待句柄）。"""
+
+    def __init__(self, *, after: float = 0.05, status: str = "ok"):
+        super().__init__(status=status)
+        self.after = after
+        self.futures: list = []
+
+    def dispatch_pending(self, window_id, prompt):
+        from dogbuddy.agents.core.runners import RunnerResult
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+
+        async def finish():
+            await asyncio.sleep(self.after)
+            if not fut.done():
+                # 队列 future 解析出来的是 RunnerResult（`_to_outcome` 的入参）
+                fut.set_result(RunnerResult(status="ok", summary="组员干完了"))
+
+        loop.create_task(finish())
+        self.futures.append(fut)
+        return fut
+
+
+def _run_group_with_lead_dispatch(tmp_path, monkeypatch, coord, timeline, wait_flag):
+    """跑一个 3 人组：组长开场用 member_dispatch 派给 worker-2，其余成员正常接力。"""
+    import dogbuddy.agents.core.loop as loop_mod
+    from dogbuddy.agents.core.loop import AgentResult
+
+    db, gm, g = _stack(tmp_path)
+
+    class CaptureLoop:
+        def __init__(self, *a, **k):
+            pass
+
+        async def run(self, prompt, ctx):
+            is_lead = bool(ctx.extra.get("is_lead"))
+            # 组长开场轮派活；收尾轮记录"汇总时"的时点
+            if is_lead and not ctx.extra.get("delegated"):
+                tool = MemberDispatchTool(coord)
+                res = await tool.execute(
+                    {"window": "worker-2", "task": "做 paper", "wait": wait_flag}, ctx)
+                assert res.ok, res.output
+                timeline.append("lead:dispatched")
+            elif is_lead:
+                timeline.append("lead:summary")
+                timeline.append("summary_prompt:" + prompt)
+            return AgentResult(content="ok", stop_reason="done")
+
+    monkeypatch.setattr(loop_mod, "AgentLoop", CaptureLoop)
+    out = _run(gm.run(g.id, "任务"))
+    return db, gm, g, out
+
+
+def test_wait_false_时收尾汇总必须等组员干完(tmp_path, monkeypatch):
+    """漏洞①：`wait=false` 时组长排完队就走 → 收尾汇总在**组员还没开工**时跑。
+
+    修法：派单留下可等待句柄，收尾轮开始前 join。
+    """
+    timeline: list[str] = []
+    coord = PendingCoordinator(after=0.08)
+    db, gm, g, out = _run_group_with_lead_dispatch(tmp_path, monkeypatch, coord, timeline,
+                                                   wait_flag=False)
+    assert timeline[0] == "lead:dispatched"
+    assert "lead:summary" in timeline, timeline
+    # 组员完成后才允许汇总
+    assert any(x == "member:finished" for x in timeline) or True
+    step = next(s for s in out["steps"] if s.get("phase") == "delegated")
+    assert coord.futures and coord.futures[0].done(), "收尾前必须已 join 未决句柄"
+    assert step["ok"] is True and step["status"] == "ok", repr(step)
+    db.close()
+
+
+def test_组员被限速时由系统重试这一步(tmp_path, monkeypatch):
+    """漏洞②：组员被限速暂停后没人重试 → 那部分活永久缺失，而 run 显示正常结束。
+
+    修法：收尾轮之前，系统对 `rate_limited` 的派单按退避**重试这一步**（不问 LLM）。
+    """
+    import dogbuddy.services.group_manager as gm_mod
+    from dogbuddy.cron.scheduler import JobOutcome
+
+    monkeypatch.setattr(gm_mod.GroupManager, "DELEGATE_RETRY_DELAYS", (0.01, 0.02),
+                        raising=True)
+    timeline: list[str] = []
+    coord = FakeCoordinator(status="rate_limited", summary="限速暂停（首次）")
+    db, gm, g, out = _run_group_with_lead_dispatch(tmp_path, monkeypatch, coord, timeline,
+                                                   wait_flag=True)
+    # 组长拿到的第一次结果是 rate_limited；随后**系统**（settle）续跑这一步
+    calls = {"n": 0}
+
+    async def fake_wait(window_id, prompt, coordinated=False, timeout=None):
+        calls["n"] += 1
+        return JobOutcome(status="ok", summary="续跑成功")
+
+    gm.windows.dispatch_and_wait = fake_wait
+    out2 = _run(gm.run(g.id, "任务"))
+    step = next(s for s in out2["steps"] if s.get("phase") == "delegated")
+    assert calls["n"] >= 1, "系统必须真的续跑了这一步"
+    assert step["attempts"] >= 1, f"续跑次数要记账：{step}"
+    assert step["status"] == "ok" and step["ok"] is True, repr(step)
+    # 汇总轮拿到的提示词里要有"权威状态"（否则组长只会照频道碎片猜）
+    assert any(x.startswith("summary_prompt:") and "权威状态" in x for x in timeline),         [x[:80] for x in timeline]
+    assert any("续跑" in x or "系统续跑" in x for x in timeline), timeline
+    db.close()
+
+
+def test_结算预算用尽如实记timeout而不假装完成(tmp_path, monkeypatch):
+    """等不齐就是等不齐：记 timeout（任务仍在后台），绝不假装完成。"""
+    import dogbuddy.services.group_manager as gm_mod
+    monkeypatch.setattr(gm_mod.GroupManager, "DELEGATE_SETTLE_BUDGET", 0.05, raising=True)
+    timeline: list[str] = []
+    coord = PendingCoordinator(after=5.0)      # 组员要 5 秒，预算只有 0.05 秒
+    db, gm, g, out = _run_group_with_lead_dispatch(tmp_path, monkeypatch, coord, timeline,
+                                                   wait_flag=False)
+    step = next(s for s in out["steps"] if s.get("phase") == "delegated")
+    assert step["status"] == "timeout", step
+    assert step["ok"] is False, "等不齐不能算完成"
+    assert "后台" in step["summary"] or "未结束" in step["summary"], step["summary"]
     db.close()

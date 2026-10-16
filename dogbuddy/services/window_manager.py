@@ -177,7 +177,10 @@ class WindowManager:
         return self.run_job_now(job_id)
 
     def _boot(self, w: Window) -> WindowRuntime:
-        session = WindowSession(w, self.db, self.db, self.db)
+        # v0.10.36：每条落库消息都推给控制台（含 tool/system），
+        # 否则"员工调用工具"只有刷新才看得见（owner 实测）。
+        session = WindowSession(w, self.db, self.db, self.db,
+                                on_message=lambda m: self._emit_message(w.id, m))
         queue = TaskQueue(w.id, on_status=lambda s: self._set_status(w.id, s))
         registry = build_worker_registry(w.role, gate=self.gate, audit=self.db,
                                          jobs=self.job_store, run_job_now=self._run_job_now,
@@ -217,6 +220,34 @@ class WindowManager:
         self.db.update_window(window_id, status=status)
         if self.bus:
             self.bus.emit(Event(type=WINDOW_STATUS, payload={"window_id": window_id, "status": status}))
+
+    def _emit_message(self, window_id: str, m: Any) -> None:
+        """v0.10.36：把一条新消息推给控制台（`window.message`）。
+
+        为什么需要：后端以前只推 `window.stream`（助手**文本增量**），
+        `tool`（工具调用）与 `system`（`[限速暂停]`/`[越权拦截]` 等）消息**从来不推**，
+        于是界面必须刷新才能看到"员工在调什么工具"。
+        载荷与 `recent_messages()` 的 DTO 保持同一形状 —— 前端可以直接塞进列表。
+        """
+        if not self.bus:
+            return
+        if getattr(m, "_pushed", False):
+            return
+        meta = dict(getattr(m, "meta", None) or {})
+        self.bus.emit(Event(type="window.message", payload={
+            "window_id": window_id,
+            "message": {
+                "id": getattr(m, "id", 0),
+                "role": getattr(m, "role", "") or "",
+                "content": getattr(m, "content", "") or "",
+                "created_at": getattr(m, "created_at", "") or "",
+                "tokens": int(getattr(m, "tokens", 0) or 0),
+                "tool_name": meta.get("tool_name", ""),
+                "tool_call_id": meta.get("tool_call_id", ""),
+                "group_id": getattr(m, "group_id", "") or "",
+                "meta": meta,
+            },
+        }))
 
     def _llm(self, profile: str | None = None, model: str | None = None,
              overrides: dict | None = None) -> Any:
@@ -489,15 +520,37 @@ class WindowManager:
         self.db.audit("system", "window:dispatch",
                       f"{rt.window.id} job={job_id} kind={kind} prompt={prompt[:80]}")
 
+    def dispatch_pending(self, window_id: str, prompt: str, *,
+                         coordinated: bool = True, kind: str = "prompt",
+                         llm_profile: str = "") -> "asyncio.Future":
+        """派单但**不等**：返回一个可 await 的 future（v0.10.36）。
+
+        为什么需要它：组长用 `member_dispatch(wait=false)` 把活排给组员时，如果只有
+        "扔进队列" 没有句柄，群组运行就**没法等它干完** —— 收尾汇总会在组员还没开工时
+        就跑（owner 那个前端项目差点因此拿到一份"提前的结论"）。
+        现在"不等"只是"不阻塞组长这一轮"，收尾前照样能 join。
+        """
+        rt = self._rt(window_id)
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        meta: dict[str, Any] = {"future": future, "run_owned_by_caller": True}
+        if coordinated:
+            meta["coordinated"] = True
+        rt.queue.submit(TaskItem(prompt=prompt, job_id=None, urgent=False,
+                                 kind=kind or "prompt", llm_profile=llm_profile or "",
+                                 meta=meta))
+        self.db.audit("system", "window:dispatch",
+                      f"{rt.window.id} job=None kind={kind} (pending) prompt={prompt[:80]}")
+        return future
+
     async def dispatch_and_wait(self, window_id: str, prompt: str,
                                 job_id: str | None = None, kind: str = "prompt",
                                 llm_profile: str = "", coordinated: bool = False,
                                 timeout: float | None = None) -> JobOutcome:
-        """Cron path: inject into the persistent session and await the run result.
+        """Cron / 组长派活路径：投进队列并等这一轮结束。
 
-        `coordinated=True`（v0.10.33）：这次派单是**组长派给组员**的（子代理），
-        `window.run_finished` 里 `manual=False` —— 免得"限速自动续跑"与组长的等待
-        变成两次执行；`timeout` 可覆盖默认的单轮等待上限。
+        `coordinated=True`（v0.10.33）：这是**组长派给组员**的活，`window.run_finished`
+        里 `manual=False` —— 免得"限速自动续跑"与组长的等待变成两次执行；
+        `timeout` 可覆盖默认的单轮等待上限。
         """
         rt = self._rt(window_id)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
@@ -506,8 +559,8 @@ class WindowManager:
             meta["coordinated"] = True
         rt.queue.submit(TaskItem(prompt=prompt, job_id=job_id, urgent=False,
                                  kind=kind or "prompt", llm_profile=llm_profile or "",
-                                 # 调用方（CronScheduler）已经开好 job_runs 行并负责收尾，
-                                 # 运行时不要重复开行（见 `_execute` 的同一处判断）
+                                 # 调用方（CronScheduler / GroupManager）已经开好 job_runs 行
+                                 # 并负责收尾，运行时不要重复开行（见 `_execute` 的同一处判断）
                                  meta=meta))
         timeout = float(timeout) if timeout else self._wait_timeout(window_id)
         try:
