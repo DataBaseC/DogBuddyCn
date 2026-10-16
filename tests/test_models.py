@@ -301,3 +301,26 @@ def test_切换后_config_落盘可回读(tmp_path, monkeypatch):
     reloaded = load_config(cfg_file)
     assert reloaded.llm.model == "persisted-model"
     assert reloaded.llm.base_url == "http://new/v1"
+
+
+def test_路由_新增同名同端点返回409且不覆盖(tmp_path, monkeypatch):
+    """owner 实测："创建新模型还是会覆盖同名模型"（修复前是静默 200 + 覆盖）。"""
+    app, client = _client(tmp_path, monkeypatch)
+    with client:
+        first = client.post("/api/models", json={
+            "model": "dup-1", "base_url": "http://ep/v1", "note": "原始备注"}).json()
+        assert client.post("/api/models", json={
+            "model": "dup-1", "base_url": "http://ep/v1",
+            "note": "新备注"}).status_code == 409
+        rows = client.get("/api/models").json()["models"]
+        same = [m for m in rows if m["model"] == "dup-1"]
+        assert len(same) == 1, "同名同端点不该多出一条，也不该被覆盖"
+        assert same[0]["note"] == "原始备注"
+        # 同名但换端点 → 另存一条（两条共存）
+        second = client.post("/api/models", json={
+            "model": "dup-1", "base_url": "http://other-host/v1", "note": "另一家"})
+        assert second.status_code == 200
+        rows = client.get("/api/models").json()["models"]
+        dup = [m for m in rows if m["model"] == "dup-1"]
+        assert len(dup) == 2, [m["id"] for m in dup]
+        assert {m["note"] for m in dup} == {"原始备注", "另一家"}

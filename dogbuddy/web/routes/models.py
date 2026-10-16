@@ -80,9 +80,17 @@ def router(svc, auth_deps) -> APIRouter:
 
     @r.post("/models", dependencies=auth_deps)
     def create_model(body: ModelIn) -> dict:
+        """新增模型条目。**同名同端点已存在 → 409，不覆盖**（要改走 PATCH）。
+
+        owner 实测："创建新模型还是会覆盖同名模型" —— 旧实现走 upsert 的更新语义，
+        第二条把第一条的备注/密钥悄悄盖掉，返回 200 且没有任何提示。
+        """
         m = _m()
+        from ...services.model_service import ModelExistsError
         try:
-            saved = m.upsert(**body.model_dump(exclude_none=True))
+            saved = m.create(**body.model_dump(exclude_none=True))
+        except ModelExistsError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"model": saved, "models": m.catalog()}

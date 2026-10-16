@@ -4910,6 +4910,15 @@
 
   var state = { models: [], current: {}, summary: {}, options: {}, keyword: '', onlyEnabled: false, bound: false };
 
+  /* v0.10.23：与后端 `model_service.endpoint_of().split('/')[0]` 同口径的 host[:port]。
+     用来在**提交前**判断"这条会不会撞上同名同端点的既有条目"（撞上会被服务端 409 拒绝）。 */
+  function endpointHostOf(url) {
+    var s = String(url || '').trim();
+    if (!s) return '';
+    var m = s.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/]*)/);
+    return (m ? m[1] : s.split('/')[0]).toLowerCase();
+  }
+
   /* ---------------- 渲染 ---------------- */
   function curLine() {
     var c = state.current || {};
@@ -5240,6 +5249,22 @@
             var typed = body.querySelector('#mdl-f-key').value.trim();
             if (typed) payload.api_key = typed;
             if (!payload.model) { U.toast('warn', '模型名不能为空'); return false; }
+            /* v0.10.23：新增前先说清楚会不会撞上同名条目 —— 服务端现在**拒绝**
+               覆盖同名同端点（409），同名不同端点会自动另存一条。这里把话说在前面，
+               免得用户提交后才发现"怎么又多了一条/怎么没保存"。 */
+            if (isNew) {
+              var same = (state.models || []).filter(function (x) {
+                return x.model === payload.model;
+              });
+              var sameEp = same.filter(function (x) {
+                return (x.endpoint_host || '') === endpointHostOf(payload.base_url);
+              });
+              if (sameEp.length) {
+                U.toast('error', '已有同名同端点的条目「' + sameEp[0].id +
+                  '」。新增不会覆盖它：请点那一行的「备注」编辑，或改模型名/换地址。');
+                return false;
+              }
+            }
             var wantActivate = isNew && body.querySelector('#mdl-f-activate') &&
               body.querySelector('#mdl-f-activate').checked;
             var p = isNew ? apiModels().create(payload) : apiModels().update(m.id, payload);

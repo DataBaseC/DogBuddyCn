@@ -78,6 +78,10 @@ def make_model_id(provider: str, model: str) -> str:
     return safe
 
 
+class ModelExistsError(ValueError):
+    """新增时撞上同名同端点的既有条目 —— **不覆盖**，报错让人决定。"""
+
+
 def _safe_id(raw: str) -> str:
     """把任意串收敛成路径安全的 id（id 会出现在 `PATCH /api/models/{id}` 里）。"""
     return "".join(ch if ch.isalnum() or ch in "-_.:@" else "_" for ch in raw)[:110]
@@ -316,6 +320,34 @@ class ModelService:
                       + (f" | {conflict}" if conflict else ""))
         return {**saved, **self._public(saved),
                 "endpoint_conflict": bool(conflict), "conflict_detail": conflict}
+
+    def create(self, **fields: Any) -> dict[str, Any]:
+        """**新增**：绝不静默覆盖同名条目（owner 实测两次的真问题）。
+
+        0.10.21 只解决了"同名但**不同**端点"（另存 `...@host`）。**同名同端点**仍然走
+        `upsert` 的更新语义 → 第二条把第一条的备注/密钥/参数悄悄盖掉（复现：HTTP 200、
+        条数不变、`note` 变成新值、界面无任何提示）。
+
+        现在：同名同端点 ⇒ 抛 `ModelExistsError`（路由给 409 + 人话），
+        要改那条请走 `PATCH /models/{id}`（页面上就是「备注」按钮），新增只负责新增。
+        """
+        model = str(fields.get("model") or "").strip()
+        provider = str(fields.get("provider") or "openai_compat").strip()
+        if not model:
+            raise ValueError("model 不能为空")
+        mid, conflict = self._resolve_id(provider, model, str(fields.get("base_url") or ""))
+        if conflict:
+            # 同名、另一个端点 → **另存一条**（两条共存），不是覆盖
+            return self.upsert(**fields)
+        existing = self.db.get_model(mid)
+        if existing is not None:
+            raise ModelExistsError(
+                f"目录里已经有同名同端点的条目「{mid}」"
+                f"（端点 {endpoint_of(existing.get('base_url') or '') or '—'}，"
+                f"备注：{(existing.get('note') or '（空）')[:40]}）。"
+                f"新增不会覆盖它：要改配置请点那一行的「备注」编辑；"
+                f"要另存一条，请改模型名或把 API 地址换成另一个端点。")
+        return self.upsert(**fields)
 
     def update(self, model_id: str, **fields: Any) -> dict[str, Any]:
         if self.db.get_model(model_id) is None:
