@@ -161,3 +161,57 @@ def test_管理员才拿得到_server_exec_员工工具箱里不再白给():
     assert "server_exec" in ADMIN_TOOLS, "只有管理员能过 system 作用域，必须给它"
     assert "server_exec" not in WORKER_PROGRAMMER_TOOLS, "员工挂着必然是死工具"
     assert "server_exec" not in SUPERVISOR_TOOLS, "主管是 project 作用域，同样过不了"
+
+
+def test_管理员上下文带上了面板客户端_server_exec_才可能成功(tmp_path, monkeypatch):
+    """v0.10.30（owner 实测）：`server_exec` 靠 `ctx.panel` 执行宿主机命令。
+
+    v0.10.29 把工具挂给了管理员，但**管理员的 ToolContext 里没有 panel** ——
+    工具一调就报 `panel client not configured`（管理员原话："工具存在，但
+    AegisServerPanel 客户端未配置"）。这里钉住装配：`AdminService(panel=…)`
+    必须真的把客户端传进 ToolContext。
+    """
+    import asyncio
+
+    from dogbuddy.services import admin_service as mod
+    from dogbuddy.services.admin_service import AdminService
+
+    captured: dict = {}
+
+    class FakeTC:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    class Stop(Exception):
+        pass
+
+    class FakeLoop:
+        def __init__(self, **kw):
+            pass
+
+        async def run(self, *a, **k):
+            raise Stop()
+
+    class FakePanel:
+        async def exec(self, command, timeout=60):   # noqa: A003
+            return {"stdout": command, "stderr": "", "returncode": 0}
+
+    monkeypatch_targets = {"ToolContext": FakeTC, "AgentLoop": FakeLoop}
+    originals = {k: getattr(mod, k) for k in monkeypatch_targets}
+    for k, v in monkeypatch_targets.items():
+        setattr(mod, k, v)
+    try:
+        panel = FakePanel()
+        svc = AdminService(db=None, llm_factory=lambda: None, windows=None, jobs=None,
+                           sessions=None, workspaces=None, memory=None, config=None,
+                           panel=panel)
+        assert svc.panel is panel
+        try:
+            asyncio.new_event_loop().run_until_complete(svc._run_turn("hi", "default"))
+        except Stop:
+            pass
+    finally:
+        for k, v in originals.items():
+            setattr(mod, k, v)
+    assert captured.get("panel") is panel, "管理员 ToolContext 必须带上面板客户端"
+    assert captured.get("scope") is not None and captured["scope"].is_system

@@ -40,6 +40,11 @@ class AdminService:
         config: Any,           # ConfigService
         models: Any = None,    # ModelService（模型目录；管理员只能选不能造）
         groups: Any = None,    # GroupManager（群组/共享频道，v0.10.20）
+        # v0.10.30：AegisServerPanel 客户端 —— `server_exec` 靠它执行宿主机命令。
+        # 以前这里没有这个参数，于是管理员的 ToolContext 里 `panel=None`，
+        # 工具一调就报 "panel client not configured"（owner 实测：让管理员整理
+        # 线上工作区，它如实回报"工具存在但面板客户端未配置"）。
+        panel: Any = None,
         bus: Any = None,
         max_iterations: int = 20,
         self_status: Callable[[bool], dict] | None = None,
@@ -55,6 +60,7 @@ class AdminService:
         self.config = config
         self.models = models
         self.groups = groups
+        self.panel = panel
         self.bus = bus
         self.max_iterations = max_iterations
         self.self_status = self_status
@@ -318,6 +324,8 @@ class AdminService:
         # （审查报告 P1-5：作用域只在 window_manager 一条路径注入）。
         ctx = ToolContext(window_id=session.window.id, workspace=".", mode="AUTO",
                           actor=f"admin:{sender}", todo_repo=self.db, db=self.db,
+                          # v0.10.30：server_exec 要用它（否则管理员永远拿不到面板能力）
+                          panel=self.panel,
                           llm_factory=self.llm_factory,
                           scope=Scope(level="system", actor=f"admin:{sender}",
                                       source="role:admin"),

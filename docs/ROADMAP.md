@@ -1282,3 +1282,17 @@ owner："先让管理员整理线上工作区。" 结果暴露一个真 bug（�
    管理员提示词明确"**宿主机的事只有你能做**，别派给员工"。
 
 基线：656 passed / 4 skipped；`audit_ui --strict` exit 0。
+
+### 25.1 补丁（`0.10.30`）：管理员路径**没把面板客户端传进 ToolContext**
+
+`0.10.29` 把 `server_exec` 挂给了管理员，但管理员一调就报
+`server_exec unavailable: panel client not configured` —— 它自己在对话里如实回报：
+"工具存在，但 AegisServerPanel 客户端未配置"。
+
+根因：`AdminService._run_turn()` 构造 `ToolContext` 时**只传了 db/scope/llm_factory**，
+漏了 `panel=`；而工位派发路径（`WindowManager` / `GroupManager`）一直是传的。
+于是"工具挂了、依赖没接" —— 与 0.10.29 是同一类装配漏洞的两半。
+
+修法：`AdminService(panel=…)` 新增参数并存入 `self.panel`，`_run_turn` 的
+ToolContext 带上它；`main.py` 用既有的 `self.panel`（`_build_panel()` 建的面板客户端）注入。
+新增回归：装配层面钉住"管理员的 ToolContext 必须带 panel 且 scope 是 system"。

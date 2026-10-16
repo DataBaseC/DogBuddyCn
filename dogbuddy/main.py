@@ -161,6 +161,7 @@ class DogBuddyApp:
             db=self.db, llm_factory=self.llm_factory, windows=self.windows, jobs=self.jobs,
             sessions=self.sessions, workspaces=self.workspaces, memory=self.memory,
             config=self.config_svc, bus=self.bus, models=self.models, groups=self.groups,
+            panel=self.panel,
             self_status=self.update_status, self_update=self.start_self_update)
 
         # T9.3：主管工位装配（只给项目级管理工具，system 级永不下放）；
