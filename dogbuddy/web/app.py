@@ -174,6 +174,17 @@ def create_app(svc: WebServices) -> FastAPI:
     def status() -> dict:
         app_cfg = getattr(svc, "app_config", None)
         default_model = app_cfg.effective_model(None, "") if app_cfg is not None else ""
+        # P0（v0.10.37）："此刻谁在跑什么" —— 前端顶栏读的就是这里。
+        # 注意 `/api/status` 与 `/api/overview` 是**两个**接口，别改错地方（实测踩过一次）。
+        active_runs: list = []
+        run_summary: dict = {}
+        reg = getattr(svc, "runs", None)
+        if reg is not None:
+            try:
+                active_runs = [x.as_dict() for x in reg.active()]
+                run_summary = reg.summary()
+            except Exception:  # noqa: BLE001 — 状态页不能因为台账抖动而 500
+                logger.warning("status: runs lookup failed", exc_info=True)
         return {
             "running": True,
             "rate_limit": svc.rate_limit_status(),
@@ -185,6 +196,8 @@ def create_app(svc: WebServices) -> FastAPI:
             "llm_model": default_model,
             "llm_profile": (app_cfg.active_llm_profile if app_cfg is not None else ""),
             "last_update": (read_result(app_cfg.paths.data) if app_cfg is not None else None),
+            "active_runs": active_runs,
+            "run_summary": run_summary,
         }
 
     @base.get("/api/overview", dependencies=auth_deps)

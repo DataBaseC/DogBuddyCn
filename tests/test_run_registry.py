@@ -217,3 +217,31 @@ def test_Web层必须能拿到运行台账(tmp_path, monkeypatch):
     app = DogBuddyApp(cfg)
     assert app.web_services.runs is app.runs, "Web 服务包必须带上 runs（否则 /api/runs 503）"
     assert app.windows.runs is app.runs and app.groups.runs is app.runs
+
+
+def test_status_接口暴露正在跑的运行(tmp_path, monkeypatch):
+    """前端顶栏读的就是 `/api/status.active_runs`（不是 `/api/overview` —— 实测改错过一次）。"""
+    from fastapi.testclient import TestClient
+    from dogbuddy.main import DogBuddyApp
+    from dogbuddy.config import AppConfig, LLMConfig, PathsConfig, WebConfig
+
+    monkeypatch.setenv("DOGBUDDY_CONFIG", str(tmp_path / "config.yaml"))
+    cfg = AppConfig(llm=LLMConfig(base_url="", api_key="", model=""),
+                    web=WebConfig(auth_token="tok", port=8130),
+                    paths=PathsConfig(data_dir=str(tmp_path / "data"),
+                                      workspaces_dir=str(tmp_path / "ws")))
+    cfg.gateway.enabled = False
+    app = DogBuddyApp(cfg)
+    client = TestClient(app.web_app)
+    client.headers["X-Auth-Token"] = "tok"
+    with client:
+        run = app.runs.start(kind="manual", window_id="w1", window_name="worker-1")
+        st = client.get("/api/status").json()
+        assert "active_runs" in st and "run_summary" in st, st.keys()
+        assert any(r["id"] == run.id for r in st["active_runs"]), st["active_runs"]
+        assert st["run_summary"]["total_live"] >= 1
+        # 取消接口
+        r = client.post(f"/api/runs/{run.id}/cancel")
+        assert r.status_code == 200 and r.json()["ok"] is True
+        listed = client.get("/api/runs").json()
+        assert listed["summary"] is not None
