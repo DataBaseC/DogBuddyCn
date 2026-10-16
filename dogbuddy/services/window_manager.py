@@ -180,7 +180,9 @@ class WindowManager:
         session = WindowSession(w, self.db, self.db, self.db)
         queue = TaskQueue(w.id, on_status=lambda s: self._set_status(w.id, s))
         registry = build_worker_registry(w.role, gate=self.gate, audit=self.db,
-                                         jobs=self.job_store, run_job_now=self._run_job_now)
+                                         jobs=self.job_store, run_job_now=self._run_job_now,
+                                         # v0.10.33：组长派活给组员要走 WindowManager
+                                         coordinator=self)
         # T9.3：主管工位额外装上"项目级管理工具"（system 级永远不给）。
         # 装配只是"少给"，真正的越权拦截在 PermissionGate.check_scope（fail-closed）。
         #
@@ -489,16 +491,25 @@ class WindowManager:
 
     async def dispatch_and_wait(self, window_id: str, prompt: str,
                                 job_id: str | None = None, kind: str = "prompt",
-                                llm_profile: str = "") -> JobOutcome:
-        """Cron path: inject into the persistent session and await the run result."""
+                                llm_profile: str = "", coordinated: bool = False,
+                                timeout: float | None = None) -> JobOutcome:
+        """Cron path: inject into the persistent session and await the run result.
+
+        `coordinated=True`（v0.10.33）：这次派单是**组长派给组员**的（子代理），
+        `window.run_finished` 里 `manual=False` —— 免得"限速自动续跑"与组长的等待
+        变成两次执行；`timeout` 可覆盖默认的单轮等待上限。
+        """
         rt = self._rt(window_id)
         future: asyncio.Future = asyncio.get_event_loop().create_future()
+        meta: dict[str, Any] = {"future": future, "run_owned_by_caller": True}
+        if coordinated:
+            meta["coordinated"] = True
         rt.queue.submit(TaskItem(prompt=prompt, job_id=job_id, urgent=False,
                                  kind=kind or "prompt", llm_profile=llm_profile or "",
                                  # 调用方（CronScheduler）已经开好 job_runs 行并负责收尾，
                                  # 运行时不要重复开行（见 `_execute` 的同一处判断）
-                                 meta={"future": future, "run_owned_by_caller": True}))
-        timeout = self._wait_timeout(window_id)
+                                 meta=meta))
+        timeout = float(timeout) if timeout else self._wait_timeout(window_id)
         try:
             result = await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
@@ -553,7 +564,10 @@ class WindowManager:
             "error_code": str(getattr(result, "error_code", "") or ""),
             "error": str(getattr(result, "error_detail", "") or
                          (getattr(result, "summary", "") if status != "ok" else ""))[:400],
-            "manual": not bool(getattr(task, "job_id", None)),
+            "manual": (not bool(getattr(task, "job_id", None))
+                       # v0.10.33：组长派给组员的活"不算人工派单"——否则限速自动续跑
+                       # 会和组长的等待变成两次执行
+                       and not bool((getattr(task, "meta", None) or {}).get("coordinated"))),
             "job_id": getattr(task, "job_id", None) or "",
         }
         try:

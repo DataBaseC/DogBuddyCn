@@ -125,6 +125,8 @@ def test_group_run_relay_and_summary(tmp_path):
     register_builtin_roles()
     db = _db(tmp_path)
     llm = FakeLLM([
+        # v0.10.33：组长先开场编排（plan）→ 组员执行 → 组长收尾汇总
+        LLMResponse(content="分工：alice 负责接口定义"),
         LLMResponse(content="组员A产出：接口定义完成"),
         LLMResponse(content="汇总：接口+实现完成，待集成测试"),
     ])
@@ -138,14 +140,20 @@ def test_group_run_relay_and_summary(tmp_path):
                   role="lead")
 
     result = _run(groups.run("team-a", "做一个用户注册接口"))
-    assert len(result["steps"]) == 2
+    # v0.10.33：组长开场（编排）+ 组员执行 + 组长收尾（汇总）= 3 步
+    assert len(result["steps"]) == 3
+    assert result["steps"][0].get("phase") == "plan"
+    assert result["steps"][-1].get("phase") == "summary"
     assert result["summary"] == "汇总：接口+实现完成，待集成测试"
     assert all(s["ok"] for s in result["steps"])
     # v0.10.21：只有**产出**进频道，编排提示词不进（2 轮 × 1 条）。
     # 旧口径把 user 提示也写进频道，于是提示词里有 recap、recap 又读回提示词，
     # 自指增长（owner 实测：一轮重复注入 ≈3523 tokens、最后一条提示词 3028 字符）。
     channel = groups.channel("team-a")
-    assert len(channel) == 2, [m["content"][:40] for m in channel]
+    # v0.10.33：组长开场编排 + 组员产出 + 组长收尾 = 3 条（同一个人两次发言）
+    assert len(channel) == 3, [m["content"][:40] for m in channel]
+    assert channel[0]["window_name"] == "bob", "开场是组长"
+    assert channel[-1]["window_name"] == "bob", "收尾也是组长"
     assert {m["window_name"] for m in channel} == {"alice", "bob"}
     assert all(m["role"] == "assistant" for m in channel)
     # 每步都回报注入了多少频道上下文（token 花在哪看得见）

@@ -67,7 +67,9 @@ def _stack(tmp_path, task_timeout: float):
 def test_成员超过挂钟预算就停下并记timeout(tmp_path):
     db, gm = _stack(tmp_path, task_timeout=0.3)
     result = _run(gm.run("slow-team", "任务"))
-    assert len(result["steps"]) == 2, "两个成员都要有交代（不能无声消失）"
+    # v0.10.33：组长现在有"开场编排 + 收尾汇总"两轮 → 2 名成员的组一共 3 步
+    assert len(result["steps"]) == 3, "每个发言都要有交代（不能无声消失）"
+    assert [x.get("phase") for x in result["steps"]] == ["plan", "work", "summary"]
     assert all(s["ok"] is False for s in result["steps"])
     assert all(s.get("timeout") is True for s in result["steps"])
     assert "超时" in result["steps"][0]["summary"]

@@ -8,4 +8,4 @@ chain (`manage.py update`) after restart — bump it in the same commit that
 ships changes.
 """
 
-__version__ = "0.10.32"
+__version__ = "0.10.33"

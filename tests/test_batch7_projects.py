@@ -288,7 +288,9 @@ def test_T7_3_群组挂项目后成员共享工作区(tmp_path):
             loop_mod.AgentLoop = orig
 
         expect = str((tmp_path / "shared").resolve())
-        assert len(seen) == 2, f"两个成员都该跑，实际 {seen}"
+        # v0.10.33：组长开场（编排）+ 组员执行 + 组长收尾（汇总）= 3 次运行，
+        # 三次都必须落在**同一个共享工作区**（这正是 T7.3 要保证的）
+        assert len(seen) == 3, f"组长两轮 + 组员一轮都该跑，实际 {seen}"
         assert all(x == expect for x in seen), f"成员必须共享项目根，实际 {seen}"
         assert res["summary"] == "ok"
     finally:
@@ -430,7 +432,9 @@ def test_T7_6_群组挂项目并可查共享工作区(tmp_path, monkeypatch):
             assert r.status_code == 200
         finally:
             loop_mod.AgentLoop = orig
-        assert seen == [str((tmp_path / "shared").resolve())], f"应跑共享目录，实际 {seen}"
+        # v0.10.33：这个组**只有一名成员**（他既是成员也是组长）→ 只跑一轮
+        # （有多个成员时才是"组长开场 + 组员 + 组长收尾"三轮）；无论几轮都必须跑共享目录
+        assert seen == [str((tmp_path / "shared").resolve())],             f"应全部跑共享目录，实际 {seen}"
 
         # 解除绑定（PATCH 传空字符串）
         patched = client.patch(f"/api/groups/{g['id']}", json={"project_id": ""}).json()

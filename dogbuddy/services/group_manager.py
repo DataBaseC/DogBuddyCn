@@ -263,16 +263,25 @@ class GroupManager:
             raise ValueError(f"group not found: {group_ref}")
         member_rows = self.db.list_group_members(g.id)
         lead_id = g.lead_window_id or (member_rows[0].window_id if member_rows else "")
-        order = [m.window_id for m in member_rows if m.window_id != lead_id]
-        if lead_id:
-            order.append(lead_id)  # lead goes last (summary turn)
-        if not order:
+        others = [m.window_id for m in member_rows if m.window_id != lead_id]
+        if not lead_id and not others:
             raise ValueError(f"group {g.name} has no members")
+        # v0.10.33（owner："组长没给组员派活"）：过去组长被排在**最后**，只能汇总。
+        # 现在组长先开场（拆任务 + 用 member_dispatch 把活派给组员），组员再执行，
+        # 组长最后收尾汇总。组长派过活的成员不会在接力轮里被重复跑。
+        order = ([lead_id] if lead_id else []) + others
+        #: 开场那一轮是"编排"，最后一轮是"汇总"（同一个组长，两次发言）。
+        #: **只有还有别的成员时**才让组长开场 + 收尾 —— 单人组里让组长排两次
+        #: 就是同一件事执行两遍（T7.6 抓到：一个成员的组会跑两轮）。
+        plan_phase = bool(lead_id and others)
+        if plan_phase:
+            order.append(lead_id)  # 收尾/汇总
 
         # v0.10.21：本轮水位线 —— 每个成员只读"本轮此前成员的新产出"，
         # 而不是把整条频道历史重发一遍（N 个人 → N 倍重复）。
         start_id = self._last_channel_id(g.id)
         recap_total = {"chars": 0, "tokens": 0}
+        dispatched: list[str] = []   # 组长已经派过活的成员（接力轮跳过）
 
         tools = self._strict_tools(order)
         # T7.3: 群组挂载的项目 → 共享工作区（成员共用项目根目录）
@@ -291,19 +300,37 @@ class GroupManager:
             w = self.db.get_window(wid)
             if w is None:
                 continue
-            rt = self.windows._rt(wid)
             is_lead = wid == lead_id
+            phase = ("plan" if (is_lead and plan_phase and not steps)
+                     else "summary" if (is_lead and plan_phase) else "work")
+            # 组长派过活的组员不再跑接力轮（v0.10.33：避免"派了一次 + 接力又一次"）
+            if phase == "work" and wid in dispatched:
+                steps.append({"window_id": wid, "window_name": w.name, "is_lead": False,
+                              "phase": "skipped", "ok": True,
+                              "skipped": "已由组长派活执行",
+                              "summary": "（该成员已由组长派活执行，接力轮跳过）"})
+                continue
+            rt = self.windows._rt(wid)
             recap, recap_stats = self._recap_block(g.id, start_id)
             recap_total["chars"] += recap_stats["chars"]
             recap_total["tokens"] += recap_stats["tokens"]
+            if phase == "plan":
+                duty = (
+                    "你是**组长**，这一轮只做**编排**（不要自己写代码/干组员的活）：\n"
+                    "1) 把总任务拆成每个组员能独立完成的部分；\n"
+                    "2) 用 `member_dispatch` 逐个派给他们（task 要自包含：目标、交付物、"
+                    "放在哪个文件、怎么自检）；`wait=true` 会等他的结果、`wait=false` 只排队。\n"
+                    "3) 派完简短说一句分工即可（系统随后会走接力/汇总）。")
+            elif is_lead:
+                duty = ("你是**组长**，请基于本期产出汇总各方结果，给出最终交付"
+                        "（简洁、可执行）；如有关键缺口，用 member_dispatch 再补一轮。")
+            else:
+                duty = ("你是组员，请完成你负责的部分；只输出你的产出与必要的下一步建议，"
+                        "不要重复别人已说的内容。")
             step_prompt = (
                 f"{GROUP_STEP_MARK} · 工位「{w.name}」】\n"
                 f"总任务：{prompt}\n\n"
-                f"{recap}\n---\n\n"
-                + ("你是组长，请基于本期产出汇总各方结果，给出最终交付（简洁、可执行）。"
-                   if is_lead else
-                   "你是组员，请完成你负责的部分；只输出你的产出与必要的下一步建议，"
-                   "不要重复别人已说的内容。")
+                f"{recap}\n---\n\n{duty}"
             )
             # 这条编排提示词不该进共享频道（否则被下一个成员读回来 → 自指增长）
             rt.session.channel_mute = {"marker": GROUP_STEP_MARK, "left": 1}
@@ -337,7 +364,13 @@ class GroupManager:
                 # 用不了管理工具，fail-closed 变成"干不了活"，审查报告 P1-5）
                 scope=self.windows.scope_resolver.for_window(w),
                 extra={"trust": (w.params or {}).get("trust", "normal"),
-                       "project_id": getattr(w, "project_id", "") or ""})
+                       "project_id": getattr(w, "project_id", "") or "",
+                       # v0.10.33：组长派活（member_dispatch）靠这几个字段 fail-closed 裁决
+                       "group_id": g.id,
+                       "group_name": g.name,
+                       "is_lead": is_lead,
+                       "group_lead_id": lead_id,
+                       "dispatched_windows": dispatched})
             try:
                 # v0.10.22：单成员**挂钟预算**。限速退避是"无限耐心"的（heavy 档会
                 # 追加重试预算，实测单次退避就 600s），一次群组运行因此可能挂几分钟
@@ -351,7 +384,8 @@ class GroupManager:
                 # 的"失败"里 —— 它只是"这次没轮上"，稍后重跑就能继续。
                 limited = result.stop_reason == "rate_limited"
                 steps.append({"window_id": wid, "window_name": w.name,
-                              "is_lead": is_lead, "ok": result.stop_reason == "done",
+                              "is_lead": is_lead, "phase": phase,
+                              "ok": result.stop_reason == "done",
                               "rate_limited": limited,
                               "error_code": getattr(result, "error_code", "") or "",
                               # v0.10.21：每步注入的频道上下文用量**看得见**
@@ -367,7 +401,7 @@ class GroupManager:
                 logger.warning("group %s step %s exceeded budget %.0fs (rate-limit waits?)",
                                g.id, wid, budget)
                 steps.append({"window_id": wid, "window_name": w.name, "is_lead": is_lead,
-                              "ok": False, "timeout": True,
+                              "phase": phase, "ok": False, "timeout": True,
                               "recap_chars": recap_stats["chars"],
                               "recap_tokens": recap_stats["tokens"],
                               "prompt_chars": len(step_prompt),
@@ -377,7 +411,7 @@ class GroupManager:
             except Exception as e:  # noqa: BLE001 — one member failing doesn't kill the run
                 logger.exception("group %s step failed for %s", g.id, wid)
                 steps.append({"window_id": wid, "window_name": w.name,
-                              "is_lead": is_lead, "ok": False,
+                              "is_lead": is_lead, "phase": phase, "ok": False,
                               "recap_chars": recap_stats["chars"],
                               "recap_tokens": recap_stats["tokens"],
                               "prompt_chars": len(step_prompt),

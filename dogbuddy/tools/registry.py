@@ -253,7 +253,8 @@ class ToolRegistry:
 
 def build_registry(gate: PermissionGate | None = None, audit: Any = None,
                    include: list[str] | None = None,
-                   jobs: Any = None, run_job_now: Any = None) -> ToolRegistry:
+                   jobs: Any = None, run_job_now: Any = None,
+                   coordinator: Any = None) -> ToolRegistry:
     """Register the standard programmer toolbox. Import kept local so individual
     tool modules can be tested without pulling the whole package in.
 
@@ -264,6 +265,7 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
     from . import automation_ops as _auto
     from . import checkpoint as _ckpt
     from . import file_ops as _file
+    from . import member_ops as _member
     from . import memory_ops as _mem
     from . import project_memory_ops as _pmem
     from . import run_status as _run_status
@@ -281,6 +283,9 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
         *_pmem.all_tools(), *_mem.all_tools(),
         _ask.AskUserTool(), _srv.ServerExecTool(),
         *_run_status.all_tools(),
+        # v0.10.33：组长 → 组员派活（子代理）。能力在工具内部按"群组+组长"裁决，
+        # 不依赖作用域元数据（员工作用域是 none，`required_scope` 会把组长也挡住）。
+        *_member.all_tools(coordinator),
     ]
     for t in tools:
         if include and t.name not in include:
