@@ -210,6 +210,10 @@
       remove: function (id) { return request('DELETE', '/api/iterations/' + enc(id)); }
     },
     /* ---------------- 模型管理（目录 + 备注 + 切换） ---------------- */
+    /* GET /api/capabilities → {tools, roles, tool_count, permissions}
+       （能力清单页的数据源；v0.10.39 修复：这个方法整好漏了——views-capabilities.js
+       调 A.capabilities() 时同步抛 TypeError，.catch 接不住，页面整个空白） */
+    capabilities: function () { return request('GET', '/api/capabilities'); },
     models: {
       /* GET /api/models?enabled_only= → {models:[...], current:{...}, summary:{...}} */
       list: function (enabledOnly) {
@@ -346,20 +350,26 @@
 
     /* ---------------- 文件管理器（path 为工作区相对路径；workspace 可选） ---------------- */
     files: {
-      tree: function (path) {
-        return request('GET', '/api/files/tree' + qs({ path: path || '' }));
+      /* v0.10.39：所有方法带 workspace（绝对路径）——从工位/群组/项目页跳转进来时
+         浏览的是那个工作区，不再是默认根目录。 */
+      tree: function (path, workspace) {
+        return request('GET', '/api/files/tree' + qs({ path: path || '', workspace: workspace || undefined }));
       },
-      list: function (path) {
-        return request('GET', '/api/files/list' + qs({ path: path || '' }));
+      list: function (path, workspace) {
+        return request('GET', '/api/files/list' + qs({ path: path || '', workspace: workspace || undefined }));
       },
-      read: function (path) {
-        return request('GET', '/api/files/read' + qs({ path: path }));
+      read: function (path, workspace) {
+        return request('GET', '/api/files/read' + qs({ path: path, workspace: workspace || undefined }));
       },
-      download: function (path) {
-        return request('GET', '/api/files/download' + qs({ path: path }), null, { blob: true });
+      download: function (path, workspace) {
+        return request('GET', '/api/files/download' + qs({ path: path, workspace: workspace || undefined }), null, { blob: true });
       },
-      image: function (path) {
-        return request('GET', '/api/files/image' + qs({ path: path }), null, { blob: true });
+      /* v0.10.39：目录打包下载（tar.gz）——"挨个翻文件夹找成果太麻烦" */
+      zip: function (path, workspace) {
+        return request('GET', '/api/files/zip' + qs({ path: path || '', workspace: workspace || undefined }), null, { blob: true });
+      },
+      image: function (path, workspace) {
+        return request('GET', '/api/files/image' + qs({ path: path, workspace: workspace || undefined }), null, { blob: true });
       },
       upload: function (path, file) {
         var fd = new FormData();

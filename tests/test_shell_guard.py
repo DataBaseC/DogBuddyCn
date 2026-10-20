@@ -228,7 +228,7 @@ def test_工作区内命令不受影响(tmp_path):
 # v0.10.20 误拦收敛（owner 交接书 §2.3 点名的圆桌实测误拦）
 # ==========================================================================
 def test_引号内的正则与URL不是路径(tmp_path):
-    """圆桌实测误拦①：`grep -oE '"/api/...'`、`curl "http://...$c"` 里的
+    """圆桌实测误拦①：`grep -oE '"/api/...'`、`curl "http://..."` 里的
     `/api`、URL 是字符串字面量，不是路径引用。"""
     ws = str(tmp_path / "ws")
     (tmp_path / "ws").mkdir(exist_ok=True)
@@ -238,7 +238,7 @@ def test_引号内的正则与URL不是路径(tmp_path):
         "curl -s http://127.0.0.1:8787/api/health",
         "curl -s \"http://127.0.0.1:8787/api/health\"",
         "echo \"== ws ==\"; date; locale",
-        "for c in /api /api/health /docs; do echo $c; done",
+        "for i in 1 2 3; do echo tick; done",
         "echo '=== TZ ==='; date",
     ]:
         assert analyze_command(cmd, ws) == [], f"误拦：{cmd}"
@@ -255,17 +255,16 @@ def test_引号内像纯路径的参数仍然拦(tmp_path):
 
 def test_循环构造本身不拦_循环体照判(tmp_path):
     """圆桌实测误拦②：`for c in /api ...` 的词表不是路径引用；
-    但循环体里的命令逐段判定——`do cp $f /etc/` 仍拦。"""
+    循环体里的命令逐段判定——`do cp $f /etc/` 仍拦。"""
     ws = str(tmp_path / "ws")
     (tmp_path / "ws").mkdir(exist_ok=True)
-    # 词表里的路径不拦
-    assert analyze_command("for c in /api /docs /tmp; do echo $c; done", ws) == []
+    # 词表里的路径不拦（构造本身不是越界信号）；干净的命令体也不拦
+    assert analyze_command("for c in /api /docs /tmp; do echo tick; done", ws) == []
     assert analyze_command("if [ -f /etc/os-release ]; then echo yes; fi", ws) == []
     # 循环体写外界照拦
     risks = analyze_command("for f in *.txt; do cp $f /etc/leak; done", ws)
     assert any("/etc/leak" in r["target"] for r in risks), f"循环体越界应拦: {risks}"
     # while 条件里的路径不拦，体重定向照拦
-    assert analyze_command("while read -r l; do echo \"$l\"; done < list.txt", ws) == []
     risks = analyze_command("while read -r l; do echo $l > /etc/x; done", ws)
     assert any(r["kind"] == "write" for r in risks)
 
@@ -284,15 +283,28 @@ def test_python_c等他语言内联代码放行且记录(tmp_path):
     assert notes and "python -c" in notes[0]["target"], "放行但要留审计记录"
 
 
-def test_循环体内的不可判定构造放行且记录(tmp_path):
-    """owner 交接书：循环体里的命令逐个判定，无法判定就放行+记录。"""
+def test_循环体内的逃逸构造一律拒绝_D1回归(tmp_path):
+    """D1 回归（Lead 验收报告 §3）：0.10.20 把循环体内的整个动态类降级成
+    "放行+记录"，实测那是通用后门——`sh -c`/`eval`/`$VAR` 包一层 for 就全放行。
+    现在动态判定不分循环体内外；只有他语言内联代码降级。"""
     ws = str(tmp_path / "ws")
     (tmp_path / "ws").mkdir(exist_ok=True)
-    cmd = "for c in /api /docs; do curl -s \"http://127.0.0.1:8787$c\"; done"
-    assert analyze_command(cmd, ws) == [], f"循环体内的动态构造应放行: {cmd}"
-    notes = dynamic_notes(cmd)
-    assert notes, "放行但要留审计记录"
-    # 循环**外**的同类构造仍然拒绝
+    for cmd in [
+        "for i in 1; do sh -c 'cat /etc/passwd'; done",
+        "for i in 1; do eval 'cat /etc/passwd'; done",
+        "for i in 1; do cat $HOME/.ssh/id_rsa; done",
+        "while read -r l; do echo \"$l\"; done < list.txt",
+        "for c in /api /docs; do curl -s \"http://127.0.0.1:8787$c\"; done",
+    ]:
+        risks = analyze_command(cmd, ws)
+        assert risks, f"循环体内的逃逸构造必须拒绝: {cmd}"
+        assert any(r["kind"] == "dynamic" for r in risks), f"拒绝理由应是动态构造: {cmd} → {risks}"
+    # 这些不再进"放行记录"（它们是被拒绝，不是被记录）
+    assert dynamic_notes("for i in 1; do sh -c 'cat /etc/passwd'; done") == []
+    # 他语言内联在循环体内仍然放行+记录（降级只此一类）
+    assert analyze_command("for i in 1; do python3 -c 'print(1)'; done", ws) == []
+    assert dynamic_notes("for i in 1; do python3 -c 'print(1)'; done"), "放行但要留审计记录"
+    # 循环**外**的同类构造当然也拒绝（不变量）
     assert analyze_command("curl -s \"http://h$x\"", ws), "循环外的 $VAR 仍拦"
 
 

@@ -65,3 +65,21 @@ def test_worker_sees_construction_tools():
     worker = next(r for r in data["roles"] if r["name"] == "worker_programmer")
     assert "write_file" in worker["tool_names"]     # 员工能干活
     assert "self_update" not in worker["tool_names"]  # 但不能自升级
+
+
+# ------------------------------------------- v0.10.39 前端接线（能力栏空白回归）
+def test_capabilities_view_is_wired_end_to_end():
+    """回归（2026-10-18 owner 报"能力栏前端是空的"）：后端一直是好的
+    （73 个工具），但 `api.js` 里**整好漏了** `capabilities()` 方法——
+    views-capabilities.js 调 `A.capabilities()` 时同步抛 TypeError，
+    `.catch` 接不住（throw 发生在 `.then` 挂上之前），页面整个空白。
+    这条钉住三处的接线：API 方法存在、视图调用它、bundle 里有视图。"""
+    js = Path(__file__).resolve().parents[1] / "dogbuddy/web/static/js"
+    api_src = (js / "api.js").read_text(encoding="utf-8")
+    view_src = (js / "views-capabilities.js").read_text(encoding="utf-8")
+    bundle = (js / "index.bundle.js").read_text(encoding="utf-8")
+    import re
+    assert re.search(r"(?m)^\s*capabilities:\s*function", api_src), \
+        "api.js 必须有 capabilities()——否则能力栏整个空白"
+    assert "A.capabilities()" in view_src, "视图要调 A.capabilities()"
+    assert "views-capabilities.js" in bundle, "bundle 里要有能力视图"

@@ -92,3 +92,64 @@ def test_每步都回报recap用量与提示词长度(tmp_path):
         assert "recap_tokens" in s and "prompt_chars" in s
     assert result["recap_total"]["chars"] >= 0
     db.close()
+
+
+# ---------------------------------------------------------- v0.10.38 终态诚实化
+def _mixed_stack(tmp_path, task_timeout: float, slow_all: bool = False):
+    """一个慢工位（必超时）+ 一个快工位（能跑完）的组，挂 runs 台账。
+    `slow_all=True` 时两个都慢（用于"一步都没成"的场景）。"""
+    register_builtin_roles()
+    db = Database(str(tmp_path / "m.db"))
+    fast, slow = SlowLLM(delay=0.01), SlowLLM(delay=3.0)
+
+    def factory(profile=None, model=None, overrides=None):
+        return slow if (slow_all or model == "slow-model") else fast
+
+    wm = WindowManager(db, llm_factory=factory, bus=None,
+                       checkpoints_dir=tmp_path / "ck")
+    wm.param_resolver = lambda w, project=None: {
+        "max_iterations": 25, "max_context_tokens": 128000,
+        "compact_threshold": 0.8, "task_timeout": task_timeout}
+    wm.create("alice", workspace_path=str(tmp_path / "a"), model="slow-model")
+    wm.create("bob", workspace_path=str(tmp_path / "b"))
+    gm = GroupManager(db, windows=wm)
+    from dogbuddy.services.run_registry import RunRegistry
+    gm.runs = RunRegistry(db)
+    gm.create("mixed-team")
+    gm.assign("mixed-team", db.get_window_by_name("alice").id, role="member")
+    gm.assign("mixed-team", db.get_window_by_name("bob").id, role="lead")
+    return db, gm
+
+
+def test_有步骤没完成_终态是partial而不是done(tmp_path):
+    """回归（2026-10-17 实测）：4/4 名成员全被限速暂停、零产出的群组运行，
+    台账以前也写 `done`——上级探测（progress_report/顶栏/runs API）看到的是
+    "完成"，真相藏在 summary 的一行字里。现在"完成了几步"是一等信号。"""
+    db, gm = _mixed_stack(tmp_path, task_timeout=1.0)
+    result = _run(gm.run("mixed-team", "任务"))
+    assert result["status"] == "partial", f"有步骤没完成必须是 partial: {result['status']}"
+    assert result["completed_steps"] == 2 and result["total_steps"] == 3
+    assert "[完成 2/3 步]" in result["summary"]
+    run = gm.runs.get(result["run_id"])
+    assert run is not None and run.status == "partial", "台账里也必须是 partial"
+    db.close()
+
+
+def test_全步骤完成_终态还是done(tmp_path):
+    """不误报：大家都跑完时保持 done，不因为新逻辑变成 partial。"""
+    db, gm = _mixed_stack(tmp_path, task_timeout=30)
+    result = _run(gm.run("mixed-team", "任务"))
+    assert result["status"] == "done"
+    assert result["completed_steps"] == result["total_steps"] == 3
+    assert gm.runs.get(result["run_id"]).status == "done"
+    db.close()
+
+
+def test_一步都没成_终态是failed(tmp_path):
+    """全员超时（限速把预算吃光）→ 一步都没成 → failed，不是 done 也不是 partial。"""
+    db, gm = _mixed_stack(tmp_path, task_timeout=0.3, slow_all=True)
+    result = _run(gm.run("mixed-team", "任务"))
+    assert result["status"] == "failed"
+    assert result["completed_steps"] == 0
+    assert "[完成 0/3 步]" in result["summary"]
+    db.close()

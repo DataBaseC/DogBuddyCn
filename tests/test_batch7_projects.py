@@ -292,7 +292,9 @@ def test_T7_3_群组挂项目后成员共享工作区(tmp_path):
         # 三次都必须落在**同一个共享工作区**（这正是 T7.3 要保证的）
         assert len(seen) == 3, f"组长两轮 + 组员一轮都该跑，实际 {seen}"
         assert all(x == expect for x in seen), f"成员必须共享项目根，实际 {seen}"
-        assert res["summary"] == "ok"
+        # v0.10.38：summary 带步骤完成度前缀
+        assert res["summary"] == "[完成 3/3 步] ok"
+        assert res["status"] == "done"
     finally:
         db.close()
 

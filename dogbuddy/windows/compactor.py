@@ -40,27 +40,45 @@ class Compactor:
     """Threshold-triggered LLM compaction with structured fact preservation."""
 
     def __init__(self, llm: Any, compaction_repo: Any, memory_service: Any = None,
-                 threshold: float = 0.8, max_context_tokens: int = 128000):
+                 threshold: float = 0.8, max_context_tokens: int = 128000,
+                 max_messages: int = 48):
         self.llm = llm
         self.repo = compaction_repo
         self.memory = memory_service
         self.threshold = threshold
         self.max_context_tokens = max_context_tokens
+        #: 消息数触发线（v0.10.38）。**为什么需要它**：token 阈值在长上下文库上
+        #: 永远不触发——工位 `max_context_tokens=1048576`、阈值 0.8 → 要 84 万 token
+        #: 才压缩，而 `ContextBuilder.build()` 只取 `recent(60)`：会话一超过 60 条，
+        #: 每轮请求的窗口就向前滑一条 → **消息列表头部位移 → 提供商缓存前缀匹配不上**，
+        #: 超出的部分每次全价重付（实测：95 条会话的工位缓存命中只有 4096/25490=13.8%,
+        #: 56 条会话的工位 97.5%）。在 60 之前压缩（保留 12 条），窗口再也不滑动，
+        #: 前缀稳定 → 缓存恢复，上下文也封顶。
+        self.max_messages = max_messages
 
-    # AstrBot ContextCompressor protocol shape
+    # AstrBot ContextCompactor protocol shape
     def should_compress(self, current_tokens: int, max_tokens: int | None = None) -> bool:
         max_tokens = max_tokens or self.max_context_tokens
         return current_tokens >= self.threshold * max_tokens
 
+    def should_compress_by_count(self, session: Any) -> bool:
+        """消息数超线就压（与 token 阈值并列的第二个触发维度）。"""
+        try:
+            return len(session.recent(400)) > self.max_messages
+        except Exception:  # noqa: BLE001 — 数不了消息时不阻断压缩路径
+            logger.debug("message count failed", exc_info=True)
+            return False
+
     async def maybe_compact(self, session: Any) -> Compaction | None:
-        """Compact when over threshold. Returns the Compaction record if one happened。
+        """Compact when over threshold (tokens OR message count). Returns the
+        Compaction record if one happened。
 
         判据必须用**上下文占用**（最近一次调用的 prompt_tokens），不能用累计花费
         （`session.token_usage()` 是 `SUM(tokens)`）：长寿命工位的累计花费只会一直涨，
         用它判压缩 = 会话越老越容易触发压缩，把上下文压碎。
         """
         used = self._used_tokens(session)
-        if not self.should_compress(used):
+        if not (self.should_compress(used) or self.should_compress_by_count(session)):
             return None
         return await self.compact_now(session)
 

@@ -487,8 +487,27 @@ class AdminService:
                 "\n## Windows\n" + ("\n".join(lines) or "(none)") +
                 "\n## Jobs\n" + ("\n".join(job_lines) or "(none)") +
                 "\n## Recent runs\n" + ("\n".join(run_lines) or "(none)"))
+        # v0.10.38：**人工派单/群组运行的近期台账**。上面 "Recent runs" 只是 cron 的
+        # job_runs；手动派的活、群组接力全在 runs 台账里——owner 问"刚才让员工干的
+        # 活干完了吗"，以前管理员只能看到定时任务那一本账，答不上来。
+        reg_lines: list[str] = []
+        if getattr(self, "runs", None) is not None:
+            try:
+                # 注意：runs.recent() 返回 **dict**（活跃 + 历史合并）
+                for r in self.runs.recent(limit=8):
+                    reg_lines.append(
+                        f"- {r.get('id')} [{r.get('kind')}] "
+                        f"{r.get('window_name') or r.get('group_name') or '-'} "
+                        f"{r.get('status')} {str(r.get('started_at'))[:19]} "
+                        f"{(r.get('summary') or '')[:80]}")
+            except Exception:  # noqa: BLE001 — 台账读失败不该炸掉整个汇报
+                logger.debug("runs recent lookup failed in progress_report",
+                             exc_info=True)
+        text += ("\n## Recent runs (manual/group)\n"
+                 + ("\n".join(reg_lines) or "(none)"))
         return {"text": text, "windows": len(lines), "jobs": len(job_lines),
-                "live_runs": len(live_lines), "run_summary": run_summary}
+                "live_runs": len(live_lines), "recent_runs": len(reg_lines),
+                "run_summary": run_summary}
 
 
 class _AdminGate:

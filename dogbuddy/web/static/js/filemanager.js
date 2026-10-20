@@ -12,6 +12,9 @@
 
   var FileMgr = {
     path: '',
+    /* v0.10.39：当前工作区（绝对路径）——从工位/群组/项目页跳转进来时浏览的是
+       那个工作区；空 = 默认根目录。所有 A.files.* 调用都带它。 */
+    workspace: '',
     entries: [],
     breadcrumbs: [],
     keyword: '',
@@ -22,7 +25,12 @@
     treeData: [],
 
     /* ---------- 加载 ---------- */
-    load: function () {
+    /* initial: {path, workspace} —— 从别处跳转进来时指定起点（v0.10.39） */
+    load: function (initial) {
+      if (initial && typeof initial === 'object') {
+        if (typeof initial.workspace === 'string') FileMgr.workspace = initial.workspace;
+        if (typeof initial.path === 'string') FileMgr.path = initial.path;
+      }
       FileMgr.loadList();
       FileMgr.loadTree();
     },
@@ -30,7 +38,7 @@
     loadList: function () {
       var host = document.getElementById('fm-list');
       if (host) host.innerHTML = U.skeleton('rows');
-      return A.files.list(FileMgr.path).then(function (data) {
+      return A.files.list(FileMgr.path, FileMgr.workspace).then(function (data) {
         FileMgr.breadcrumbs = (data && data.breadcrumbs) || [];
         FileMgr.entries = (data && data.entries) || [];
         FileMgr.renderCrumb();
@@ -45,7 +53,7 @@
     },
 
     loadTree: function () {
-      return A.files.tree('').then(function (rows) {
+      return A.files.tree('', FileMgr.workspace).then(function (rows) {
         FileMgr.treeData = rows || [];
         FileMgr.renderTree();
       }).catch(function () { /* 树失败不打扰 */ });
@@ -55,11 +63,17 @@
     renderCrumb: function () {
       var host = document.getElementById('fm-crumb');
       if (!host) return;
+      /* v0.10.39：工作区指示——从工位/群组/项目跳进来时，用户必须一眼看到
+         "我现在在哪个工作区里翻"，否则和默认根目录混淆。 */
+      var wsChip = FileMgr.workspace
+        ? '<span class="fm-ws-chip" title="当前工作区：' + U.esc(FileMgr.workspace) + '">' +
+          U.icon('folder', 'sm') + '<span class="mono">' + U.esc(FileMgr.workspace) + '</span></span>'
+        : '';
       var crumbs = FileMgr.breadcrumbs.slice();
       if (!crumbs.length || crumbs[crumbs.length - 1].path !== FileMgr.path) {
         crumbs.push({ name: '根目录', path: FileMgr.path });
       }
-      host.innerHTML = crumbs.map(function (c, i) {
+      host.innerHTML = wsChip + crumbs.map(function (c, i) {
         var isLast = i === crumbs.length - 1;
         return (i ? U.icon('chevron-r', 'sm') : '') +
           '<button class="' + (isLast ? 'current' : '') + '" data-path="' + U.esc(c.path) + '">' +
@@ -145,7 +159,10 @@
             '<td class="fm-time">' + U.esc(U.fmtTime(e.mtime)) + '</td>' +
             '<td><div class="fm-row-actions">' +
             '<button class="icon-btn" data-op="rename" title="重命名">' + U.icon('edit', 'sm') + '</button>' +
-            (isDir ? '' : '<button class="icon-btn" data-op="download" title="下载">' + U.icon('download', 'sm') + '</button>') +
+            /* v0.10.39：文件直接下载；目录打包成 tar.gz 下载（"挨个翻文件夹找成果太麻烦"） */
+            (isDir
+              ? '<button class="icon-btn" data-op="zip" title="打包下载整个目录（tar.gz）">' + U.icon('download', 'sm') + '</button>'
+              : '<button class="icon-btn" data-op="download" title="下载">' + U.icon('download', 'sm') + '</button>') +
             '<button class="icon-btn danger" data-op="delete" title="删除">' + U.icon('trash', 'sm') + '</button>' +
             '</div></td></tr>';
         }).join('') + '</tbody></table>';
@@ -187,6 +204,7 @@
           if (op === 'rename') FileMgr.renameEntry(entry);
           else if (op === 'delete') FileMgr.deleteEntry(entry);
           else if (op === 'download') FileMgr.download(entry.path);
+          else if (op === 'zip') FileMgr.zipDir(entry.path, entry.name, btn);
         });
       });
       FileMgr.bindDropZone();
@@ -380,7 +398,7 @@
     },
 
     download: function (path) {
-      A.files.download(path).then(function (blob) {
+      A.files.download(path, FileMgr.workspace).then(function (blob) {
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
         a.href = url;
@@ -391,6 +409,27 @@
         setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
       }).catch(function (e) {
         U.toast('error', '下载失败：' + e.message);
+      });
+    },
+
+    /* v0.10.39：目录打包下载（tar.gz）——项目/工位成果一键拿走，
+       不用挨个文件夹翻。大目录打包要几秒，按钮先置灰。 */
+    zipDir: function (path, name, btn) {
+      if (btn) btn.disabled = true;
+      U.toast('info', '正在打包' + (name ? '「' + name + '」' : '当前目录') + '…');
+      A.files.zip(path, FileMgr.workspace).then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = (name || path.split('/').pop() || 'workspace') + '.tar.gz';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+      }).catch(function (e) {
+        U.toast('error', '打包下载失败：' + e.message);
+      }).then(function () {
+        if (btn) btn.disabled = false;
       });
     },
 
@@ -467,11 +506,13 @@
     },
 
     /* ---------- 从日志跳转预览 ---------- */
-    openPath: function (path) {
+    /* v0.10.39：workspace 可选——日志里带的路径可能属于某个工位/项目工作区 */
+    openPath: function (path, workspace) {
       var parts = String(path || '').split(/[\\/]/);
       var name = parts.pop();
       var dir = parts.join('/');
       global.App.go('files');
+      FileMgr.workspace = workspace || '';
       FileMgr.path = '';
       FileMgr.loadList().then(function () {
         FileMgr.path = dir;
@@ -498,6 +539,8 @@
       bind('fm-refresh', function () { FileMgr.load(); });
       bind('fm-new-folder', FileMgr.mkdir);
       bind('fm-new-file', FileMgr.mkfile);
+      /* v0.10.39：打包下载当前目录 */
+      bind('fm-zip', function () { FileMgr.zipDir(FileMgr.path, '', null); });
       bind('fm-upload', function () {
         var input = document.getElementById('fm-upload-input');
         if (input) input.click();

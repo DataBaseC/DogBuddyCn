@@ -212,7 +212,31 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
     async def window_status(args: dict, ctx: ToolContext) -> ToolResult:
         need(W, "windows")
         info = W.status(args.get("window_id") or args.get("name", ""))
-        return ToolResult.success(str(info), **{k: v for k, v in info.items() if isinstance(v, (int, str, bool))})
+        text = str(info)
+        # v0.10.38：附上该窗口**最近的运行**（状态+摘要）——以前只有一个
+        # `last_output`（最近一次运行的摘要，400 字符）：连派三个任务时前两个
+        # 的结果被覆盖，"任务 X 完成没、产出什么"探测不到（owner 问"员工的活
+        # 干完了吗"时管理员只能答"在跑/闲着"，答不了"产出是什么"）。
+        # runs 台账是权威源（manual/group/coordinated 全在里面）。
+        runs = getattr(svc, "runs", None)
+        if runs is not None:
+            try:
+                lines = []
+                # 注意：runs.recent() 返回的是 **dict**（活跃 + 历史合并），不是对象
+                for r in runs.recent(limit=30):
+                    if r.get("window_id") != info.get("window_id"):
+                        continue
+                    lines.append(
+                        f"  {r.get('id')} [{r.get('kind')}] {r.get('status')} "
+                        f"{str(r.get('started_at'))[:19]} "
+                        f"{(r.get('summary') or '')[:100]}")
+                    if len(lines) >= 3:
+                        break
+                if lines:
+                    text += "\n最近运行:\n" + "\n".join(lines)
+            except Exception:  # noqa: BLE001 — 台账读失败不影响状态本身
+                logger.debug("window_status runs lookup failed", exc_info=True)
+        return ToolResult.success(text, **{k: v for k, v in info.items() if isinstance(v, (int, str, bool))})
 
     tools.append(FnTool("window_status", "Detailed status of one window (current task, queue, tokens).",
         _props(window_id=_p("string", "window id or name", True)), window_status))

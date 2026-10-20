@@ -1480,3 +1480,111 @@ owner 实测："**员工调用工具的时候，并没显示，得刷新一下�
 SSE `run.*` 实时更新，断线时 15s 轮询兜底。
 
 基线：688 passed / 4 skipped（新增 `tests/test_run_registry.py` 8 例）；`audit_ui --strict` exit 0。
+
+---
+
+## 32. 第二十五轮：缓存根因 / 终态诚实化 / 探测补强 / D1（2026-10-17，`0.10.38`）
+
+起因是 owner 两条实测反馈："群组就相当于别人给员工发消息吧？"（确认机制口径）和
+"LLM 有配额，就是慢，先优化"——顺着 10-17 的群组迭代实验（4/4 步被限速暂停、
+零产出、白烧 52k tokens）把 token 去向照出来，逐条修。
+
+### 32.1 缓存命中低的根因：滑动窗口打碎前缀（不是调用链写错，是结构问题）
+
+对照实验（同 prompt 连发两次，稳定复现）：worker-1（95 条消息）缓存
+**4096/25490 = 13.8%**；worker-3（56 条）**12544/316 = 97.5%**。根因：
+`ContextBuilder.build()` 只取 `recent(60)`，会话一超过 60 条，每轮请求的窗口
+就向前滑一条 → **消息列表头部位移 → 提供商前缀匹配只剩系统提示词那段**。
+而压缩的触发条件是 token 阈值（0.8 × `max_context_tokens`），工位上限
+1,048,576 → 阈值 84 万，worker-1 才 2.9 万，**压缩永远不可能触发**。
+
+修法（`windows/compactor.py`）：新增**消息数触发维度**（`max_messages=48`，
+与 token 阈值并列）。在 60 之前压缩（保留 12 条），窗口再也不滑动 → 前缀稳定 →
+缓存恢复，上下文也封顶。三条回归：大 token 预算下计数维度必须触发、短会话不滥压、
+持续追加时消息数峰值不超过触发线（窗口永不滑动）。
+
+### 32.2 run 终态诚实化：`partial`（D-one：完成度不再藏在摘要里）
+
+10-17 实验的教训：4/4 名成员全被限速暂停、零产出的群组运行，台账写的是
+`done`——上级探测被误导，真相躲在 summary 的一行字里。现在：
+`runs` 台账新增终态 **`partial`**；群组运行收尾按步骤完成度选终态
+（全步 ok → `done`；有 ok 有未 ok → `partial`；一步都没成 → `failed`），
+summary 前缀 `[完成 X/N 步]`，HTTP 响应带 `status/completed_steps/total_steps`。
+
+### 32.3 探测补强：`window_status` 带最近运行 + `progress_report` 带 manual/group 台账
+
+owner 问"上级探测员工是否完成任务的机制呢"——查完发现两处缺口：
+`window_status` 只有一个 `last_output`（最近一次运行的摘要，连派三个任务时
+前两个被覆盖）；`progress_report` 的 "Recent runs" 只是 cron 的 job_runs，
+手动派的活和群组接力在另一本账里。现在前者附该窗口最近 3 次运行
+（状态+摘要），后者新增 `## Recent runs (manual/group)` 段。
+
+### 32.4 员工聊天页群组徽标
+
+owner："是否可以显示在员工聊天记录里"——查证：群组消息**本来就在**成员自己的
+消息列表里（群频道与成员会话是同一批消息的两份投影），缺的只是 DTO 不带
+`group_id`、前端无法标记。现在 `recent_messages` 暴露 `group_id`，
+`renderMsg`/`renderToolGroup` 给群组协作消息渲染「群组」徽标。
+
+### 32.5 D1：循环体豁免过宽（Lead 验收报告 §3 的缺陷，本轮修掉）
+
+0.10.20 为收敛误拦，把循环/条件体里的**整个动态类**都降级成"放行+记录"——
+验收实测那是通用后门：`for i in 1; do sh -c 'cat /etc/passwd'; done`、
+`eval`、`$VAR` 包一层 for 全放行，与模块文档"仍一律拒绝"自相矛盾。
+现在动态判定**不分循环体内外**；只有他语言内联代码（python/perl/node/ruby/php
+`-c`/`-e`）在任何位置降级为记录（它的内容本就不可分析，且 .py 文件执行同样放行）。
+代价（知情决策）：圆桌里那条 `for c in …; do curl "…$c"; done` 探测循环会被拒
+（单行错误码，同码同轮只详述一次）；工人可展开循环或申请 elevated。
+
+基线：**701 passed / 4 skipped**（新增 15 条：压缩计数触发 3 / 终态 3 / 探测 5 /
+D1 回归与调整 4）；`audit_ui --strict` exit 0；bundle 已重建。
+
+---
+
+## 33. 第二十六轮：能力栏空白 / 并发写保护 / 工作区跳转 / 目录打包下载（2026-10-18，`0.10.39`）
+
+owner 五条反馈逐条落地（第 2 条「研究 dsh 多 agent 模式」因本机到 GitHub 的
+网络不通被挂起，待 owner 提供文档）。
+
+### 33.1 能力栏前端是空的：`api.js` 漏了 `capabilities()` 方法
+
+后端一直是好的（`GET /api/capabilities` 返回 73 个工具 + 3 角色，生产实测过），
+但前端 `api.js` 里**整好漏定义** `capabilities()`——`views-capabilities.js` 调
+`A.capabilities()` 时同步抛 TypeError，`.catch` 接不住（throw 发生在 `.then`
+挂上之前），路由也没包 try，页面整个空白。补方法 + 一条端到端接线回归
+（API 方法存在 / 视图调用 / bundle 里有视图）；顺手全量扫描了一遍
+`views-*.js` 的 `A.*` 调用 vs `api.js` 定义，无其他漏网。
+
+### 33.2 并发写保护（owner：「有没有防止同时写入的机制」）
+
+查明：**单工位串行队列 + cron 进程锁有，但跨工位对同一文件的写入没有任何保护**——
+群组共享项目根后，`member_dispatch(wait=false)` 派活导致组长/组员并发写同一批文件。
+两层机制（`tools/file_guard.py`，只覆盖 file 工具）：
+1. **按路径的 asyncio 锁**（`write_guard`）：write_file/edit_file 的读-改-写全程持锁，
+   同路径跨工位串行，杜绝交错写。按「事件循环 × 路径」分桶（WeakKeyDictionary），
+   测试各自循环互不污染，生产单循环真正互斥。
+2. **乐观并发**（`expect_sha`）：read_file 返回内容 sha；write_file/edit_file 可传
+   `expect_sha`，不符即拒并说明"已被其他工位修改，请重新 read"——锁只能防"同时"，
+   防丢失更新只能靠这个。不传时期望行为不变（opt-in，不破坏旧调用方）。
+
+已知边界（知情决策）：`shell` 是任意命令执行，锁它必输（同 shell_guard 教训），
+shell 写入的冲突由 checkpoint 快照兜底 + 组长派活时指定不同文件规避。
+
+### 33.3 工作区跳转入口（owner：「挨个翻文件夹找成果太麻烦了」）
+
+- 工位详情页新增「工作区」按钮 → 文件管理器直接落在该工位的 effective workspace；
+- 群组详情页新增「打开共享工作区」（有挂项目时）→ 落在项目根；成员行新增文件夹
+  图标 → 落在该成员自己的工作区（`GroupManager.members()` 因此带上 `workspace_path`）；
+- 项目页新增「打开工作区」/「打包下载」；
+- 文件管理器新增 `workspace` 状态（所有 `A.files.*` 调用透传），面包屑前显示
+  当前工作区指示条——跳进来后一眼看到"在哪个工作区里翻"。
+
+### 33.4 目录打包下载（owner：「项目文件夹目前不能打包一起下载」）
+
+`GET /api/files/zip?path=&workspace=` → tar.gz 流（`FileService.zip_dir` +
+`BackgroundTasks` 发完删临时文件）。排除 `.git`/`.venv`/`__pycache__`/`node_modules`
+（与 list/tree 可见性口径一致）。前端：工具条「打包下载」+ 目录行的下载图标 +
+项目页「打包下载」按钮。
+
+基线：**714 passed / 4 skipped**（新增 13 条：能力接线 1 / 文件守卫 9 / 打包与跳转 3）；
+`audit_ui --strict` exit 0；bundle 已重建；五条守卫变异全部仍被抓住。

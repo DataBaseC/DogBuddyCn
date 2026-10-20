@@ -144,7 +144,9 @@ def test_group_run_relay_and_summary(tmp_path):
     assert len(result["steps"]) == 3
     assert result["steps"][0].get("phase") == "plan"
     assert result["steps"][-1].get("phase") == "summary"
-    assert result["summary"] == "汇总：接口+实现完成，待集成测试"
+    # v0.10.38：summary 带 `[完成 X/N 步]` 前缀（完成度是一等信号，不再只藏在摘要里）
+    assert result["summary"] == "[完成 3/3 步] 汇总：接口+实现完成，待集成测试"
+    assert result["status"] == "done" and result["completed_steps"] == 3
     assert all(s["ok"] for s in result["steps"])
     # v0.10.21：只有**产出**进频道，编排提示词不进（2 轮 × 1 条）。
     # 旧口径把 user 提示也写进频道，于是提示词里有 recap、recap 又读回提示词，

@@ -228,6 +228,11 @@
         '<div><h2 class="card-title">' + U.esc(g.name) + '</h2>' +
         '<p class="card-sub">' + U.esc(g.description || '（无描述）') + '</p></div>' +
         '<div class="toolbar-actions">' +
+        /* v0.10.39：「挨个翻文件夹找成果太麻烦」——一键跳到本组的共享工作区 */
+        (g.shared_workspace
+          ? '<button class="btn btn-primary btn-sm" id="grp-open-ws" title="' + U.esc(g.shared_workspace) + '">' +
+            U.icon('folder', 'sm') + '打开共享工作区</button>'
+          : '') +
         '<button class="btn btn-soft btn-sm" id="grp-edit">' + U.icon('edit', 'sm') + '编辑</button>' +
         '<button class="btn btn-soft btn-sm" id="grp-chan-refresh">' + U.icon('refresh', 'sm') + '刷新频道</button>' +
         '<button class="btn btn-danger btn-sm" id="grp-delete">' + U.icon('trash', 'sm') + '删除群组</button>' +
@@ -280,6 +285,9 @@
                   '<button class="icon-btn" data-act="set-lead" title="设为组长">' + U.icon('arrow-up', 'sm') + '</button>') +
                 (m.exists === false ? '' :
                   '<button class="icon-btn" data-act="chat" title="查看该成员的会话（他们在这里的发言）">' + U.icon('chat', 'sm') + '</button>') +
+                /* v0.10.39：跳到该成员自己的工作区（找他的成果） */
+                (m.exists === false || !m.workspace_path ? '' :
+                  '<button class="icon-btn" data-act="files" title="打开该成员的工作区：' + U.esc(m.workspace_path) + '">' + U.icon('folder', 'sm') + '</button>') +
                 '<button class="icon-btn danger" data-act="remove" title="移出群组">' + U.icon('trash', 'sm') + '</button>' +
                 '</div></div>';
             }).join('')
@@ -381,6 +389,15 @@
       if (!g) return;
       var edit = document.getElementById('grp-edit');
       if (edit) edit.addEventListener('click', function () { Groups.openEdit(); });
+      /* v0.10.39：跳到本组的共享工作区（项目根）——找成果不用再挨个翻目录 */
+      var openWs = document.getElementById('grp-open-ws');
+      if (openWs) {
+        openWs.addEventListener('click', function () {
+          var ws = (Groups.current && Groups.current.shared_workspace) || '';
+          if (!ws) { U.toast('warn', '本组没有挂项目，没有共享工作区'); return; }
+          if (global.App && global.App.go) global.App.go('files', { workspace: ws });
+        });
+      }
       var del = document.getElementById('grp-delete');
       if (del) {
         del.addEventListener('click', function () {
@@ -461,6 +478,17 @@
         if (chat) {
           chat.addEventListener('click', function () {
             if (global.App && global.App.go) global.App.go('windows', { win: wid });
+          });
+        }
+        // v0.10.39：成员行加工作区入口——"挨个翻文件夹找成果太麻烦"
+        var files = U.$('[data-act="files"]', row);
+        if (files) {
+          files.addEventListener('click', function () {
+            var ws = (Groups.current && Groups.current.members || [])
+              .filter(function (m) { return m.window_id === wid; })[0];
+            var path = ws && ws.workspace_path;
+            if (!path) { U.toast('warn', '该成员没有工作区路径'); return; }
+            if (global.App && global.App.go) global.App.go('files', { workspace: path });
           });
         }
       });

@@ -40,13 +40,16 @@
    正常命令当越界烧 token。
 2. **`for`/`while`/`until`/`if` 构造本身不是越界信号**。`for c in /api /docs` 的
    词表、`if [ -f /etc/x ]` 的条件都不做路径扫描；**循环/条件体里的命令逐段照常判**
-   （`do cp $f /etc/` 仍被拦）。循环体内的不可判定构造**放行 + 记录**（audit），
-   不再拒绝——拒绝只会把工人逼去写脚本文件绕行（圆桌里正是这么逃逸的）。
+   （`do cp $f /etc/` 仍被拦）。⚠️ **v0.10.38 修正（D1）**：0.10.20 曾把循环体内的
+   整个动态类都降级成"放行+记录"，验收实测那是通用后门——`for i in 1; do
+   sh -c 'cat /etc/passwd'; done`、`eval`、`$VAR` 全放行，与本节口径自相矛盾。
+   现在动态判定**不分循环体内外**：只有他语言内联代码降级（见 3），
+   `sh -c`/`eval`/`$VAR` 这类真·shell 逃逸构造在任何位置都拒绝。
 3. **`python -c` 等他语言内联代码从拒绝降为放行+记录**。本守卫分析的是 shell 文本；
    `python -c` 的内容从来不可分析，而**写进 .py 文件执行本来就放行**——拦
    `python -c` 不改变真实攻击面（攻击者换文件即可），只制造噪音与绕行动机。
    真正绕不过 shell 分析的构造（`sh -c`/`eval`/`source`/`xargs`/`find -exec`/
-   `sudo`/`$( )`/反引号/`${ }`/`$VAR`）仍一律拒绝。
+   `sudo`/`$( )`/反引号/`${ }`/`$VAR`）在**任何位置**（含循环/条件体内）一律拒绝。
 
 ## 拦截消息（v0.10.20：单行 + 错误码）
 
@@ -113,9 +116,8 @@ _NOTED_PATTERNS: list[tuple[str, str]] = [
 ]
 _NOTED_COMPILED = [(re.compile(p), why) for p, why in _NOTED_PATTERNS]
 
-# 循环/条件构造：词表与条件段不是路径引用；其命令体逐段照常判定。
+# 循环/条件构造：词表与条件段不是路径引用；其命令体逐段照常判定（不分体内外）。
 _LOOP_HEADS = frozenset({"for", "while", "until", "if"})
-_LOOP_BODY_HEADS = frozenset({"do", "then"})
 _LOOP_END_HEADS = frozenset({"done", "fi", "else", "elif", "esac"})
 
 # 引号内文本"像纯路径"才参与越界判定；含正则/glob 元字符或 `://` 的一律是字符串。
@@ -270,7 +272,6 @@ def analyze_command(command: str, workspace: str) -> list[dict[str, Any]]:
     raw = str(command)
     root = str(workspace or ".")
 
-    in_loop_body = False
     for segment in _SPLIT_RE.split(raw):
         segment = segment.strip()
         if not segment:
@@ -284,21 +285,21 @@ def analyze_command(command: str, workspace: str) -> list[dict[str, Any]]:
         #      命令体由后续 `do`/`then` 段逐段判定，这里只查动态构造
         #      （`for c in $HOME/../etc` 仍是动态拼路径，拒）。
         if head in _LOOP_HEADS:
-            in_loop_body = False
             risks += _dynamic_hits(_mask_quoted(segment), _DYNAMIC_COMPILED)
             continue
-        if head in _LOOP_BODY_HEADS:
-            in_loop_body = True
-        elif head in _LOOP_END_HEADS:
-            in_loop_body = False
-            continue
+        if head in _LOOP_END_HEADS:
+            continue  # done/fi/else/elif 不是命令，无需判定
 
         # 动态构造在**掩码后**的文本上查：单引号里的 `$VAR` 是字面量，不是动态
         # （双引号里的不掩码，仍会被查出来——它运行时会真展开）。
-        # 循环/条件体里的不可判定构造按 owner 交接书"放行+记录"处理，不进 risks。
+        # v0.10.38（D1 修复）：动态判定**不分循环体内外**。0.10.20 曾把循环/条件体
+        # 里的整个 _DYNAMIC 类都降级成"放行+记录"，验收实测那是通用后门：
+        # `for i in 1; do sh -c 'cat /etc/passwd'; done` / `eval` / `$VAR` 全放行，
+        # 与本模块文档"仍一律拒绝"自相矛盾。现在只有**他语言内联代码**
+        # （python/perl/node/ruby/php -c/-e）在任何位置都降级为记录——它的内容
+        # 本来就不可静态分析，且写进 .py 文件执行同样放行，拦它只制造绕行动机。
         masked_seg = _mask_quoted(segment)
-        if not in_loop_body:
-            risks += _dynamic_hits(masked_seg, _DYNAMIC_COMPILED)
+        risks += _dynamic_hits(masked_seg, _DYNAMIC_COMPILED)
 
         # ---- 1) cd / pushd 越界（无参数 = cd $HOME，也是越界）。
         #      用**原文** token：`cd "/etc"` 这种带引号的目标仍要拦。
@@ -355,34 +356,19 @@ def analyze_command(command: str, workspace: str) -> list[dict[str, Any]]:
 
 
 def dynamic_notes(command: str) -> list[dict[str, Any]]:
-    """v0.10.20：**放行但记录**的构造（他语言内联代码 + 循环体内的不可判定构造）。
+    """v0.10.20：**放行但记录**的构造（他语言内联代码：python/perl/node/ruby/php -c/-e）。
 
     返回审计用的说明列表；调用方（shell_ops）记 `shell:dynamic-allowed`，
     不进 risks——不拒绝，只留痕。
+
+    v0.10.38（D1 修复）：这里**只剩**他语言内联代码。0.10.20 曾把循环/条件体里的
+    整个动态类（`sh -c`/`eval`/`$VAR`…）也降级成记录，等于开了一个通用后门
+    （验收实测：`for i in 1; do sh -c 'cat /etc/passwd'; done` 被放行）——那些构造
+    现在在 `analyze_command` 里一律进 risks，与模块文档一致。
     """
     if not command or not str(command).strip():
         return []
-    raw = str(command)
-    notes = _dynamic_hits(_mask_quoted(raw), _NOTED_COMPILED)
-    # 循环/条件体内的不可判定构造：命令体逐段判定过路径后仍不可判定的，放行+记录。
-    in_loop_body = False
-    for segment in _SPLIT_RE.split(raw):
-        segment = segment.strip()
-        if not segment:
-            continue
-        toks = _tokens(segment)
-        head = toks[0] if toks else ""
-        if head in _LOOP_HEADS:
-            in_loop_body = False
-            continue
-        if head in _LOOP_BODY_HEADS:
-            in_loop_body = True
-        elif head in _LOOP_END_HEADS:
-            in_loop_body = False
-            continue
-        if in_loop_body:
-            notes += _dynamic_hits(_mask_quoted(segment), _DYNAMIC_COMPILED)
-    return notes
+    return _dynamic_hits(_mask_quoted(str(command)), _NOTED_COMPILED)
 
 
 def is_elevated(ctx: Any) -> bool:

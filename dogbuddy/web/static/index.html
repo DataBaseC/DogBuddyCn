@@ -6,7 +6,7 @@
 <title>DogBuddyCn · 控制台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z' fill='%234f8cff'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/assets/css/base.css?v=5632697b6e">
-<link rel="stylesheet" href="/assets/css/views.css?v=8a9a0fc842">
+<link rel="stylesheet" href="/assets/css/views.css?v=2ab88b89f4">
 </head>
 <body>
 
@@ -252,6 +252,7 @@
             <button class="icon-btn" id="fm-refresh" title="刷新"><svg class="ic"><use href="#ic-refresh"/></svg></button>
             <button class="btn btn-soft btn-sm" id="fm-new-folder"><svg class="ic"><use href="#ic-folder-plus"/></svg>新建文件夹</button>
             <button class="btn btn-soft btn-sm" id="fm-new-file"><svg class="ic"><use href="#ic-file-plus"/></svg>新建文件</button>
+            <button class="btn btn-soft btn-sm" id="fm-zip" title="把当前目录打包成 tar.gz 下载"><svg class="ic"><use href="#ic-download"/></svg>打包下载</button>
             <button class="btn btn-primary btn-sm" id="fm-upload"><svg class="ic"><use href="#ic-upload"/></svg>上传</button>
             <input type="file" id="fm-upload-input" class="hidden" multiple>
             <div class="spacer"></div>
@@ -485,6 +486,6 @@
 <div id="toast-root" class="toast-root"></div>
 
 <!-- 页面只加载 bundle：源文件顺序见 tools/bundle-order.json，由 tools/rebuild-bundles.py 拼接 -->
-<script src="/assets/js/index.bundle.js?v=5436405429"></script>
+<script src="/assets/js/index.bundle.js?v=c0d871437d"></script>
 </body>
 </html>

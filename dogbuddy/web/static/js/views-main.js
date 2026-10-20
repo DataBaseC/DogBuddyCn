@@ -358,12 +358,18 @@
      */
     renderMsg: function (m, role) {
       var avatar = role === 'user' ? '我' : (role === 'system' ? 'S' : 'AI');
+      // v0.10.38：群组协作消息标出来——群频道与成员会话是同一批消息的两份投影，
+      // 带 group_id 的这条在群详情页也看得见（其他成员也看得到）。
+      var grp = m.group_id
+        ? '<span class="badge badge-amber" title="群组协作消息：群频道里其他成员也看得到">群组</span>'
+        : '';
       return '<div class="msg ' + U.esc(role) + '">' +
         '<div class="msg-avatar">' + avatar + '</div>' +
         '<div style="min-width:0">' +
         '<div class="msg-bubble">' + Windows.renderContent(m.content) + '</div>' +
         '<div class="msg-meta"><span>' + U.esc(U.fmtClock(m.created_at)) + '</span>' +
         (m.tokens ? '<span class="num">' + U.esc(m.tokens) + ' tok</span>' : '') +
+        grp +
         '</div></div></div>';
     },
 
@@ -378,6 +384,10 @@
         return Windows.renderToolCard(m.content, Windows.toolName(m));
       }).join('');
       var time = U.fmtClock(group[0].created_at);
+      // v0.10.38：整组工具调用发生在群组协作里 → 同样标「群组」
+      var grp = group[0] && group[0].group_id
+        ? '<span class="badge badge-amber" title="群组协作消息：群频道里其他成员也看得到">群组</span>'
+        : '';
       var bubble;
       if (group.length === 1) {
         bubble = '<div class="msg-bubble">工具调用' + cards + '</div>';
@@ -395,7 +405,7 @@
       return '<div class="msg tool">' +
         '<div class="msg-avatar">T</div>' +
         '<div style="min-width:0">' + bubble +
-        '<div class="msg-meta"><span>' + U.esc(time) + '</span></div></div></div>';
+        '<div class="msg-meta"><span>' + U.esc(time) + '</span>' + grp + '</div></div></div>';
     },
 
     renderMessages: function () {
@@ -463,6 +473,8 @@
         U.esc(statusLabel(w.status)) + '</span>' + trustBadge(w) + '</div>' +
         '<div class="card-sub" style="margin-top:4px">' + U.esc(w.workspace_path || '') + '</div></div>' +
         '<div class="win-detail-actions">' +
+        /* v0.10.39：工作区入口（owner："挨个翻文件夹找成果太麻烦"） */
+        '<button class="btn btn-primary btn-sm" data-act="workspace" title="在文件管理器里打开该工位的工作区">' + U.icon('folder', 'sm') + '工作区</button>' +
         '<button class="btn btn-soft btn-sm" data-act="rename">' + U.icon('edit', 'sm') + '改名</button>' +
         '<button class="btn btn-soft btn-sm" data-act="model">' + U.icon('cpu', 'sm') + '模型 / 模式</button>' +
         '<button class="btn btn-soft btn-sm" data-act="params">' + U.icon('slider', 'sm') + '参数</button>' +
@@ -918,6 +930,13 @@
       var w = Windows.detail;
       if (!w) return;
       var id = w.id;
+      /* v0.10.39：跳到该工位的工作区（找成果不用挨个翻目录） */
+      if (act === 'workspace') {
+        var ws = w.effective_workspace || w.workspace_path || '';
+        if (!ws) { U.toast('warn', '该工位没有工作区路径'); return; }
+        if (global.App && global.App.go) global.App.go('files', { workspace: ws });
+        return;
+      }
       if (act === 'pause' || act === 'resume') {
         (act === 'pause' ? A.windows.pause(id) : A.windows.resume(id)).then(function () {
           U.toast('success', act === 'pause' ? '已暂停' : '已恢复');

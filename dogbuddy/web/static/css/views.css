@@ -354,6 +354,15 @@ tr.history-row td { background: rgba(255, 255, 255, 0.02); padding: 0 12px 14px;
 .fm-crumb button:hover { background: var(--bg-3); color: var(--tx-1); }
 .fm-crumb button.current { color: var(--acc-1); font-weight: 600; }
 .fm-crumb .ic { width: 12px; height: 12px; color: var(--tx-4); }
+/* v0.10.39：工作区指示条（从工位/群组/项目页跳转进来时，一眼看到在哪个工作区） */
+.fm-ws-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 340px; margin-right: 8px; padding: 3px 9px;
+  border: 1px solid var(--acc-1); border-radius: 999px;
+  color: var(--acc-1); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fm-ws-chip .mono { overflow: hidden; text-overflow: ellipsis; }
 .fm-panes {
   flex: 1; display: grid;
   grid-template-columns: 232px 1fr 380px;

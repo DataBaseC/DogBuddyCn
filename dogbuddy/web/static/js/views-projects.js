@@ -103,6 +103,9 @@
       '<div><div class="prj-name">' + U.esc(p.name) + '</div>' +
       '<div class="card-sub mono">' + U.esc(p.root_path) + '</div></div>' +
       '<div class="prj-actions">' +
+      /* v0.10.39：打开工作区 / 打包下载（owner："挨个翻文件夹找成果太麻烦"） */
+      '<button class="btn btn-primary btn-sm" data-prj="open-ws" data-id="' + U.esc(p.id) + '" data-root="' + U.esc(p.root_path) + '" title="在文件管理器里打开项目根目录">打开工作区</button>' +
+      '<button class="btn btn-soft btn-sm" data-prj="zip" data-id="' + U.esc(p.id) + '" data-root="' + U.esc(p.root_path) + '" title="把整个项目目录打包成 tar.gz 下载">打包下载</button>' +
       '<button class="btn btn-soft btn-sm" data-prj="chain" data-id="' + U.esc(p.id) + '" title="工位/项目/配置套/全局的参数继承">参数链</button>' +
       '<button class="btn btn-soft btn-sm" data-prj="cmd-chain" data-id="' + U.esc(p.id) + '" title="管理员→主管→员工 的指挥链与健康度">指挥链</button>' +
       '<button class="btn btn-soft btn-sm" data-prj="mount" data-id="' + U.esc(p.id) + '">挂载工位</button>' +
@@ -142,7 +145,9 @@
     host.innerHTML = rows.map(projectCard).join('');
     U.$$('[data-prj]', host).forEach(function (b) {
       b.addEventListener('click', function () {
-        action(b.getAttribute('data-prj'), b.getAttribute('data-id'));
+        /* v0.10.39：data-root 一起传（打开工作区/打包下载要项目根路径） */
+        action(b.getAttribute('data-prj'), b.getAttribute('data-id'),
+               b.getAttribute('data-root') || '', b);
       });
     });
     U.$$('[data-unmount]', host).forEach(function (b) {
@@ -170,9 +175,38 @@
     });
   }
 
-  function action(kind, id) {
+  function action(kind, id, root, btn) {
     var p = state.projects.filter(function (x) { return x.id === id; })[0];
     if (!p) return;
+    /* v0.10.39：打开工作区（跳到文件管理器，根=项目根目录） */
+    if (kind === 'open-ws') {
+      var ws = root || p.root_path || '';
+      if (!ws) { U.toast('warn', '该项目没有根目录路径'); return; }
+      if (global.App && global.App.go) global.App.go('files', { workspace: ws });
+      return;
+    }
+    /* v0.10.39：打包下载整个项目目录（tar.gz） */
+    if (kind === 'zip') {
+      var zroot = root || p.root_path || '';
+      if (!zroot) { U.toast('warn', '该项目没有根目录路径'); return; }
+      if (btn) btn.disabled = true;
+      U.toast('info', '正在打包「' + (p.name || '') + '」…');
+      A.files.zip('', zroot).then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = (p.name || 'project') + '.tar.gz';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+      }).catch(function (e) {
+        U.toast('error', '打包下载失败：' + e.message);
+      }).then(function () {
+        if (btn) btn.disabled = false;
+      });
+      return;
+    }
     if (kind === 'edit') return editProject(p);
     if (kind === 'mount') return mountWindow(p);
     if (kind === 'chain') return showChain(p);

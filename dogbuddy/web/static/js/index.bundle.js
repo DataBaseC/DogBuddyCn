@@ -584,6 +584,10 @@
       remove: function (id) { return request('DELETE', '/api/iterations/' + enc(id)); }
     },
     /* ---------------- 模型管理（目录 + 备注 + 切换） ---------------- */
+    /* GET /api/capabilities → {tools, roles, tool_count, permissions}
+       （能力清单页的数据源；v0.10.39 修复：这个方法整好漏了——views-capabilities.js
+       调 A.capabilities() 时同步抛 TypeError，.catch 接不住，页面整个空白） */
+    capabilities: function () { return request('GET', '/api/capabilities'); },
     models: {
       /* GET /api/models?enabled_only= → {models:[...], current:{...}, summary:{...}} */
       list: function (enabledOnly) {
@@ -720,20 +724,26 @@
 
     /* ---------------- 文件管理器（path 为工作区相对路径；workspace 可选） ---------------- */
     files: {
-      tree: function (path) {
-        return request('GET', '/api/files/tree' + qs({ path: path || '' }));
+      /* v0.10.39：所有方法带 workspace（绝对路径）——从工位/群组/项目页跳转进来时
+         浏览的是那个工作区，不再是默认根目录。 */
+      tree: function (path, workspace) {
+        return request('GET', '/api/files/tree' + qs({ path: path || '', workspace: workspace || undefined }));
       },
-      list: function (path) {
-        return request('GET', '/api/files/list' + qs({ path: path || '' }));
+      list: function (path, workspace) {
+        return request('GET', '/api/files/list' + qs({ path: path || '', workspace: workspace || undefined }));
       },
-      read: function (path) {
-        return request('GET', '/api/files/read' + qs({ path: path }));
+      read: function (path, workspace) {
+        return request('GET', '/api/files/read' + qs({ path: path, workspace: workspace || undefined }));
       },
-      download: function (path) {
-        return request('GET', '/api/files/download' + qs({ path: path }), null, { blob: true });
+      download: function (path, workspace) {
+        return request('GET', '/api/files/download' + qs({ path: path, workspace: workspace || undefined }), null, { blob: true });
       },
-      image: function (path) {
-        return request('GET', '/api/files/image' + qs({ path: path }), null, { blob: true });
+      /* v0.10.39：目录打包下载（tar.gz）——"挨个翻文件夹找成果太麻烦" */
+      zip: function (path, workspace) {
+        return request('GET', '/api/files/zip' + qs({ path: path || '', workspace: workspace || undefined }), null, { blob: true });
+      },
+      image: function (path, workspace) {
+        return request('GET', '/api/files/image' + qs({ path: path, workspace: workspace || undefined }), null, { blob: true });
       },
       upload: function (path, file) {
         var fd = new FormData();
@@ -1505,12 +1515,18 @@
      */
     renderMsg: function (m, role) {
       var avatar = role === 'user' ? '我' : (role === 'system' ? 'S' : 'AI');
+      // v0.10.38：群组协作消息标出来——群频道与成员会话是同一批消息的两份投影，
+      // 带 group_id 的这条在群详情页也看得见（其他成员也看得到）。
+      var grp = m.group_id
+        ? '<span class="badge badge-amber" title="群组协作消息：群频道里其他成员也看得到">群组</span>'
+        : '';
       return '<div class="msg ' + U.esc(role) + '">' +
         '<div class="msg-avatar">' + avatar + '</div>' +
         '<div style="min-width:0">' +
         '<div class="msg-bubble">' + Windows.renderContent(m.content) + '</div>' +
         '<div class="msg-meta"><span>' + U.esc(U.fmtClock(m.created_at)) + '</span>' +
         (m.tokens ? '<span class="num">' + U.esc(m.tokens) + ' tok</span>' : '') +
+        grp +
         '</div></div></div>';
     },
 
@@ -1525,6 +1541,10 @@
         return Windows.renderToolCard(m.content, Windows.toolName(m));
       }).join('');
       var time = U.fmtClock(group[0].created_at);
+      // v0.10.38：整组工具调用发生在群组协作里 → 同样标「群组」
+      var grp = group[0] && group[0].group_id
+        ? '<span class="badge badge-amber" title="群组协作消息：群频道里其他成员也看得到">群组</span>'
+        : '';
       var bubble;
       if (group.length === 1) {
         bubble = '<div class="msg-bubble">工具调用' + cards + '</div>';
@@ -1542,7 +1562,7 @@
       return '<div class="msg tool">' +
         '<div class="msg-avatar">T</div>' +
         '<div style="min-width:0">' + bubble +
-        '<div class="msg-meta"><span>' + U.esc(time) + '</span></div></div></div>';
+        '<div class="msg-meta"><span>' + U.esc(time) + '</span>' + grp + '</div></div></div>';
     },
 
     renderMessages: function () {
@@ -1610,6 +1630,8 @@
         U.esc(statusLabel(w.status)) + '</span>' + trustBadge(w) + '</div>' +
         '<div class="card-sub" style="margin-top:4px">' + U.esc(w.workspace_path || '') + '</div></div>' +
         '<div class="win-detail-actions">' +
+        /* v0.10.39：工作区入口（owner："挨个翻文件夹找成果太麻烦"） */
+        '<button class="btn btn-primary btn-sm" data-act="workspace" title="在文件管理器里打开该工位的工作区">' + U.icon('folder', 'sm') + '工作区</button>' +
         '<button class="btn btn-soft btn-sm" data-act="rename">' + U.icon('edit', 'sm') + '改名</button>' +
         '<button class="btn btn-soft btn-sm" data-act="model">' + U.icon('cpu', 'sm') + '模型 / 模式</button>' +
         '<button class="btn btn-soft btn-sm" data-act="params">' + U.icon('slider', 'sm') + '参数</button>' +
@@ -2065,6 +2087,13 @@
       var w = Windows.detail;
       if (!w) return;
       var id = w.id;
+      /* v0.10.39：跳到该工位的工作区（找成果不用挨个翻目录） */
+      if (act === 'workspace') {
+        var ws = w.effective_workspace || w.workspace_path || '';
+        if (!ws) { U.toast('warn', '该工位没有工作区路径'); return; }
+        if (global.App && global.App.go) global.App.go('files', { workspace: ws });
+        return;
+      }
       if (act === 'pause' || act === 'resume') {
         (act === 'pause' ? A.windows.pause(id) : A.windows.resume(id)).then(function () {
           U.toast('success', act === 'pause' ? '已暂停' : '已恢复');
@@ -4685,6 +4714,9 @@
       '<div><div class="prj-name">' + U.esc(p.name) + '</div>' +
       '<div class="card-sub mono">' + U.esc(p.root_path) + '</div></div>' +
       '<div class="prj-actions">' +
+      /* v0.10.39：打开工作区 / 打包下载（owner："挨个翻文件夹找成果太麻烦"） */
+      '<button class="btn btn-primary btn-sm" data-prj="open-ws" data-id="' + U.esc(p.id) + '" data-root="' + U.esc(p.root_path) + '" title="在文件管理器里打开项目根目录">打开工作区</button>' +
+      '<button class="btn btn-soft btn-sm" data-prj="zip" data-id="' + U.esc(p.id) + '" data-root="' + U.esc(p.root_path) + '" title="把整个项目目录打包成 tar.gz 下载">打包下载</button>' +
       '<button class="btn btn-soft btn-sm" data-prj="chain" data-id="' + U.esc(p.id) + '" title="工位/项目/配置套/全局的参数继承">参数链</button>' +
       '<button class="btn btn-soft btn-sm" data-prj="cmd-chain" data-id="' + U.esc(p.id) + '" title="管理员→主管→员工 的指挥链与健康度">指挥链</button>' +
       '<button class="btn btn-soft btn-sm" data-prj="mount" data-id="' + U.esc(p.id) + '">挂载工位</button>' +
@@ -4724,7 +4756,9 @@
     host.innerHTML = rows.map(projectCard).join('');
     U.$$('[data-prj]', host).forEach(function (b) {
       b.addEventListener('click', function () {
-        action(b.getAttribute('data-prj'), b.getAttribute('data-id'));
+        /* v0.10.39：data-root 一起传（打开工作区/打包下载要项目根路径） */
+        action(b.getAttribute('data-prj'), b.getAttribute('data-id'),
+               b.getAttribute('data-root') || '', b);
       });
     });
     U.$$('[data-unmount]', host).forEach(function (b) {
@@ -4752,9 +4786,38 @@
     });
   }
 
-  function action(kind, id) {
+  function action(kind, id, root, btn) {
     var p = state.projects.filter(function (x) { return x.id === id; })[0];
     if (!p) return;
+    /* v0.10.39：打开工作区（跳到文件管理器，根=项目根目录） */
+    if (kind === 'open-ws') {
+      var ws = root || p.root_path || '';
+      if (!ws) { U.toast('warn', '该项目没有根目录路径'); return; }
+      if (global.App && global.App.go) global.App.go('files', { workspace: ws });
+      return;
+    }
+    /* v0.10.39：打包下载整个项目目录（tar.gz） */
+    if (kind === 'zip') {
+      var zroot = root || p.root_path || '';
+      if (!zroot) { U.toast('warn', '该项目没有根目录路径'); return; }
+      if (btn) btn.disabled = true;
+      U.toast('info', '正在打包「' + (p.name || '') + '」…');
+      A.files.zip('', zroot).then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = (p.name || 'project') + '.tar.gz';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+      }).catch(function (e) {
+        U.toast('error', '打包下载失败：' + e.message);
+      }).then(function () {
+        if (btn) btn.disabled = false;
+      });
+      return;
+    }
     if (kind === 'edit') return editProject(p);
     if (kind === 'mount') return mountWindow(p);
     if (kind === 'chain') return showChain(p);
@@ -6743,6 +6806,11 @@
         '<div><h2 class="card-title">' + U.esc(g.name) + '</h2>' +
         '<p class="card-sub">' + U.esc(g.description || '（无描述）') + '</p></div>' +
         '<div class="toolbar-actions">' +
+        /* v0.10.39：「挨个翻文件夹找成果太麻烦」——一键跳到本组的共享工作区 */
+        (g.shared_workspace
+          ? '<button class="btn btn-primary btn-sm" id="grp-open-ws" title="' + U.esc(g.shared_workspace) + '">' +
+            U.icon('folder', 'sm') + '打开共享工作区</button>'
+          : '') +
         '<button class="btn btn-soft btn-sm" id="grp-edit">' + U.icon('edit', 'sm') + '编辑</button>' +
         '<button class="btn btn-soft btn-sm" id="grp-chan-refresh">' + U.icon('refresh', 'sm') + '刷新频道</button>' +
         '<button class="btn btn-danger btn-sm" id="grp-delete">' + U.icon('trash', 'sm') + '删除群组</button>' +
@@ -6795,6 +6863,9 @@
                   '<button class="icon-btn" data-act="set-lead" title="设为组长">' + U.icon('arrow-up', 'sm') + '</button>') +
                 (m.exists === false ? '' :
                   '<button class="icon-btn" data-act="chat" title="查看该成员的会话（他们在这里的发言）">' + U.icon('chat', 'sm') + '</button>') +
+                /* v0.10.39：跳到该成员自己的工作区（找他的成果） */
+                (m.exists === false || !m.workspace_path ? '' :
+                  '<button class="icon-btn" data-act="files" title="打开该成员的工作区：' + U.esc(m.workspace_path) + '">' + U.icon('folder', 'sm') + '</button>') +
                 '<button class="icon-btn danger" data-act="remove" title="移出群组">' + U.icon('trash', 'sm') + '</button>' +
                 '</div></div>';
             }).join('')
@@ -6896,6 +6967,15 @@
       if (!g) return;
       var edit = document.getElementById('grp-edit');
       if (edit) edit.addEventListener('click', function () { Groups.openEdit(); });
+      /* v0.10.39：跳到本组的共享工作区（项目根）——找成果不用再挨个翻目录 */
+      var openWs = document.getElementById('grp-open-ws');
+      if (openWs) {
+        openWs.addEventListener('click', function () {
+          var ws = (Groups.current && Groups.current.shared_workspace) || '';
+          if (!ws) { U.toast('warn', '本组没有挂项目，没有共享工作区'); return; }
+          if (global.App && global.App.go) global.App.go('files', { workspace: ws });
+        });
+      }
       var del = document.getElementById('grp-delete');
       if (del) {
         del.addEventListener('click', function () {
@@ -6976,6 +7056,17 @@
         if (chat) {
           chat.addEventListener('click', function () {
             if (global.App && global.App.go) global.App.go('windows', { win: wid });
+          });
+        }
+        // v0.10.39：成员行加工作区入口——"挨个翻文件夹找成果太麻烦"
+        var files = U.$('[data-act="files"]', row);
+        if (files) {
+          files.addEventListener('click', function () {
+            var ws = (Groups.current && Groups.current.members || [])
+              .filter(function (m) { return m.window_id === wid; })[0];
+            var path = ws && ws.workspace_path;
+            if (!path) { U.toast('warn', '该成员没有工作区路径'); return; }
+            if (global.App && global.App.go) global.App.go('files', { workspace: path });
           });
         }
       });
@@ -7494,6 +7585,9 @@
 
   var FileMgr = {
     path: '',
+    /* v0.10.39：当前工作区（绝对路径）——从工位/群组/项目页跳转进来时浏览的是
+       那个工作区；空 = 默认根目录。所有 A.files.* 调用都带它。 */
+    workspace: '',
     entries: [],
     breadcrumbs: [],
     keyword: '',
@@ -7504,7 +7598,12 @@
     treeData: [],
 
     /* ---------- 加载 ---------- */
-    load: function () {
+    /* initial: {path, workspace} —— 从别处跳转进来时指定起点（v0.10.39） */
+    load: function (initial) {
+      if (initial && typeof initial === 'object') {
+        if (typeof initial.workspace === 'string') FileMgr.workspace = initial.workspace;
+        if (typeof initial.path === 'string') FileMgr.path = initial.path;
+      }
       FileMgr.loadList();
       FileMgr.loadTree();
     },
@@ -7512,7 +7611,7 @@
     loadList: function () {
       var host = document.getElementById('fm-list');
       if (host) host.innerHTML = U.skeleton('rows');
-      return A.files.list(FileMgr.path).then(function (data) {
+      return A.files.list(FileMgr.path, FileMgr.workspace).then(function (data) {
         FileMgr.breadcrumbs = (data && data.breadcrumbs) || [];
         FileMgr.entries = (data && data.entries) || [];
         FileMgr.renderCrumb();
@@ -7527,7 +7626,7 @@
     },
 
     loadTree: function () {
-      return A.files.tree('').then(function (rows) {
+      return A.files.tree('', FileMgr.workspace).then(function (rows) {
         FileMgr.treeData = rows || [];
         FileMgr.renderTree();
       }).catch(function () { /* 树失败不打扰 */ });
@@ -7537,11 +7636,17 @@
     renderCrumb: function () {
       var host = document.getElementById('fm-crumb');
       if (!host) return;
+      /* v0.10.39：工作区指示——从工位/群组/项目跳进来时，用户必须一眼看到
+         "我现在在哪个工作区里翻"，否则和默认根目录混淆。 */
+      var wsChip = FileMgr.workspace
+        ? '<span class="fm-ws-chip" title="当前工作区：' + U.esc(FileMgr.workspace) + '">' +
+          U.icon('folder', 'sm') + '<span class="mono">' + U.esc(FileMgr.workspace) + '</span></span>'
+        : '';
       var crumbs = FileMgr.breadcrumbs.slice();
       if (!crumbs.length || crumbs[crumbs.length - 1].path !== FileMgr.path) {
         crumbs.push({ name: '根目录', path: FileMgr.path });
       }
-      host.innerHTML = crumbs.map(function (c, i) {
+      host.innerHTML = wsChip + crumbs.map(function (c, i) {
         var isLast = i === crumbs.length - 1;
         return (i ? U.icon('chevron-r', 'sm') : '') +
           '<button class="' + (isLast ? 'current' : '') + '" data-path="' + U.esc(c.path) + '">' +
@@ -7627,7 +7732,10 @@
             '<td class="fm-time">' + U.esc(U.fmtTime(e.mtime)) + '</td>' +
             '<td><div class="fm-row-actions">' +
             '<button class="icon-btn" data-op="rename" title="重命名">' + U.icon('edit', 'sm') + '</button>' +
-            (isDir ? '' : '<button class="icon-btn" data-op="download" title="下载">' + U.icon('download', 'sm') + '</button>') +
+            /* v0.10.39：文件直接下载；目录打包成 tar.gz 下载（"挨个翻文件夹找成果太麻烦"） */
+            (isDir
+              ? '<button class="icon-btn" data-op="zip" title="打包下载整个目录（tar.gz）">' + U.icon('download', 'sm') + '</button>'
+              : '<button class="icon-btn" data-op="download" title="下载">' + U.icon('download', 'sm') + '</button>') +
             '<button class="icon-btn danger" data-op="delete" title="删除">' + U.icon('trash', 'sm') + '</button>' +
             '</div></td></tr>';
         }).join('') + '</tbody></table>';
@@ -7669,6 +7777,7 @@
           if (op === 'rename') FileMgr.renameEntry(entry);
           else if (op === 'delete') FileMgr.deleteEntry(entry);
           else if (op === 'download') FileMgr.download(entry.path);
+          else if (op === 'zip') FileMgr.zipDir(entry.path, entry.name, btn);
         });
       });
       FileMgr.bindDropZone();
@@ -7862,7 +7971,7 @@
     },
 
     download: function (path) {
-      A.files.download(path).then(function (blob) {
+      A.files.download(path, FileMgr.workspace).then(function (blob) {
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
         a.href = url;
@@ -7873,6 +7982,27 @@
         setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
       }).catch(function (e) {
         U.toast('error', '下载失败：' + e.message);
+      });
+    },
+
+    /* v0.10.39：目录打包下载（tar.gz）——项目/工位成果一键拿走，
+       不用挨个文件夹翻。大目录打包要几秒，按钮先置灰。 */
+    zipDir: function (path, name, btn) {
+      if (btn) btn.disabled = true;
+      U.toast('info', '正在打包' + (name ? '「' + name + '」' : '当前目录') + '…');
+      A.files.zip(path, FileMgr.workspace).then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = (name || path.split('/').pop() || 'workspace') + '.tar.gz';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+      }).catch(function (e) {
+        U.toast('error', '打包下载失败：' + e.message);
+      }).then(function () {
+        if (btn) btn.disabled = false;
       });
     },
 
@@ -7949,11 +8079,13 @@
     },
 
     /* ---------- 从日志跳转预览 ---------- */
-    openPath: function (path) {
+    /* v0.10.39：workspace 可选——日志里带的路径可能属于某个工位/项目工作区 */
+    openPath: function (path, workspace) {
       var parts = String(path || '').split(/[\\/]/);
       var name = parts.pop();
       var dir = parts.join('/');
       global.App.go('files');
+      FileMgr.workspace = workspace || '';
       FileMgr.path = '';
       FileMgr.loadList().then(function () {
         FileMgr.path = dir;
@@ -7980,6 +8112,8 @@
       bind('fm-refresh', function () { FileMgr.load(); });
       bind('fm-new-folder', FileMgr.mkdir);
       bind('fm-new-file', FileMgr.mkfile);
+      /* v0.10.39：打包下载当前目录 */
+      bind('fm-zip', function () { FileMgr.zipDir(FileMgr.path, '', null); });
       bind('fm-upload', function () {
         var input = document.getElementById('fm-upload-input');
         if (input) input.click();
@@ -8175,7 +8309,9 @@
           if (V.Models) V.Models.load();
           break;
         case 'files':
-          global.FileMgr.load();
+          /* v0.10.39：App.go('files', {path, workspace}) —— 从工位/群组/项目页
+             跳转时直接落到那个工作区（不用再手动翻目录） */
+          global.FileMgr.load(params || {});
           break;
         case 'logs':
           V.Logs.load();

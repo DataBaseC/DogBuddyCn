@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import base64
+import logging
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+logger = logging.getLogger("dogbuddy.web.files")
 
 
 class MkdirIn(BaseModel):
@@ -75,6 +78,39 @@ def router(svc, auth_deps) -> APIRouter:
         except (PermissionError, FileNotFoundError) as e:
             raise HTTPException(status_code=403, detail=str(e)) from e
         return FileResponse(str(target), filename=name)
+
+    @r.get("/files/zip", dependencies=auth_deps)
+    def zip_dir(path: str = "", workspace: str | None = None,
+                background_tasks: BackgroundTasks = None):
+        """目录打包下载（v0.10.39）：tar.gz 流 + 发完自动删临时文件。
+
+        owner："项目文件夹目前不能打包一起下载"。空 path = 整个工作区根。
+        排除 .git/.venv/__pycache__/node_modules（与 list/tree 口径一致）。
+        """
+        tmp = None
+        try:
+            tmp, name = _fs(workspace).zip_dir(path, workspace)
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e)) from e
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except Exception as e:  # noqa: BLE001 — 打包失败给 500，别把临时文件留在盘上
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            raise HTTPException(status_code=500, detail=f"zip failed: {e}") from e
+
+        def _cleanup() -> None:
+            try:
+                tmp.unlink()
+            except OSError:
+                logger.debug("zip temp cleanup failed", exc_info=True)
+
+        if background_tasks is not None:
+            background_tasks.add_task(_cleanup)
+        return FileResponse(str(tmp), filename=name, media_type="application/gzip")
 
     @r.get("/files/image", dependencies=auth_deps)
     def image(path: str, workspace: str | None = None) -> dict:

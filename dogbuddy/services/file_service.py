@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import shutil
+import tarfile
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,9 @@ from typing import Any
 logger = logging.getLogger("dogbuddy.services.files")
 
 MAX_PREVIEW_BYTES = 200 * 1024
+
+#: 打包下载排除的目录（与 list/tree 的可见性口径一致——这些不进用户的成果包）
+ZIP_EXCLUDE_DIRS = {".git", ".venv", "__pycache__", "node_modules"}
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg"}
 LANG_MAP = {
@@ -186,3 +192,37 @@ class FileService:
         else:
             raise FileNotFoundError(rel_path)
         return True
+
+    # ------------------------------------------------------------------ zip
+    def zip_dir(self, rel_path: str = "", workspace: str | None = None) -> tuple[Path, str]:
+        """把目录打包成 tar.gz（v0.10.39：项目/工位成果一键下载）。
+
+        owner 原话："项目文件夹目前不能打包一起下载" + "挨个翻文件夹找成果太麻烦"。
+        返回 (临时文件路径, 下载文件名)——**调用方负责发完后删除临时文件**
+        （路由用 BackgroundTasks；本方法中途失败也会留下半成品，由调用方的
+        except 分支清理）。排除 `.git`/`.venv`/`__pycache__`/`node_modules`：
+        与 list/tree 的可见性口径一致，成果包里不该有这些。
+        """
+        target = self.resolve(rel_path, workspace)
+        if not target.is_dir():
+            raise FileNotFoundError(f"not a directory: {rel_path or '(root)'}")
+        fd, tmp_name = tempfile.mkstemp(prefix="dogbuddy-zip-", suffix=".tar.gz")
+        os.close(fd)
+        out = Path(tmp_name)
+
+        def _keep(ti: tarfile.TarInfo) -> tarfile.TarInfo | None:
+            if any(part in ZIP_EXCLUDE_DIRS for part in Path(ti.name).parts):
+                return None
+            return ti
+
+        try:
+            with tarfile.open(out, "w:gz") as tar:
+                tar.add(target, arcname=target.name or "workspace", filter=_keep)
+        except Exception:
+            # 半成品不留盘（调用方的 except 也会兜底一次）
+            try:
+                out.unlink()
+            except OSError:
+                pass
+            raise
+        return out, f"{target.name or 'workspace'}.tar.gz"

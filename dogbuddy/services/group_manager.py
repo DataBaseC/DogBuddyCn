@@ -113,7 +113,10 @@ class GroupManager:
             out.append({"window_id": m.window_id,
                         "window_name": w.name if w else m.window_id,
                         "role": m.role, "joined_at": m.joined_at,
-                        "exists": w is not None})
+                        "exists": w is not None,
+                        # v0.10.39：成员自己的工作区路径——前端「打开工作区」
+                        # 跳转用（owner："挨个翻文件夹找成果太麻烦"）
+                        "workspace_path": (w.workspace_path if w else "") or ""})
         return out
 
     def channel(self, group_ref: str, limit: int = 100) -> list[dict]:
@@ -595,18 +598,30 @@ class GroupManager:
         summary = next((s["summary"] for s in reversed(steps) if s["is_lead"] and s["ok"]),
                        (steps[-1]["summary"] if steps else ""))
         limited_n = sum(1 for s in steps if s.get("rate_limited"))
+        # v0.10.38：终态诚实化。"完成了几步"是一等信号——以前只要收尾就写 `done`，
+        # 哪怕 4/4 名成员全被限速暂停、零产出（实测：迭代实验 status=done、零交付物，
+        # 上级探测被误导，真相藏在 summary 的一行字里）。
+        # 口径：全步 ok → done；有 ok 有未 ok → partial；一步都没成 → failed。
+        ok_n = sum(1 for s in steps if s.get("ok"))
+        total_n = len(steps)
+        run_status = ("done" if (total_n > 0 and ok_n == total_n)
+                      else "partial" if ok_n > 0 else "failed")
+        head = f"[完成 {ok_n}/{total_n} 步]"
         if limited_n:
             # v0.10.28：把"被限速暂停"说清楚，并给出下一步（不是失败，别让人瞎猜）
-            summary = (f"[限速暂停 {limited_n}/{len(steps)} 名成员] " + summary)
+            head += f"[限速暂停 {limited_n}/{total_n} 名成员]"
+        summary = head + " " + summary
         if parent_run is not None:
             try:
-                runs.finish(parent_run.id, "done",
-                            summary=(f"[限速暂停 {limited_n}] " if limited_n else "")
-                            + (summary or "")[:800])
+                runs.finish(parent_run.id, run_status,
+                            summary=(summary or "")[:800],
+                            error_code=("rate_limit_paused"
+                                        if limited_n and ok_n < total_n else ""))
             except Exception:  # noqa: BLE001
                 logger.debug("group run finish failed", exc_info=True)
         self.db.audit("system", "group:run",
-                      f"{g.id} members={len(steps)} rate_limited={limited_n} "
+                      f"{g.id} members={len(steps)} ok={ok_n}/{total_n} "
+                      f"status={run_status} rate_limited={limited_n} "
                       f"recap_chars={recap_total['chars']} "
                       f"recap_tokens≈{recap_total['tokens']} "
                       f"max_prompt_chars={max((s.get('prompt_chars', 0) for s in steps), default=0)}")
@@ -614,4 +629,5 @@ class GroupManager:
                 "start_id": start_id, "recap_total": recap_total,
                 "run_id": parent_run.id if parent_run is not None else "",
                 "rate_limited": limited_n,
+                "status": run_status, "completed_steps": ok_n, "total_steps": total_n,
                 "steps": steps, "summary": summary}

@@ -77,3 +77,57 @@ def test_compact_falls_back_when_llm_breaks(tmp_path):
     assert rec is not None  # compaction still happens with dumb summary
     assert len(sess.recent(1000)) <= 12
     db.close()
+
+
+# ---------------------------------------------------------- v0.10.38 消息数触发
+def test_message_count_triggers_compaction_even_with_huge_token_budget(tmp_path):
+    """token 阈值在长上下文库上永不触发（0.8×1,048,576），但会话一超过
+    `recent(60)` 窗口就开始滑动 → 提供商缓存前缀匹配不上 → 长会话工位
+    每次全价重发（实测 95 条会话的工位缓存命中 13.8%，56 条的 97.5%）。
+    消息数触发在 60 之前压缩，窗口不再滑动，缓存恢复。"""
+    import asyncio
+    db, sess = _session(tmp_path, 60)
+    llm = FakeLLM()
+    llm.push(content='{"narrative": "sum", "file_changes": [], "todos": [], '
+                     '"decisions": [], "lessons": []}')
+    # token 预算巨大 → 光看 token 永远不该压
+    c = Compactor(llm, db, threshold=0.8, max_context_tokens=1048576, max_messages=48)
+    assert c.should_compress(30000, 1048576) is False, "token 阈值不应触发"
+    assert c.should_compress_by_count(sess) is True, "60 条消息必须触发计数维度"
+    rec = asyncio.get_event_loop().run_until_complete(c.maybe_compact(sess))
+    assert rec is not None, "消息数超线必须压缩"
+    # 压完回到 12 条 → recent(60) 窗口不再滑动 → 前缀稳定 → 缓存可命中
+    assert len(sess.recent(1000)) <= 12
+    db.close()
+
+
+def test_short_session_never_compacts_by_count(tmp_path):
+    """短会话（≤ 触发线）不动——压缩本身要花一次 LLM 调用，不能滥用。"""
+    import asyncio
+    db, sess = _session(tmp_path, 20)
+    c = Compactor(FakeLLM(), db, threshold=0.8, max_context_tokens=1048576, max_messages=48)
+    assert c.should_compress_by_count(sess) is False
+    assert asyncio.get_event_loop().run_until_complete(c.maybe_compact(sess)) is None
+    db.close()
+
+
+def test_window_never_slides_after_count_compaction(tmp_path):
+    """回归根因本身：压缩后持续追加消息，到达触发线会被再次压缩，
+    消息数峰值不超过触发线 → recent(60) 窗口永远不滑动 → 缓存前缀不被打断。"""
+    import asyncio
+    db, sess = _session(tmp_path, 0)
+    llm = FakeLLM()
+    for _ in range(6):
+        llm.push(content='{"narrative": "sum", "file_changes": [], "todos": [], '
+                         '"decisions": [], "lessons": []}')
+    c = Compactor(llm, db, threshold=0.8, max_context_tokens=1048576, max_messages=48)
+    loop = asyncio.get_event_loop()
+    max_seen = 0
+    for i in range(70):
+        sess.append("user", f"m{i} " + "x" * 50)
+        rec = loop.run_until_complete(c.maybe_compact(sess))
+        max_seen = max(max_seen, len(sess.recent(1000)))
+        if rec is not None:
+            assert len(sess.recent(1000)) <= 12
+    assert max_seen <= 49, f"消息数峰值 {max_seen} 超过触发线 48，窗口会滑动"
+    db.close()

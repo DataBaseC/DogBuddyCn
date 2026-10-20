@@ -994,9 +994,13 @@ class WindowManager:
     def recent_messages(self, window_id: str, limit: int = 100) -> list[dict[str, Any]]:
         rt = self._rt(window_id)
         # meta carries tool_name/tool_call_id (T2.6) and tool_calls for rebuild
+        # v0.10.38：`group_id` 暴露给前端——员工聊天页要能标出"这是群组协作消息"
+        # （群频道与成员会话是同一批消息的两份投影；以前 DTO 不带这个字段，
+        # 前端无法区分，owner 在工人聊天记录里看不到群组上下文）。
         return [{"id": m.id, "role": m.role, "content": m.content,
                  "created_at": m.created_at, "tokens": m.tokens,
                  "tool_name": (m.meta or {}).get("tool_name", ""),
                  "tool_call_id": (m.meta or {}).get("tool_call_id", ""),
+                 "group_id": getattr(m, "group_id", "") or "",
                  "meta": m.meta or {}}
                 for m in rt.session.recent(limit)]

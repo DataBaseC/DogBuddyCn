@@ -28,7 +28,12 @@ logger = logging.getLogger(__name__)
 
 #: 还没结束的状态（`interrupted` 之外的都算"活着"）
 LIVE_STATUSES = ("queued", "running", "paused", "cancelling")
-TERMINAL_STATUSES = ("done", "failed", "cancelled", "timeout", "interrupted")
+# v0.10.38：`partial` = **有步骤没完成**的群组/多步运行终态。以前只要收尾就写
+# `done`，哪怕 4/4 名成员全被限速暂停、零产出——上级探测（progress_report /
+# 顶栏/runs API）看到的是"done"，而真相藏在 summary 的一行字里
+# （实测：迭代实验 4/4 步暂停、status=done、零交付物）。现在"完成了几步"
+# 是一等信号，不再让人从摘要里猜。
+TERMINAL_STATUSES = ("done", "partial", "failed", "cancelled", "timeout", "interrupted")
 
 
 @dataclass

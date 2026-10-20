@@ -154,7 +154,9 @@
           if (V.Models) V.Models.load();
           break;
         case 'files':
-          global.FileMgr.load();
+          /* v0.10.39：App.go('files', {path, workspace}) —— 从工位/群组/项目页
+             跳转时直接落到那个工作区（不用再手动翻目录） */
+          global.FileMgr.load(params || {});
           break;
         case 'logs':
           V.Logs.load();
