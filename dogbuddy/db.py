@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS jobs(
   id TEXT PRIMARY KEY, window_id TEXT, name TEXT, schedule_type TEXT,
   schedule_raw TEXT, schedule_json TEXT, prompt TEXT,
   report_strategy TEXT DEFAULT 'brief', kind TEXT DEFAULT 'prompt',
-  report_channel TEXT DEFAULT '', llm_profile TEXT DEFAULT '',
+  report_channel TEXT DEFAULT '', llm_profile TEXT DEFAULT '', group_id TEXT DEFAULT '',
   enabled INTEGER DEFAULT 1, last_run_at TEXT, next_run_at TEXT,
   fail_count INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS job_runs(
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -372,6 +372,19 @@ def _migrate_v14(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v15(conn: sqlite3.Connection) -> None:
+    """`jobs.group_id`（2026-10-20）：定时任务可以**跑群组**了。
+
+    起因（owner）："继续让其完成前端模板任务，每隔 1 小时触发一次"——他要的是
+    那条「方向/程序员/审查」流水线按小时自动跑。以前 job 只能指向单个工位，
+    群组运行没有定时入口（管理员只能在对话里手动 `group_run`）。
+    """
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "group_id" not in existing:
+        conn.execute("ALTER TABLE jobs ADD COLUMN group_id TEXT DEFAULT ''")
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -390,6 +403,7 @@ _MIGRATIONS: dict[int, Any] = {
     12: _migrate_v12,
     13: _migrate_v13,
     14: _migrate_v14,
+    15: _migrate_v15,
 }
 
 
@@ -724,20 +738,22 @@ class Database:
         with self._lock:
             self._conn.execute(
                 """INSERT INTO jobs(id,window_id,name,schedule_type,schedule_raw,schedule_json,prompt,
-                   report_strategy,kind,report_channel,llm_profile,enabled,last_run_at,next_run_at,fail_count,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   report_strategy,kind,report_channel,llm_profile,group_id,enabled,last_run_at,next_run_at,fail_count,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET
                      window_id=excluded.window_id, name=excluded.name,
                      schedule_type=excluded.schedule_type, schedule_raw=excluded.schedule_raw,
                      schedule_json=excluded.schedule_json, prompt=excluded.prompt,
                      report_strategy=excluded.report_strategy, kind=excluded.kind,
                      report_channel=excluded.report_channel, llm_profile=excluded.llm_profile,
+                     group_id=excluded.group_id,
                      enabled=excluded.enabled, last_run_at=excluded.last_run_at,
                      next_run_at=excluded.next_run_at, fail_count=excluded.fail_count,
                      updated_at=excluded.updated_at""",
                 (job.id, job.window_id, job.name, job.schedule_type, job.schedule_raw,
                  json.dumps(job.schedule, ensure_ascii=False), job.prompt,
                  job.report_strategy, job.kind, job.report_channel, job.llm_profile,
+                 getattr(job, "group_id", "") or "",
                  1 if job.enabled else 0,
                  job.last_run_at, job.next_run_at, job.fail_count,
                  job.created_at, job.updated_at))
@@ -790,6 +806,7 @@ class Database:
                    report_strategy=r["report_strategy"], kind=r["kind"],
                    report_channel=r["report_channel"] if "report_channel" in keys else "",
                    llm_profile=r["llm_profile"] if "llm_profile" in keys else "",
+                   group_id=r["group_id"] if "group_id" in keys else "",
                    enabled=bool(r["enabled"]), last_run_at=r["last_run_at"],
                    next_run_at=r["next_run_at"], fail_count=r["fail_count"],
                    created_at=r["created_at"], updated_at=r["updated_at"])

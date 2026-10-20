@@ -260,12 +260,14 @@ class JobStore:
         self.repo = repo
 
     def create(self, window_id: str, name: str, schedule: str, prompt: str,
-               report_strategy: str = "brief", kind: str = "prompt") -> Job:
+               report_strategy: str = "brief", kind: str = "prompt",
+               group_id: str = "") -> Job:
         parsed = parse_schedule(schedule)
         job = Job(
             id=uuid.uuid4().hex[:12], window_id=window_id, name=name,
             schedule_type=parsed["kind"], schedule_raw=schedule, schedule=parsed,
-            prompt=prompt, report_strategy=report_strategy, kind=kind, enabled=True)
+            prompt=prompt, report_strategy=report_strategy, kind=kind, enabled=True,
+            group_id=group_id or "")
         job.next_run_at = compute_next_run(parsed, None)
         return self.repo.upsert_job(job)
 

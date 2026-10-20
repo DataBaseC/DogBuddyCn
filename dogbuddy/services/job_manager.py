@@ -47,11 +47,13 @@ class JobManager:
 
     def create(self, window_id: str, name: str, schedule: str, prompt: str,
                report_strategy: str = "brief", kind: str = "prompt",
-               report_channel: str = "", llm_profile: str = "") -> Job:
+               report_channel: str = "", llm_profile: str = "",
+               group_id: str = "") -> Job:
         w = self.windows.get(window_id)
         if w is None:
             raise ValueError(f"window not found: {window_id}")
-        job = self.store.create(w.id, name, schedule, prompt, report_strategy, kind)
+        job = self.store.create(w.id, name, schedule, prompt, report_strategy, kind,
+                                group_id=group_id)
         job.report_channel = report_channel or ""
         job.llm_profile = llm_profile or ""
         job = self.store.repo.upsert_job(job)

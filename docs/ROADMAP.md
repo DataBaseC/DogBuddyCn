@@ -1733,3 +1733,25 @@ selenium / PIL；CJK 字体 3 个。两条路可选：
 
 基线：**747 passed / 4 skipped**（新增 9 条：频道/recap 3、sender 2、缓存 3、审计 2
 含前端接线）；`audit_ui --strict` exit 0；bundle 已重建。
+
+---
+
+## 38. 第三十一轮：群组定时任务（2026-10-20 深夜，`0.10.44`）
+
+owner：「部署一下，然后继续让其完成前端模板任务。每隔 1 小时就触发一次。」
+
+**缺口**：cron 任务只能指向**单个工位**——「方向/程序员/审查」这条流水线没有定时
+入口（只能在对话里手动 `group_run`），所以"每小时自动跑一遍"做不到。
+
+修法（schema 14 → 15）：
+- `jobs.group_id` 列 + `Job.group_id`；`JobStore.create(..., group_id=)`；
+  `JobManager.create`、`POST /api/jobs`（可只给 `group_id`，window_id 默认取组长）。
+- `main._run_job`：`group_id` 非空 → `groups.run(gid, job.prompt)`，终态映射：
+  `done`/`partial` → `ok`（partial 记 failed 会被调度器"连败 3 次自动停"，
+  而 partial 实际是大部分干完了，摘要里已带「完成 X/N 步」）；
+  只被限速 → `rate_limited`（暂停，不算失败）；其余 → `failed`；群组崩了也不炸调度。
+- 管理工具 `task_create` 新增 `group` 参数（群组名或 id），可一句话让管理员
+  把流水线挂上小时级定时。
+
+基线：新增 5 条测试（group_id 落库/`every 1 hour` 解析/终态映射 done+partial→ok/
+rate_limited 与 failed/群组崩溃不炸调度）；定向回归 34 passed。

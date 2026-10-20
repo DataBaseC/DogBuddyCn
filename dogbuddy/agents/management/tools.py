@@ -312,11 +312,32 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
     # ---------------------------------------------------------------- jobs
     async def task_create(args: dict, ctx: ToolContext) -> ToolResult:
         need(J, "jobs")
-        job = J.create(window_id=args["window_id"], name=args["name"], schedule=args["schedule"],
+        # v0.10.44：`group` 给了就建成**群组任务**（到点跑一条完整群组流水线，
+        # 如"方向/程序员/审查"按小时迭代前端模板）。window_id 用组长工位。
+        group_id = ""
+        window_id = str(args.get("window_id") or "")
+        gname = str(args.get("group") or "").strip()
+        if gname:
+            if getattr(svc, "groups", None) is None:
+                return ToolResult.failure("群组服务不可用")
+            try:
+                g = svc.groups.get(gname)
+            except Exception:
+                g = None
+            if g is None:
+                return ToolResult.failure(f"没有这个群组：{gname}（先用 group_list 查）")
+            group_id = g.id
+            window_id = window_id or str(getattr(g, "lead_window_id", "") or "")
+            if not window_id:
+                return ToolResult.failure(f"群组「{g.name}」还没有组长，先 group_assign 设一个")
+        if not window_id:
+            return ToolResult.failure("window_id 或 group 必须给一个")
+        job = J.create(window_id=window_id, name=args["name"], schedule=args["schedule"],
                        prompt=args["prompt"], report_strategy=args.get("report_strategy", "brief"),
                        kind=args.get("kind", "prompt"),
                        report_channel=args.get("report_channel", ""),
-                       llm_profile=args.get("llm_profile", ""))
+                       llm_profile=args.get("llm_profile", ""),
+                       group_id=group_id)
         # v0.10.20（圆桌实测）：一次性任务被 park 到远期绝对时间（如 2030-01-01）
         # 后"启用中但永不再跑"。建的时候就警告，别等 owner 在控制台发现。
         from ...services.job_manager import far_future_warning
@@ -327,11 +348,15 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         return ToolResult.success(msg, job_id=job.id)
 
     tools.append(FnTool("task_create",
-        "Create a scheduled task for a window. schedule formats: '30m', 'every monday 9am', "
-        "'0 9 * * *', ISO timestamp '2026-02-03T14:00:00'. For a one-shot manual run prefer "
-        "'in 30m' or a near-term timestamp — a far-future one-shot never fires by itself "
-        "(use task_run_now to trigger it).",
-        _props(window_id=_p("string", "target window id", True), name=_p("string", "task name", True),
+        "Create a scheduled task for a window OR a group. schedule formats: '30m', "
+        "'every 1 hour', 'every monday 9am', '0 9 * * *', ISO timestamp "
+        "'2026-02-03T14:00:00'. Pass `group` (name or id) to run a full group pipeline "
+        "(lead + members) on each fire — window_id then defaults to the group's lead. "
+        "For a one-shot manual run prefer 'in 30m' or a near-term timestamp — a far-future "
+        "one-shot never fires by itself (use task_run_now to trigger it).",
+        _props(window_id=_p("string", "target window id (required unless `group` is given)"),
+               group=_p("string", "group name/id — run a group pipeline instead of one window"),
+               name=_p("string", "task name", True),
                schedule=_p("string", "schedule expression", True),
                prompt=_p("string", "what the employee should do", True),
                report_strategy=_p("string", "silent|brief|detailed"),

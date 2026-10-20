@@ -553,6 +553,25 @@ class DogBuddyApp:
 
     # ------------------------------------------------------------- pipelines
     async def _run_job(self, job: Any):
+        # v0.10.44：**群组任务**——job.group_id 非空时跑一条完整的群组流水线
+        # （owner："继续让其完成前端模板任务，每隔 1 小时触发一次"）。
+        gid = str(getattr(job, "group_id", "") or "")
+        if gid:
+            from .cron.scheduler import JobOutcome
+            try:
+                res = await self.groups.run(gid, job.prompt)
+            except Exception as e:  # noqa: BLE001 — 群组崩了算一次失败，不能炸调度
+                logger.exception("group job %s crashed", job.id)
+                return JobOutcome(status="failed", summary=f"群组运行异常：{e}")
+            status = str(res.get("status") or "")
+            summary = str(res.get("summary") or "")[:1500]
+            # 只有"一步都没成"才记失败；partial 说明大部分干完了（摘要里有完成度），
+            # 记 failed 会让调度器连败 3 次自动停掉这条流水线。
+            if status == "done" or status == "partial":
+                return JobOutcome(status="ok", summary=summary)
+            if status == "failed" and res.get("rate_limited"):
+                return JobOutcome(status="rate_limited", summary=summary)
+            return JobOutcome(status="failed", summary=summary or "群组运行失败")
         outcome = await self.windows.dispatch_and_wait(
             job.window_id, job.prompt, job_id=job.id,
             kind=getattr(job, "kind", "prompt") or "prompt",

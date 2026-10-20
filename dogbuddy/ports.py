@@ -84,6 +84,9 @@ class Job:
     kind: str = "prompt"  # prompt | script | <registered runner kind>
     report_channel: str = ""  # notifier channel name override; "" = all configured channels
     llm_profile: str = ""  # profile override; "" = inherit from the window
+    #: v0.10.44：非空 = 这个任务是**跑群组**（方向/程序员/审查流水线按小时自动跑），
+    #: 此时 window_id 只作为"归属工位"（用组长）用于列表展示与权限。
+    group_id: str = ""
     enabled: bool = True
     last_run_at: str | None = None
     next_run_at: str | None = None
