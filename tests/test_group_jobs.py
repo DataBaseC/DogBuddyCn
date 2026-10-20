@@ -93,3 +93,46 @@ def test_group_job_survives_group_crash():
     app = SimpleNamespace(groups=Boom(), windows=None, _rate_limit={})
     out = _run(DogBuddyApp._run_job(app, _job()))
     assert out.status == "failed" and "群组运行异常" in out.summary
+
+
+def test_run_now_on_group_job_refuses_single_dispatch():
+    """v0.10.45：群组任务点"立即运行"不能把提示词单派给组长（那会白跑一轮）。"""
+    calls = []
+
+    class _W:
+        def get(self, wid):
+            return SimpleNamespace(id=wid)
+
+        def dispatch(self, *a, **k):
+            calls.append((a, k))
+
+    class _Store:
+        def get(self, jid):
+            return Job(id="j1", window_id="lead", name="t", schedule_type="interval",
+                       schedule_raw="every 1 hour", schedule={}, prompt="x",
+                       group_id="g1")
+
+    from dogbuddy.services.job_manager import JobManager
+    msg = JobManager(_Store(), _W()).run_now("j1")
+    assert "群组任务" in msg and calls == [], "群组任务不该被单派到组长工位"
+
+def test_run_now_on_group_job_refuses_single_dispatch():
+    """v0.10.45：群组任务点"立即运行"不能把提示词单派给组长（那会白跑一轮）。"""
+    calls = []
+
+    class _W:
+        def get(self, wid):
+            return SimpleNamespace(id=wid)
+
+        def dispatch(self, *a, **k):
+            calls.append((a, k))
+
+    class _Store:
+        def get(self, jid):
+            return Job(id="j1", window_id="lead", name="t", schedule_type="interval",
+                       schedule_raw="every 1 hour", schedule={}, prompt="x",
+                       group_id="g1")
+
+    from dogbuddy.services.job_manager import JobManager
+    msg = JobManager(_Store(), _W()).run_now("j1")
+    assert "群组任务" in msg and calls == [], "群组任务不该被单派到组长工位"

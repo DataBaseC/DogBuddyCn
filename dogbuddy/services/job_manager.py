@@ -92,6 +92,12 @@ class JobManager:
         job = self.store.get(job_id)
         if job is None:
             return "not found"
+        # v0.10.45：**群组任务不能走单工位派单**。以前点"立即运行"会把群组任务的
+        # 提示词直接派给组长工位单跑——组长不在群组上下文里，member_dispatch
+        # 会 refuse，等于白跑一轮还烧 token。等调度器到点跑（或让管理员 group_run）。
+        if getattr(job, "group_id", ""):
+            return ("这是群组任务：到点由调度器跑整条流水线；要提前跑请让管理员"
+                    "用 group_run（别用单工位派单）")
         self.windows.dispatch(job.window_id, job.prompt, urgent=True, job_id=job.id,
                               kind=job.kind, llm_profile=job.llm_profile)
         # v0.10.20（圆桌实测）：`run_now` 过去**从不更新任务生命周期**——
