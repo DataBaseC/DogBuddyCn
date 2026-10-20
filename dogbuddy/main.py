@@ -137,8 +137,9 @@ class DogBuddyApp:
         self.runs = RunRegistry(self.db, self.bus)
         # 启动清理：上个进程遗留的 running/paused 标成 interrupted
         # （否则重启/自升级后界面上会挂着永远"运行中"的僵尸行）
+        interrupted = 0
         try:
-            self.runs.mark_orphans_interrupted()
+            interrupted = self.runs.mark_orphans_interrupted()
         except Exception:  # noqa: BLE001 — 清理失败不能拦住启动
             logger.warning("run orphan cleanup failed", exc_info=True)
         self.windows.runs = self.runs
@@ -174,6 +175,17 @@ class DogBuddyApp:
             config=self.config_svc, bus=self.bus, models=self.models, groups=self.groups,
             panel=self.panel, runs=self.runs,
             self_status=self.update_status, self_update=self.start_self_update)
+        # v0.10.40（owner）：异常/崩溃/重启导致循环停下后，**管理员必须能唤醒**
+        # 未完成的任务。启动清理把僵尸行标成 interrupted，这里主动告诉 owner
+        # 发生了什么、怎么恢复（run_retry 用的是落库的原文，重启后仍可用）。
+        if interrupted:
+            try:
+                self.admin.notify_user(
+                    f"上次退出时有 {interrupted} 个运行被中断（崩溃或重启）。"
+                    f"它们已如实标成 interrupted，原始任务文本已落库——"
+                    f"对我说「把中断的任务重跑」或点名 run_retry 即可唤醒。")
+            except Exception:  # noqa: BLE001 — 通知失败不能拦住启动
+                logger.warning("interrupted-run notice failed", exc_info=True)
 
         # T9.3：主管工位装配（只给项目级管理工具，system 级永不下放）；
         # P1-3：管理员工位也要装（否则是个带着管理员提示词却没有工具的壳）。

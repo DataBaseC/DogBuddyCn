@@ -66,23 +66,18 @@ def router(svc, auth_deps) -> APIRouter:
         return out
 
     @r.post("/runs/{run_id}/retry", dependencies=auth_deps)
-    def retry_run(run_id: str) -> dict:
-        """用原派单内容重跑一次（进程重启后"中断"的运行靠它恢复）。"""
-        reg = _runs()
-        run = reg.get(run_id)
-        if run is None:
-            raise HTTPException(status_code=404, detail=f"没有这个运行：{run_id}")
-        windows = getattr(svc, "windows", None)
-        rec = getattr(windows, "_manual_last", {}).get(run.window_id or "", {}) if windows else {}
-        prompt = str(rec.get("prompt") or "")
-        if not prompt:
-            raise HTTPException(
-                status_code=400,
-                detail="找不到原始派单内容（进程重启后内存里的 prompt 不在了），请重新派单")
-        if windows is None or not hasattr(windows, "dispatch_manual"):
-            raise HTTPException(status_code=503, detail="工位服务未启用")
-        windows.dispatch_manual(run.window_id, prompt)
-        new = getattr(windows, "_manual_last", {}).get(run.window_id, {}).get("run_id", "")
-        return {"ok": True, "retried_from": run_id, "run_id": new}
+    async def retry_run(run_id: str) -> dict:
+        """唤醒未完成的运行（异常/重启/限速暂停之后都能用）。
+
+        v0.10.40：改走共享实现 `services.run_retry.retry_run`——原始任务文本
+        从 **runs.prompt（落库）** 取，进程重启后照样能重试；活着的运行会先
+        被取消再重来（"唤醒"不是"再叠一个"）。
+        """
+        from ...services.run_retry import retry_run as _retry
+        _runs()  # 台账不可用时直接 503（与其它接口一致）
+        out = await _retry(svc, run_id)
+        if not out.get("ok"):
+            raise HTTPException(status_code=400, detail=out.get("reason", "重试失败"))
+        return out
 
     return r

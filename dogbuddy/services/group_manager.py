@@ -422,7 +422,8 @@ class GroupManager:
                     kind="group", group_id=g.id, group_name=g.name,
                     project_id=getattr(g, "project_id", "") or "",
                     window_id=lead_id or "", phase="plan", steps_total=len(order),
-                    prompt_chars=len(prompt or ""))
+                    # v0.10.40：群组任务原文落库——异常/重启后管理员能一键重跑
+                    prompt=prompt)
             except Exception:  # noqa: BLE001 — 台账不能拦住群组运行
                 logger.warning("group run start failed", exc_info=True)
         # v0.10.34：开跑就留痕（以前只有跑完的 group:run，进行中的运行在审计里查不到）

@@ -63,6 +63,32 @@ def _run_status(result: Any) -> str:
     return "ok" if getattr(result, "ok", False) else "failed"
 
 
+def _run_terminal(result: Any) -> tuple[str, str, str]:
+    """一次执行 → **runs 台账**终态 `(status, summary_prefix, error_code)`。
+
+    v0.10.40：与 `_run_status`（job_runs 口径，"跑到上限算 ok"）分开——台账要
+    对 owner 诚实：
+      * `rate_limited`    → 不写终态（调用方记 pause）；
+      * `max_iterations`  → **partial**（撞上限 ≠ 完成，owner 以为活干完了）；
+      * `timeout`         → timeout；其余失败 → failed；ok → done。
+    """
+    st = _run_status(result)
+    if st == "rate_limited":
+        return ("paused", "", "")
+    stop = str(getattr(result, "stop_reason", "") or "")
+    raw_status = str(getattr(result, "status", "") or "")
+    if stop == "max_iterations":
+        return ("partial", "[撞迭代上限·未完成，可 run_retry 续跑] ",
+                "max_iterations_reached")
+    # `_run_status` 是 job_runs 口径、不认 timeout（falls through 到 failed）——
+    # 台账这边要如实记 timeout（`task_timeout` 到点 = 超时，不是"失败"）。
+    if st == "timeout" or stop == "timeout" or raw_status == "timeout":
+        return ("timeout", "", str(getattr(result, "error_code", "") or ""))
+    if st == "ok":
+        return ("done", "", "")
+    return ("failed", "", str(getattr(result, "error_code", "") or ""))
+
+
 @dataclass
 class WindowRuntime:
     window: Window
@@ -525,7 +551,8 @@ class WindowManager:
                       f"{rt.window.id} job={job_id} kind={kind} run={run_id or '-'} "
                       f"prompt={prompt[:80]}")
 
-    def _child_run(self, window_id: str, parent_run_id: str, kind: str) -> str:
+    def _child_run(self, window_id: str, parent_run_id: str, kind: str,
+                   prompt: str = "") -> str:
         """给"派给某个工位的活"记一条**子运行**（P0：界面要能看到谁在干什么）。"""
         runs = getattr(self, "runs", None)
         if runs is None or not parent_run_id:
@@ -534,7 +561,9 @@ class WindowManager:
             w = self.db.get_window(window_id)
             run = runs.start(kind=kind, window_id=window_id, parent_run_id=parent_run_id,
                              project_id=getattr(w, "project_id", "") or "",
-                             window_name=getattr(w, "name", "") or "", status="queued")
+                             window_name=getattr(w, "name", "") or "", status="queued",
+                             # v0.10.40：子运行的任务原文也落库（可单独重试）
+                             prompt=prompt or "")
             return run.id
         except Exception:  # noqa: BLE001 — 台账失败不能拦住派单
             logger.warning("child run start failed", exc_info=True)
@@ -555,7 +584,7 @@ class WindowManager:
         meta: dict[str, Any] = {"future": future, "run_owned_by_caller": True}
         if coordinated:
             meta["coordinated"] = True
-        child = self._child_run(window_id, run_parent_id, "coordinated")
+        child = self._child_run(window_id, run_parent_id, "coordinated", prompt=prompt)
         if child:
             meta["run_id"] = child
         rt.queue.submit(TaskItem(prompt=prompt, job_id=None, urgent=False,
@@ -581,7 +610,7 @@ class WindowManager:
         meta: dict[str, Any] = {"future": future, "run_owned_by_caller": True}
         if coordinated:
             meta["coordinated"] = True
-        child = self._child_run(window_id, run_parent_id, "coordinated")
+        child = self._child_run(window_id, run_parent_id, "coordinated", prompt=prompt)
         if child:
             meta["run_id"] = child
         rt.queue.submit(TaskItem(prompt=prompt, job_id=job_id, urgent=False,
@@ -699,7 +728,9 @@ class WindowManager:
                 run = self.runs.start(kind="manual", window_id=window_id,
                                       project_id=getattr(w, "project_id", "") or "",
                                       window_name=getattr(w, "name", "") or "",
-                                      prompt_chars=len(prompt or ""), status="queued")
+                                      # v0.10.40：原始任务文本落库——重启后管理员
+                                      # 仍能"唤醒"这条未完成的任务（以前只在内存）
+                                      prompt=prompt, status="queued")
                 run_id = run.id
                 self._manual_last[window_id]["run_id"] = run_id
             except Exception:  # noqa: BLE001 — 台账失败不能拦住派单
@@ -934,14 +965,13 @@ class WindowManager:
         _runs = getattr(self, "runs", None)
         if run_id and _runs is not None:
             try:
-                st = _run_status(result)
-                if st == "rate_limited":
+                status, prefix, code = _run_terminal(result)
+                if status == "paused":
                     _runs.note_pause(run_id, 0.0)
                 else:
-                    _runs.finish(run_id, "done" if st == "ok" else
-                                 ("timeout" if st == "timeout" else "failed"),
-                                 summary=str(getattr(result, "summary", "") or "")[:800],
-                                 error_code=str(getattr(result, "error_code", "") or ""))
+                    _runs.finish(run_id, status,
+                                 summary=(prefix + str(getattr(result, "summary", "") or ""))[:800],
+                                 error_code=code)
             except Exception:  # noqa: BLE001
                 logger.debug("run finish bookkeeping failed", exc_info=True)
 

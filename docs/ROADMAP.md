@@ -1588,3 +1588,29 @@ shell 写入的冲突由 checkpoint 快照兜底 + 组长派活时指定不同�
 
 基线：**714 passed / 4 skipped**（新增 13 条：能力接线 1 / 文件守卫 9 / 打包与跳转 3）；
 `audit_ui --strict` exit 0；bundle 已重建；五条守卫变异全部仍被抓住。
+
+---
+
+## 34. 第二十七轮：异常停下后"唤醒未完成的任务"（2026-10-20，`0.10.40`）
+
+owner：「要确保因为异常导致的循环停止后，管理员能够唤醒未完成的任务。」
+复核发现四个硬缺口，逐条补：
+
+| # | 缺口（实测/读码确认） | 修法 |
+|---|---|---|
+| 1 | **retry 从内存取 prompt**：`/api/runs/{id}/retry` 读 `windows._manual_last`——进程重启后清空，直接 400「请重新派单」。而"异常导致循环停止"最常见的场景恰恰是崩溃/重启 | **schema 14**：`runs.prompt` 落库（manual / group / coordinated 三处入口都写）。重启后照样能取回任务原文 |
+| 2 | **管理员没有重试工具**（只有 run_list/run_status/run_cancel），对话里"把失败的活重跑"做不到 | 新工具 `run_retry`（登记 ADMIN_TOOLS + SYSTEM_TOOL_NAMES，仅管理员） |
+| 3 | **群组运行完全没有重试路径** | 共享实现 `services/run_retry.py`：按 kind 分派——定时任务→`jobs.run_now`；群组→后台 `groups.run`（不阻塞管理员回合）；工位→`dispatch_manual` |
+| 4 | **撞迭代上限被记成 done**——owner 以为活干完了（验收报告也点过"中断 vs 没进展不可区分"） | 台账终态抽出 `_run_terminal()`：`max_iterations → partial`（摘要前缀「撞迭代上限·未完成，可 run_retry 续跑」+ error_code）；timeout 如实记 timeout |
+
+**语义**：唤醒 = **先停掉卡住的那次，再用原文重来一次**（活着的运行先 cancel，
+不是叠一个新的）；0.10.40 之前的老运行没有原文 → 诚实拒绝并让 owner 重新派单
+（不猜任务内容）。
+
+配套：启动时 `mark_orphans_interrupted()` 的条数会**主动通知 owner**（"上次退出
+时有 N 个运行被中断……run_retry 可唤醒"）；运行抽屉新增「最近结束（可唤醒）」
+段，failed/interrupted/timeout/partial/cancelled/paused 行带「重试」按钮。
+
+基线：**725 passed / 4 skipped**（新增 11 条：prompt 落库/重启后可重试/老数据拒绝/
+活着的先取消/群组后台/定时任务/工具登记/终态映射）；`audit_ui --strict` exit 0；
+五条守卫变异全部仍被抓住；schema 13 → 14。

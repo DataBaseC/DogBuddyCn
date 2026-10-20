@@ -1013,6 +1013,31 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         _props(run_id=_p("string", "run id from run_list", True)),
         run_cancel, "write"))
 
+    async def run_retry(args: dict, ctx: ToolContext) -> ToolResult:
+        """v0.10.40（owner）：异常导致循环停下后，管理员要把未完成的任务**唤醒**。"""
+        if svc.runs is None:
+            return ToolResult.failure("运行台账不可用")
+        rid = str(args.get("run_id") or "").strip()
+        if not rid:
+            return ToolResult.failure("run_id 不能为空（先用 run_list 查）")
+        from ...services.run_retry import retry_run as _retry
+        out = await _retry(svc, rid)
+        if not out.get("ok"):
+            return ToolResult.failure(out.get("reason", "重试失败"))
+        return ToolResult.success(
+            f"已唤醒 {rid}：{out.get('note', '')}",
+            **{k: v for k, v in out.items() if k in ("mode", "run_id") and isinstance(v, str)})
+
+    tools.append(FnTool("run_retry",
+        "Wake up an unfinished run after it stopped abnormally (error, crash, process "
+        "restart, rate-limit pause, iteration cap). It cancels the stuck one first, then "
+        "re-dispatches the ORIGINAL task text stored in the run ledger — so it still works "
+        "after a restart. Find the id with run_list (status failed/interrupted/timeout/"
+        "partial/paused). Runs created before v0.10.40 may lack the original text; then tell "
+        "the owner to re-dispatch instead of guessing.",
+        _props(run_id=_p("string", "run id from run_list", True)),
+        run_retry, "write"))
+
     async def run_status(args: dict, ctx: ToolContext) -> ToolResult:
         if svc.runs is None:
             return ToolResult.failure("运行台账不可用")
@@ -1063,6 +1088,7 @@ SYSTEM_TOOL_NAMES: frozenset[str] = frozenset({
     "server_exec",                    # v0.10.29：宿主机命令（面板 agent API），仅管理员
     # v0.10.37（P0）：启动/查看/取消运行 —— 主管**不给**（它管项目，不负责全局运行台账）
     "group_run", "window_dispatch", "run_list", "run_cancel", "run_status",
+    "run_retry",  # v0.10.40：唤醒未完成的运行（异常/重启/限速暂停之后）
 })
 
 #: 需要 **project** 作用域的：管本项目里的工位 / 任务 / 上下文 / 工作区

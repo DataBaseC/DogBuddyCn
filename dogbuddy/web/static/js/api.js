@@ -246,8 +246,9 @@
        POST /api/runs/{id}/cancel（幂等，不算失败）
        POST /api/runs/{id}/retry  （用原派单内容重跑） */
     runs: {
-      list: function (active) {
-        return request('GET', '/api/runs' + (active ? '?active=1' : ''));
+      list: function (active, limit) {
+        var q = active ? '?active=1' : (limit ? '?limit=' + limit : '');
+        return request('GET', '/api/runs' + q);
       },
       get: function (id) { return request('GET', '/api/runs/' + enc(id)); },
       cancel: function (id) { return request('POST', '/api/runs/' + enc(id) + '/cancel', {}); },

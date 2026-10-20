@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -348,11 +348,27 @@ def _migrate_v13(conn: sqlite3.Connection) -> None:
       pause_count INTEGER DEFAULT 0, paused_seconds REAL DEFAULT 0,
       cancel_requested INTEGER DEFAULT 0,
       started_at TEXT DEFAULT '', updated_at TEXT DEFAULT '', finished_at TEXT DEFAULT '',
-      error_code TEXT DEFAULT '', summary TEXT DEFAULT '');
+      error_code TEXT DEFAULT '', summary TEXT DEFAULT '',
+      prompt TEXT DEFAULT '');
     CREATE INDEX IF NOT EXISTS idx_runs_active ON runs(status, started_at);
     CREATE INDEX IF NOT EXISTS idx_runs_window ON runs(window_id, started_at);
     CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id, started_at);
     """)
+    conn.commit()
+
+
+def _migrate_v14(conn: sqlite3.Connection) -> None:
+    """`runs.prompt`（2026-10-20）：**把原始任务文本落库**，让"唤醒"真的可用。
+
+    起因（owner）："要确保因为异常导致的循环停止后，管理员能够唤醒未完成的任务"。
+    查明的硬缺口：`/api/runs/{id}/retry` 从 `windows._manual_last`（**内存**）取
+    原始 prompt —— 进程重启后内存清空，retry 直接 400（"请重新派单"）。而
+    "异常导致循环停止"最常见的场景恰恰就是进程重启/崩溃。所以 prompt 必须**落库**：
+    重启后管理员仍能从 runs 台账找回任务原文并重试。
+    """
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    if "prompt" not in existing:
+        conn.execute("ALTER TABLE runs ADD COLUMN prompt TEXT DEFAULT ''")
     conn.commit()
 
 
@@ -373,6 +389,7 @@ _MIGRATIONS: dict[int, Any] = {
     11: _migrate_v11,
     12: _migrate_v12,
     13: _migrate_v13,
+    14: _migrate_v14,
 }
 
 

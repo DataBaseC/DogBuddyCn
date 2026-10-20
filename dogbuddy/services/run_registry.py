@@ -60,6 +60,9 @@ class Run:
     finished_at: str = ""
     error_code: str = ""
     summary: str = ""
+    #: v0.10.40：**原始任务文本**（落库）。异常/重启导致的停止之后，管理员靠它
+    #: "唤醒"未完成的任务——以前 retry 从内存 `_manual_last` 取，重启即丢。
+    prompt: str = ""
     #: 只活在内存里：让"取消"能真的打断正在跑的那件事
     task: Any = field(default=None, repr=False, compare=False)
     #: 展示用（不入库）：工位名 / 群组名
@@ -82,6 +85,7 @@ class Run:
             "started_at": self.started_at, "updated_at": self.updated_at,
             "finished_at": self.finished_at,
             "error_code": self.error_code, "summary": self.summary,
+            "prompt": self.prompt,
             "live": self.status in LIVE_STATUSES,
         }
 
@@ -90,7 +94,7 @@ _DB_COLUMNS = ("id", "kind", "parent_run_id", "window_id", "group_id", "project_
                "job_id", "status", "phase", "step_no", "steps_total", "prompt_chars",
                "recap_chars", "iterations", "pause_count", "paused_seconds",
                "cancel_requested", "started_at", "updated_at", "finished_at",
-               "error_code", "summary")
+               "error_code", "summary", "prompt")
 
 
 class RunRegistry:
@@ -107,12 +111,14 @@ class RunRegistry:
               project_id: str = "", job_id: str = "", parent_run_id: str = "",
               phase: str = "", steps_total: int = 0, prompt_chars: int = 0,
               window_name: str = "", group_name: str = "", status: str = "running",
-              run_id: str = "") -> Run:
+              run_id: str = "", prompt: str = "") -> Run:
         run = Run(id=run_id or f"r-{new_id()[:8]}", kind=kind, window_id=window_id,
                   group_id=group_id, project_id=project_id, job_id=job_id,
                   parent_run_id=parent_run_id, phase=phase, steps_total=steps_total,
-                  prompt_chars=prompt_chars, window_name=window_name,
-                  group_name=group_name, status=status,
+                  # v0.10.40：没显式给 prompt_chars 时按 prompt 实际长度记
+                  prompt_chars=prompt_chars or len(prompt or ""),
+                  window_name=window_name,
+                  group_name=group_name, status=status, prompt=prompt or "",
                   started_at=_now_iso(), updated_at=_now_iso())
         self._active[run.id] = run
         self._persist(run)
