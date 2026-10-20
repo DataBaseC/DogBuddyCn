@@ -3,10 +3,13 @@
 """Window CRUD, pause/resume, dispatch, messages, context ops — thin DTO shells."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+logger = logging.getLogger("dogbuddy.web.windows")
 
 
 class WindowIn(BaseModel):
@@ -141,6 +144,14 @@ def router(svc, auth_deps) -> APIRouter:
         except Exception:  # noqa: BLE001 — usage bar degrades to zeros, never 500s
             pass
         ratio = (used / max_tokens) if max_tokens else 0.0
+        # v0.10.43：**平均**缓存命中（owner："有时显示 0%，要像 dsh 一样的平均"）。
+        # 只取最后一次调用会被个别 0% 带偏；这里按消息 meta 求和算长期平均。
+        avg_hit = avg_miss = 0
+        try:
+            avg_hit, avg_miss = svc.db.cache_totals(w.id)
+        except Exception:  # noqa: BLE001 — 用量条降级，绝不 500
+            logger.debug("cache_totals failed", exc_info=True)
+        avg_total = avg_hit + avg_miss
         return {"window_id": w.id,
                 "context_tokens": used,
                 "max_context_tokens": max_tokens,
@@ -150,7 +161,10 @@ def router(svc, auth_deps) -> APIRouter:
                 "tokens": st.get("tokens", 0),
                 "cache_hit_tokens": cache.get("cache_hit_tokens", 0),
                 "cache_miss_tokens": cache.get("cache_miss_tokens", 0),
-                "cache_hit_ratio": cache.get("cache_hit_ratio", 0.0)}
+                "cache_hit_ratio": cache.get("cache_hit_ratio", 0.0),
+                "cache_avg_hit_tokens": avg_hit,
+                "cache_avg_miss_tokens": avg_miss,
+                "cache_avg_ratio": round(avg_hit / avg_total, 4) if avg_total else 0.0}
 
     @r.delete("/windows/{window_id}", dependencies=auth_deps)
     def delete_window(window_id: str) -> dict:

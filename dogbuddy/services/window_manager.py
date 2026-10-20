@@ -539,11 +539,14 @@ class WindowManager:
     # ------------------------------------------------------------- dispatch
     def dispatch(self, window_id: str, prompt: str, urgent: bool = True,
                  job_id: str | None = None, kind: str = "prompt",
-                 llm_profile: str = "", run_id: str = "") -> None:
+                 llm_profile: str = "", run_id: str = "",
+                 sender: str = "") -> None:
         rt = self._rt(window_id)
         meta: dict[str, Any] = {}
         if run_id:
             meta["run_id"] = run_id
+        if sender:  # v0.10.43：这条任务是谁派的（前端据此显示"组长·方向"而非"我"）
+            meta["sender"] = sender
         rt.queue.submit(TaskItem(prompt=prompt, job_id=job_id, urgent=urgent,
                                  kind=kind or "prompt", llm_profile=llm_profile or "",
                                  meta=meta))
@@ -571,7 +574,8 @@ class WindowManager:
 
     def dispatch_pending(self, window_id: str, prompt: str, *,
                          coordinated: bool = True, kind: str = "prompt",
-                         llm_profile: str = "", run_parent_id: str = "") -> "asyncio.Future":
+                         llm_profile: str = "", run_parent_id: str = "",
+                         sender: str = "") -> "asyncio.Future":
         """派单但**不等**：返回一个可 await 的 future（v0.10.36）。
 
         为什么需要它：组长用 `member_dispatch(wait=false)` 把活排给组员时，如果只有
@@ -587,6 +591,8 @@ class WindowManager:
         child = self._child_run(window_id, run_parent_id, "coordinated", prompt=prompt)
         if child:
             meta["run_id"] = child
+        if sender:
+            meta["sender"] = sender
         rt.queue.submit(TaskItem(prompt=prompt, job_id=None, urgent=False,
                                  kind=kind or "prompt", llm_profile=llm_profile or "",
                                  meta=meta))
@@ -598,7 +604,8 @@ class WindowManager:
                                 job_id: str | None = None, kind: str = "prompt",
                                 llm_profile: str = "", coordinated: bool = False,
                                 timeout: float | None = None,
-                                run_parent_id: str = "") -> JobOutcome:
+                                run_parent_id: str = "",
+                                sender: str = "") -> JobOutcome:
         """Cron / 组长派活路径：投进队列并等这一轮结束。
 
         `coordinated=True`（v0.10.33）：这是**组长派给组员**的活，`window.run_finished`
@@ -613,6 +620,8 @@ class WindowManager:
         child = self._child_run(window_id, run_parent_id, "coordinated", prompt=prompt)
         if child:
             meta["run_id"] = child
+        if sender:
+            meta["sender"] = sender
         rt.queue.submit(TaskItem(prompt=prompt, job_id=job_id, urgent=False,
                                  kind=kind or "prompt", llm_profile=llm_profile or "",
                                  # 调用方（CronScheduler / GroupManager）已经开好 job_runs 行
@@ -711,7 +720,7 @@ class WindowManager:
             payload["auto_paused"] = False
             self.bus.emit(Event(type=JOB_FAILED, payload=payload))
 
-    def dispatch_manual(self, window_id: str, prompt: str) -> None:
+    def dispatch_manual(self, window_id: str, prompt: str, sender: str = "") -> None:
         """Manual (human-initiated) run — head-of-queue, fire-and-forget.
 
         v0.10.32：记住这次人工派单，供**限速暂停后自动续跑**用。以前只有定时任务
@@ -735,7 +744,7 @@ class WindowManager:
                 self._manual_last[window_id]["run_id"] = run_id
             except Exception:  # noqa: BLE001 — 台账失败不能拦住派单
                 logger.warning("run start failed for manual dispatch", exc_info=True)
-        self.dispatch(window_id, prompt, urgent=True, run_id=run_id)
+        self.dispatch(window_id, prompt, urgent=True, run_id=run_id, sender=sender)
 
     def cancel_run(self, run_id: str) -> dict[str, Any]:
         """取消一次运行（人工派单 / 组员工位上的活）。幂等，返回给人看的结果。
@@ -908,6 +917,9 @@ class WindowManager:
             scope=self.scope_resolver.for_window(w),
             extra={"scheduled": bool(task.job_id), "manual": not task.job_id,
                    "bg_processes": rt.bg_processes,
+                   # v0.10.43：这条任务**谁派的**（组长名；空 = owner/系统）
+                   "sender": str(((getattr(task, "meta", None) or {}).get("sender")) or ""),
+                   "window_name": getattr(w, "name", "") or "",
                    # T4.2: trust level from workbench params + allowlist from config
                    "trust": (w.params or {}).get("trust", "normal"),
                    "approval_allowlist": self._approval_allowlist(),
@@ -1060,5 +1072,10 @@ class WindowManager:
                  "tool_name": (m.meta or {}).get("tool_name", ""),
                  "tool_call_id": (m.meta or {}).get("tool_call_id", ""),
                  "group_id": getattr(m, "group_id", "") or "",
+                 # v0.10.43：这条 user 消息是谁派的（组长名；空 = owner/系统）
+                 "sender": (m.meta or {}).get("sender", "") or "",
+                 # 本轮缓存命中（气泡下的小字），没拿到字段时为空
+                 "cache_hit": (m.meta or {}).get("cache_hit"),
+                 "cache_miss": (m.meta or {}).get("cache_miss"),
                  "meta": m.meta or {}}
                 for m in rt.session.recent(limit)]

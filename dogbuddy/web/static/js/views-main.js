@@ -357,19 +357,38 @@
      * @returns {string} 消息 HTML
      */
     renderMsg: function (m, role) {
-      var avatar = role === 'user' ? '我' : (role === 'system' ? 'S' : 'AI');
+      /* v0.10.43：**这条任务是谁派的**。群组里派活的是组长，以前一律显示"我"
+         （owner 实测反馈）。有 sender 就用它当头像字与署名。 */
+      var sender = String(m.sender || '').trim();
+      var avatar = role === 'user'
+        ? (sender ? sender.slice(0, 1) : '我')
+        : (role === 'system' ? 'S' : 'AI');
       // v0.10.38：群组协作消息标出来——群频道与成员会话是同一批消息的两份投影，
       // 带 group_id 的这条在群详情页也看得见（其他成员也看得到）。
       var grp = m.group_id
         ? '<span class="badge badge-amber" title="群组协作消息：群频道里其他成员也看得到">群组</span>'
         : '';
+      // v0.10.43：本条调用的缓存命中（小字；平均命中在顶部用量条）
+      var cacheTip = '';
+      if (role === 'assistant' && (m.cache_hit != null || m.cache_miss != null)) {
+        var ch = Number(m.cache_hit) || 0;
+        var cm = Number(m.cache_miss) || 0;
+        if (ch + cm > 0) {
+          cacheTip = '<span class="hint" title="本轮缓存命中 / 总 prompt token">缓存 ' +
+            Math.round(ch / (ch + cm) * 100) + '%</span>';
+        }
+      }
       return '<div class="msg ' + U.esc(role) + '">' +
-        '<div class="msg-avatar">' + avatar + '</div>' +
+        '<div class="msg-avatar" title="' + U.esc(sender || (role === 'user' ? '你' : '')) + '">' +
+        U.esc(avatar) + '</div>' +
         '<div style="min-width:0">' +
+        (sender
+          ? '<div class="msg-sender tiny muted">' + U.esc(sender) + ' 派发</div>'
+          : '') +
         '<div class="msg-bubble">' + Windows.renderContent(m.content) + '</div>' +
         '<div class="msg-meta"><span>' + U.esc(U.fmtClock(m.created_at)) + '</span>' +
         (m.tokens ? '<span class="num">' + U.esc(m.tokens) + ' tok</span>' : '') +
-        grp +
+        cacheTip + grp +
         '</div></div></div>';
     },
 
@@ -439,6 +458,14 @@
           }
           out.push(Windows.renderToolGroup(group));
         } else {
+          /* v0.10.43：**空气泡**（owner："工位有时显示空白气泡"）。工具调用轮次
+             的 assistant 消息 content 是空的、只有 tool_calls —— 以前照样渲染成
+             一个空壳气泡。工具本身已经在下面分组渲染了，这里直接跳过。 */
+          var blank = !String(m.content || '').trim();
+          if (role === 'assistant' && blank) {
+            i++;
+            continue;
+          }
           out.push(Windows.renderMsg(m, role));
           i++;
         }

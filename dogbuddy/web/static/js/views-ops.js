@@ -316,7 +316,9 @@
 
     load: function () {
       var winP = Logs.windows.length ? Promise.resolve(Logs.windows) : A.windows.list();
-      return Promise.all([A.logs.audit(200), A.logs.runs(100), winP]).then(function (res) {
+      /* v0.10.43：拉 1000 条（原来 200）——只在浏览器里过滤 200 条时，更早的
+         记录永远筛不到（owner："筛选不管用"） */
+      return Promise.all([A.logs.audit(1000), A.logs.runs(200), winP]).then(function (res) {
         Logs.auditRows = res[0] || [];
         Logs.runRows = res[1] || [];
         Logs.windows = res[2] || [];
@@ -345,8 +347,16 @@
       var auditHost = document.getElementById('log-audit-body');
       if (auditHost) {
         var rows = Logs.auditRows.filter(function (e) {
+          /* v0.10.43：按工位筛选也作用于审计（以前只作用于运行记录）；
+             关键字同时匹配工位名（后端已把 detail 里的窗口 id 解析成名字） */
+          if (winSel) {
+            var wname = (Logs.windows.filter(function (w) { return w.id === winSel; })[0] || {}).name || '';
+            var blob0 = (e.actor_label || '') + ' ' + (e.detail || '') + ' ' + (e.actor || '');
+            if (blob0.indexOf(winSel) < 0 && (!wname || blob0.indexOf(wname) < 0)) return false;
+          }
           if (!kw) return true;
-          return String(e.actor || '').toLowerCase().indexOf(kw) >= 0 ||
+          return String(e.actor_label || '').toLowerCase().indexOf(kw) >= 0 ||
+            String(e.actor || '').toLowerCase().indexOf(kw) >= 0 ||
             String(e.action || '').toLowerCase().indexOf(kw) >= 0 ||
             String(e.detail || '').toLowerCase().indexOf(kw) >= 0;
         });
@@ -360,7 +370,9 @@
             var short = detail.length > 46 ? detail.slice(0, 46) + '…' : detail;
             return '<tr>' +
               '<td class="mono tiny">' + U.esc(U.fmtTime(e.created_at)) + '</td>' +
-              '<td><span class="badge badge-grey mono">' + U.esc(e.actor || '—') + '</span></td>' +
+              /* v0.10.43：显示工位名（后端解析），原始 actor 放 tooltip */
+              '<td><span class="badge badge-grey" title="' + U.esc(e.actor || '') + '">' +
+              U.esc(e.actor_label || e.actor || '—') + '</span></td>' +
               '<td><span class="badge badge-blue mono">' + U.esc(e.action || '—') + '</span></td>' +
               '<td class="log-detail-cell">' +
               (detail

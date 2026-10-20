@@ -1637,3 +1637,99 @@ never retrieved"）；工作区指示条加 ✕ 退出（以前跳进去没有�
 
 基线：**734 passed / 4 skipped**（新增 9 条：续跑守卫 4 / DTO 截断与按工位查 2 /
 上传认 workspace 与打包上限 2 / 写操作透传 1）；`audit_ui --strict` exit 0。
+
+---
+
+## 36. 第二十九轮：三员工流水线实测 —— 假 partial（2026-10-20 夜，`0.10.42`）
+
+owner 要求清空聊天记录后做一次 3 员工群组测试：**方向（组长）/ 程序员 / 审查**，
+流程 = 组长定方向派活 → 程序员实现 → 审查 PASS/FAIL → 不过打回重修 → 过了组长提
+新需求 → 循环，直到项目完成（前端模板）。
+
+**实测结果（生产真跑，68 分钟）**：两轮迭代全部走通 ——
+
+| 轮 | 方向 | 实现 | 审查 |
+|---|---|---|---|
+| 1 | 新增根目录总览页 `index.html` + `styles/index.css`（修复 5 套模板 `../index.html` 死链） | 程序员 | **PASS** 一次通过 |
+| 2 | 新增第 6 套风格 **Neo-Brutalism**（粗黑边框/硬阴影/高饱和）+ 接入总览页 | 程序员 | **FAIL**（对比度 3.68:1、`.switch-line` 特异性冲突）→ 打回修复 → **PASS** |
+
+产物 4 个（`index.html` 5187B / `styles/index.css` 6866B / `styles/neobrutalism.html`
+2636B / `.css` 7401B），频道 58 条消息，recap 共 1770 tokens。
+
+**发现并修掉的 bug（假 partial）**：台账终态报 `partial`（完成 3/4 步），但四个
+产物齐全、审查通过——**活干完了却说没干完**（与 0.10.38 修的"没干完却报 done"
+是同一枚硬币的反面）。根因：组长把全流程都做在自己的 plan 步里，跑了 68 分钟，
+而 `GroupManager` 给每步的等待预算是 `task_timeout`（默认 1800s）→ 30 分钟处判
+"超时"，但该工位的执行**并没有停**，后台继续跑完了。
+
+修法（`_reconcile_timed_out_steps`）：收尾前用 `runs` 台账对账——对每个超时步，
+找该工位在**本步开始之后**启动且 `done` 的运行，找到就补回 `ok` 并标注
+「超时后于后台完成」。runs 是权威源，"等得住多久"不是。审计记
+`group:step_reconciled`。
+
+顺带结论：**组长在一个回合里编排全流程会撞 30 分钟步预算**——这种"大包干"提示词
+要么把 `task_timeout` 调到比预期总时长更长，要么让组长只做分工、把细节留给接力轮。
+
+基线：**738 passed / 4 skipped**（新增 4 条对账回归：补回 ok / 更早的 done 不算 /
+只认 done / 无台账时不动）；`audit_ui --strict` exit 0。
+
+---
+
+## 37. 第三十轮：owner 自查的 6 个界面/记账问题（2026-10-20 深夜，`0.10.43`）
+
+owner 在真机上自查出 6 条，逐条定位并修（第 3 条"多工具/视觉"见文末，方案待定）：
+
+### 37.1 群组里显示了整段页面代码，也在烧 token（真浪费）
+
+**实测**：一条三员工流水线的群频道 58 条消息里 **33 条是 `role=tool`**，内容是
+`read_file` 返回的整份 HTML/CSS（最大 4.7KB）。两个后果：① 群组页被人眼看成
+"整段源码刷屏"；② recap 从频道读消息 → **每个后续步骤的提示词都被工具输出占满**
+（3600 字符预算吃光，真正的成员产出反被挤掉）。
+
+修法：`WindowSession.append` 里 **工具消息与空 content 的 assistant（工具调用载体）
+不进共享频道**；`_channel_recap` 再滤一次历史遗留的 `role=tool`；群组页渲染也滤掉。
+（assistant 带文字的照常进——那是发言。）
+
+### 37.2 派活显示成"我"，其实是组长
+
+派单链路（`dispatch` / `dispatch_pending` / `dispatch_and_wait` / `dispatch_manual`）
+新增 `sender`，落进 `TaskItem.meta` → `ctx.extra["sender"]` → user 消息 meta →
+DTO 暴露 `sender`；前端 `renderMsg` 用 sender 当头像字并加一行「方向 派发」。
+`member_dispatch`（组长派活）传组长自己的名字；群组步骤提示词标「群组·模板流水线」。
+
+### 37.3 缓存命中：改为**平均**，本轮命中放气泡下小字
+
+以前用量条只显示**最后一次**调用（经常恰好是 0%，误导）。现在：每轮 LLM 调用的
+`cache_hit/cache_miss` 记进 assistant 消息 meta（`_cache_ints` 兼容 DeepSeek 顶层与
+OpenAI 嵌套两种形状）→ `db.cache_totals()` 求和 → `/usage` 返回
+`cache_avg_hit_tokens/cache_avg_miss_tokens/cache_avg_ratio` → 用量条显示「平均缓存命中
+x%（hit/total）」；单条气泡下显示「缓存 x%」。
+
+### 37.4 空白气泡
+
+工具调用轮的 assistant 消息 `content` 是空的、只有 `tool_calls`，以前照样渲染成空壳。
+`renderMessages` 跳过空 assistant（工具本身已在下面分组渲染）。
+
+### 37.5 日志审计：筛选不管用 + 只显示 id
+
+根因：`/logs/audit` **只接受 `limit`**（前端只能拉 200 条在浏览器里过滤，更早的
+永远筛不到）；且审计的 `actor` 从来只有 `worker`/`system`/`web`/`admin:*`——
+**没有工位维度**，工位只出现在 detail 里。
+
+修法：后端支持 `q` / `action` / `window` 三个筛选（默认拉 1000 条）+ 返回
+`actor_label`（按 detail 里的窗口 id 反查工位名；`system→系统`、`admin→管理员`）；
+前端审计表显示工位名（原始 actor 放 tooltip），工位筛选同时作用于审计与运行记录。
+
+### 37.6 员工工具/视觉（第 3 条，方案待 owner 拍板）
+
+实测环境：盒子有 **firefox**（可 `--headless --screenshot`），**没有** playwright /
+selenium / PIL；CJK 字体 3 个。两条路可选：
+① **截图工具**：`screenshot_page` 用 headless firefox 渲染工作区 HTML → PNG，
+人眼可看、审查员可产出视觉产物——但当前模型（u2-flash）**不吃图片**，
+要让模型"看图"还得接多模态（provider 层加 image parts + 换视觉模型）；
+② **静态视觉检查**：`contrast_check`（WCAG 对比度，纯 Python，正好覆盖这轮审查员
+手工算的 3.68:1）+ `html_lint`（标签/属性/溢出启发式）——不需要模型有眼睛，
+投入产出比最高。
+
+基线：**747 passed / 4 skipped**（新增 9 条：频道/recap 3、sender 2、缓存 3、审计 2
+含前端接线）；`audit_ui --strict` exit 0；bundle 已重建。

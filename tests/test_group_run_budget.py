@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dogbuddy.agents.core.roles import register_builtin_roles  # noqa: E402
 from dogbuddy.db import Database  # noqa: E402
+from dogbuddy.services.group_manager import _reconcile_timed_out_steps  # noqa: E402
 from dogbuddy.llm.provider import LLMResponse  # noqa: E402
 from dogbuddy.ports import Window  # noqa: E402
 from dogbuddy.services.group_manager import GroupManager  # noqa: E402
@@ -153,3 +154,54 @@ def test_一步都没成_终态是failed(tmp_path):
     assert result["completed_steps"] == 0
     assert "[完成 0/3 步]" in result["summary"]
     db.close()
+
+
+# ---------------------------------------------- v0.10.42 超时步对账（实测 68 分钟流水线）
+class _FakeRuns:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def recent_for_window(self, wid, limit=3):
+        return self._rows
+
+
+def test_timed_out_step_reconciled_when_finished_in_background():
+    """实测（2026-10-20）：组长 plan 步 30 分钟判超时，但它在后台把整个两轮
+    流水线跑完了（4 个产物、审查 PASS），台账却记 partial 3/4——活干完了却说
+    没干完。对账后用 runs 里的 done 补回 ok。"""
+    steps = [{"window_id": "w1", "ok": False, "timeout": True,
+              "started_at": "2026-10-20T13:00:00+00:00", "summary": "[超时] 没跑完"}]
+    runs = _FakeRuns([{"id": "r-abc", "status": "done",
+                       "started_at": "2026-10-20T13:00:03+00:00"}])
+    n = _reconcile_timed_out_steps(steps, runs)
+    assert n == 1
+    assert steps[0]["ok"] is True and steps[0]["reconciled"] is True
+    assert steps[0]["run_id"] == "r-abc"
+    assert steps[0]["summary"].startswith("[超时后于后台完成]")
+
+
+def test_reconcile_ignores_run_started_before_the_step():
+    """更早的一次 done 不能算到这一步头上（否则会一直"自愈"成 ok）。"""
+    steps = [{"window_id": "w1", "ok": False, "timeout": True,
+              "started_at": "2026-10-20T13:00:00+00:00", "summary": "[超时]"}]
+    runs = _FakeRuns([{"id": "r-old", "status": "done",
+                       "started_at": "2026-10-20T12:00:00+00:00"}])
+    assert _reconcile_timed_out_steps(steps, runs) == 0
+    assert steps[0]["ok"] is False
+
+
+def test_reconcile_requires_done_not_running_or_failed():
+    steps = [{"window_id": "w1", "ok": False, "timeout": True,
+              "started_at": "2026-10-20T13:00:00+00:00", "summary": "[超时]"}]
+    for status in ("running", "failed", "partial", "cancelled"):
+        runs = _FakeRuns([{"id": "r-x", "status": status,
+                           "started_at": "2026-10-20T13:00:05+00:00"}])
+        assert _reconcile_timed_out_steps(steps, runs) == 0, status
+        assert steps[0]["ok"] is False
+
+
+def test_reconcile_without_registry_or_non_timeout_steps_is_noop():
+    steps = [{"window_id": "w1", "ok": False, "timeout": True, "started_at": ""}]
+    assert _reconcile_timed_out_steps(steps, None) == 0
+    ok_steps = [{"window_id": "w1", "ok": True, "timeout": False}]
+    assert _reconcile_timed_out_steps(ok_steps, _FakeRuns([])) == 0

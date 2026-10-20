@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,52 @@ from ..db import new_id
 from ..ports import Group
 
 logger = logging.getLogger("dogbuddy.services.groups")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _reconcile_timed_out_steps(steps: list[dict], runs: Any) -> int:
+    """**步等待超时 ≠ 活没干完**（v0.10.42，2026-10-20 实测）。
+
+    `GroupManager` 给每个成员用 `task_timeout`（默认 1800s）封顶等待；超时后
+    这一步被记成 `ok=False`，但**该工位的执行并没有停**——它继续在后台跑，往往
+    最后是成功的。实测：一条两轮流水线（组长 plan 步把全流程都干完了）跑了 68
+    分钟，4 个产物齐全、审查 PASS，但 plan 步在 30 分钟处被判超时 → 台账
+    `status=partial`（完成 3/4 步）——**反向的谎报**：活干完了却说没干完。
+
+    对账：超时步去 runs 台账里找该工位在**本步开始之后**启动且 `done` 的运行，
+    找到就把这一步补成 ok（保留原文并标注"超时后于后台完成"）。runs 是权威源，
+    比"等得住多久"更可信。
+    """
+    if runs is None:
+        return 0
+    fixed = 0
+    for s in steps:
+        if s.get("ok") or not s.get("timeout"):
+            continue
+        wid = str(s.get("window_id") or "")
+        if not wid:
+            continue
+        try:
+            recs = runs.recent_for_window(wid, limit=3)
+        except Exception:  # noqa: BLE001 — 对账失败不改判（保持超时）
+            logger.debug("reconcile lookup failed", exc_info=True)
+            continue
+        started = str(s.get("started_at") or "")
+        hit = next((r for r in recs
+                    if str(r.get("status") or "") == "done"
+                    and str(r.get("started_at") or "") >= started), None)
+        if hit is None:
+            continue
+        s["ok"] = True
+        s["timeout"] = False
+        s["reconciled"] = True
+        s["run_id"] = str(hit.get("id") or "")
+        s["summary"] = "[超时后于后台完成] " + (s.get("summary") or "")
+        fixed += 1
+    return fixed
 
 #: 群组编排提示词的签名。带它的消息**不进共享频道**、也不进 recap ——
 #: 否则"提示词里有 recap、recap 又读回提示词"会自指增长（实测 3 人一轮
@@ -331,6 +378,11 @@ class GroupManager:
                 continue
             if upto_id and mid > upto_id:
                 continue
+            # v0.10.43：**工具执行细节不进 recap**。历史数据里已经混进频道的
+            # role=tool（read_file 返回的整份源码，实测 58 条里 33 条）会把
+            # 3600 字符预算吃光，真正的成员产出被挤掉——纯烧 token。
+            if str(getattr(m, "role", "")) == "tool":
+                continue
             line = self._readable_line(m, names)
             if line:
                 lines.append(line)
@@ -435,6 +487,8 @@ class GroupManager:
             if w is None:
                 continue
             is_lead = wid == lead_id
+            #: v0.10.42：本步开始时刻——超时对账要用它判定"哪一个 run 是本步的"
+            step_started = _now_iso()
             phase = ("plan" if (is_lead and plan_phase and not steps)
                      else "summary" if (is_lead and plan_phase) else "work")
             # 组长派过活的组员不再跑接力轮；这一步的真实状态由收尾前的 settle 填
@@ -531,6 +585,10 @@ class GroupManager:
                 # 用不了管理工具，fail-closed 变成"干不了活"，审查报告 P1-5）
                 scope=self.windows.scope_resolver.for_window(w),
                 extra={"trust": (w.params or {}).get("trust", "normal"),
+                       "window_name": w.name,
+                       # v0.10.43：群组步骤提示词由系统代组长发出
+                       "sender": (f"群组·{g.name}" if not is_lead
+                                  else f"群组·{g.name}（编排）"),
                        "project_id": getattr(w, "project_id", "") or "",
                        # v0.10.33：组长派活（member_dispatch）靠这几个字段 fail-closed 裁决
                        "group_id": g.id,
@@ -576,6 +634,7 @@ class GroupManager:
                                g.id, wid, budget)
                 steps.append({"window_id": wid, "window_name": w.name, "is_lead": is_lead,
                               "phase": phase, "ok": False, "timeout": True,
+                              "started_at": step_started,
                               "recap_chars": recap_stats["chars"],
                               "recap_tokens": recap_stats["tokens"],
                               "prompt_chars": len(step_prompt),
@@ -596,6 +655,17 @@ class GroupManager:
                     self.windows._set_status(wid, "idle")
                 except Exception:  # noqa: BLE001
                     logger.debug("reset idle status failed", exc_info=True)
+        # v0.10.42：超时步对账——"等待超时"不等于"活没干完"（实测：组长 plan 步
+        # 30 分钟判超时，但它在后台把两轮流水线跑完了、4 个产物齐全、审查 PASS，
+        # 台账却记成 partial 3/4）。
+        try:
+            fixed_n = _reconcile_timed_out_steps(steps, getattr(self, "runs", None))
+        except Exception:  # noqa: BLE001 — 对账失败不影响收尾
+            fixed_n = 0
+            logger.debug("step reconcile failed", exc_info=True)
+        if fixed_n:
+            self.db.audit("system", "group:step_reconciled",
+                          f"{g.id} {fixed_n} 个超时步经 runs 台账确认已在后台完成")
         summary = next((s["summary"] for s in reversed(steps) if s["is_lead"] and s["ok"]),
                        (steps[-1]["summary"] if steps else ""))
         limited_n = sum(1 for s in steps if s.get("rate_limited"))

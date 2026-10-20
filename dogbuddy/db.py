@@ -611,6 +611,31 @@ class Database:
                 (window_id,)).fetchone()
         return int(row["s"])
 
+    def cache_totals(self, window_id: str) -> tuple[int, int]:
+        """累计**缓存命中/未命中** token（v0.10.43）。
+
+        owner："工位有时还是会显示缓存命中 0%，请换成像 dsh 一样的**平均**缓存
+        命中"——只看最后一次调用会被个别 0% 的调用带偏。每条助手消息的 meta 里
+        记着当轮的 cache_hit/cache_miss（loop 写入），这里求和算平均。
+        返回 `(hit, miss)`；没有数据时返回 (0, 0)。
+        """
+        hit = miss = 0
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT meta_json FROM messages WHERE window_id=? AND meta_json LIKE '%cache_hit%'",
+                (window_id,)).fetchall()
+        for r in rows:
+            try:
+                meta = json.loads(r["meta_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            try:
+                hit += int(meta.get("cache_hit") or 0)
+                miss += int(meta.get("cache_miss") or 0)
+            except (TypeError, ValueError):
+                continue
+        return hit, miss
+
     def ledger_summary(self, days: int = 30) -> dict[str, Any]:
         """Token usage grouped by window and by day (ROADMAP T2.4, 账本页)."""
         since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()

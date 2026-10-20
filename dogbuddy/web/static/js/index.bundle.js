@@ -271,12 +271,18 @@
     var pct = Math.round(ratio * 100);
     /* v0.10.20：缓存命中（DeepSeek 的 prompt_cache_hit/miss_tokens）。
        服务商没给这些字段时（全 0）不显示这一行，而不是显示假的 0%。 */
-    var cacheHit = Number(u.cache_hit_tokens) || 0;
-    var cacheMiss = Number(u.cache_miss_tokens) || 0;
+    /* v0.10.43：优先显示**平均**命中（owner："有时显示 0%，要像 dsh 一样的平均"）。
+       只用最后一次调用会被个别 0% 的调用带偏；没有累计数据时才退回最后一次。 */
+    var avgHit = Number(u.cache_avg_hit_tokens) || 0;
+    var avgMiss = Number(u.cache_avg_miss_tokens) || 0;
+    var cacheHit = avgHit + avgMiss > 0 ? avgHit : (Number(u.cache_hit_tokens) || 0);
+    var cacheMiss = avgHit + avgMiss > 0 ? avgMiss : (Number(u.cache_miss_tokens) || 0);
     var cacheTotal = cacheHit + cacheMiss;
+    var isAvg = avgHit + avgMiss > 0;
     var cacheLine = cacheTotal > 0
-      ? '<span class="hint">缓存命中 ' + Math.round(cacheHit / cacheTotal * 100) + '%' +
-        ' (' + fmtInt(cacheHit) + ' 命中 / ' + fmtInt(cacheMiss) + ' 未命中)</span>'
+      ? '<span class="hint">' + (isAvg ? '平均缓存命中 ' : '缓存命中 ') +
+        Math.round(cacheHit / cacheTotal * 100) + '%' +
+        ' (' + fmtInt(cacheHit) + ' / ' + fmtInt(cacheTotal) + ')</span>'
       : '';
     return '<div class="ctx-usage-top">' +
       '<span class="ctx-usage-label">' + icon('activity', 'sm') +
@@ -1588,19 +1594,38 @@
      * @returns {string} 消息 HTML
      */
     renderMsg: function (m, role) {
-      var avatar = role === 'user' ? '我' : (role === 'system' ? 'S' : 'AI');
+      /* v0.10.43：**这条任务是谁派的**。群组里派活的是组长，以前一律显示"我"
+         （owner 实测反馈）。有 sender 就用它当头像字与署名。 */
+      var sender = String(m.sender || '').trim();
+      var avatar = role === 'user'
+        ? (sender ? sender.slice(0, 1) : '我')
+        : (role === 'system' ? 'S' : 'AI');
       // v0.10.38：群组协作消息标出来——群频道与成员会话是同一批消息的两份投影，
       // 带 group_id 的这条在群详情页也看得见（其他成员也看得到）。
       var grp = m.group_id
         ? '<span class="badge badge-amber" title="群组协作消息：群频道里其他成员也看得到">群组</span>'
         : '';
+      // v0.10.43：本条调用的缓存命中（小字；平均命中在顶部用量条）
+      var cacheTip = '';
+      if (role === 'assistant' && (m.cache_hit != null || m.cache_miss != null)) {
+        var ch = Number(m.cache_hit) || 0;
+        var cm = Number(m.cache_miss) || 0;
+        if (ch + cm > 0) {
+          cacheTip = '<span class="hint" title="本轮缓存命中 / 总 prompt token">缓存 ' +
+            Math.round(ch / (ch + cm) * 100) + '%</span>';
+        }
+      }
       return '<div class="msg ' + U.esc(role) + '">' +
-        '<div class="msg-avatar">' + avatar + '</div>' +
+        '<div class="msg-avatar" title="' + U.esc(sender || (role === 'user' ? '你' : '')) + '">' +
+        U.esc(avatar) + '</div>' +
         '<div style="min-width:0">' +
+        (sender
+          ? '<div class="msg-sender tiny muted">' + U.esc(sender) + ' 派发</div>'
+          : '') +
         '<div class="msg-bubble">' + Windows.renderContent(m.content) + '</div>' +
         '<div class="msg-meta"><span>' + U.esc(U.fmtClock(m.created_at)) + '</span>' +
         (m.tokens ? '<span class="num">' + U.esc(m.tokens) + ' tok</span>' : '') +
-        grp +
+        cacheTip + grp +
         '</div></div></div>';
     },
 
@@ -1670,6 +1695,14 @@
           }
           out.push(Windows.renderToolGroup(group));
         } else {
+          /* v0.10.43：**空气泡**（owner："工位有时显示空白气泡"）。工具调用轮次
+             的 assistant 消息 content 是空的、只有 tool_calls —— 以前照样渲染成
+             一个空壳气泡。工具本身已经在下面分组渲染了，这里直接跳过。 */
+          var blank = !String(m.content || '').trim();
+          if (role === 'assistant' && blank) {
+            i++;
+            continue;
+          }
           out.push(Windows.renderMsg(m, role));
           i++;
         }
@@ -3172,7 +3205,9 @@
 
     load: function () {
       var winP = Logs.windows.length ? Promise.resolve(Logs.windows) : A.windows.list();
-      return Promise.all([A.logs.audit(200), A.logs.runs(100), winP]).then(function (res) {
+      /* v0.10.43：拉 1000 条（原来 200）——只在浏览器里过滤 200 条时，更早的
+         记录永远筛不到（owner："筛选不管用"） */
+      return Promise.all([A.logs.audit(1000), A.logs.runs(200), winP]).then(function (res) {
         Logs.auditRows = res[0] || [];
         Logs.runRows = res[1] || [];
         Logs.windows = res[2] || [];
@@ -3201,8 +3236,16 @@
       var auditHost = document.getElementById('log-audit-body');
       if (auditHost) {
         var rows = Logs.auditRows.filter(function (e) {
+          /* v0.10.43：按工位筛选也作用于审计（以前只作用于运行记录）；
+             关键字同时匹配工位名（后端已把 detail 里的窗口 id 解析成名字） */
+          if (winSel) {
+            var wname = (Logs.windows.filter(function (w) { return w.id === winSel; })[0] || {}).name || '';
+            var blob0 = (e.actor_label || '') + ' ' + (e.detail || '') + ' ' + (e.actor || '');
+            if (blob0.indexOf(winSel) < 0 && (!wname || blob0.indexOf(wname) < 0)) return false;
+          }
           if (!kw) return true;
-          return String(e.actor || '').toLowerCase().indexOf(kw) >= 0 ||
+          return String(e.actor_label || '').toLowerCase().indexOf(kw) >= 0 ||
+            String(e.actor || '').toLowerCase().indexOf(kw) >= 0 ||
             String(e.action || '').toLowerCase().indexOf(kw) >= 0 ||
             String(e.detail || '').toLowerCase().indexOf(kw) >= 0;
         });
@@ -3216,7 +3259,9 @@
             var short = detail.length > 46 ? detail.slice(0, 46) + '…' : detail;
             return '<tr>' +
               '<td class="mono tiny">' + U.esc(U.fmtTime(e.created_at)) + '</td>' +
-              '<td><span class="badge badge-grey mono">' + U.esc(e.actor || '—') + '</span></td>' +
+              /* v0.10.43：显示工位名（后端解析），原始 actor 放 tooltip */
+              '<td><span class="badge badge-grey" title="' + U.esc(e.actor || '') + '">' +
+              U.esc(e.actor_label || e.actor || '—') + '</span></td>' +
               '<td><span class="badge badge-blue mono">' + U.esc(e.action || '—') + '</span></td>' +
               '<td class="log-detail-cell">' +
               (detail
@@ -6982,11 +7027,16 @@
     renderChannel: function () {
       var host = document.getElementById('grp-chan-list');
       if (!host) return;
-      if (!Groups.channel.length) {
+      /* v0.10.43：**工具执行细节不显示在群频道**（owner：群组里出现了整段页面
+         代码）。新消息已不再进频道；这里再滤掉历史遗留的 role=tool 与空消息。 */
+      var shown = Groups.channel.filter(function (m) {
+        return String(m.role || '') !== 'tool' && String(m.content || '').trim() !== '';
+      });
+      if (!shown.length) {
         host.innerHTML = '<p class="muted small grp-chan-empty">频道暂无消息——派个任务，员工们会在这里留下协作记录。</p>';
         return;
       }
-      host.innerHTML = Groups.channel.map(function (m) {
+      host.innerHTML = shown.map(function (m) {
         return '<div class="grp-msg grp-msg-' + U.esc(m.role || 'system') + '">' +
           avatar(m.window_name || m.window_id, m.window_id) +
           '<div class="grp-msg-body">' +

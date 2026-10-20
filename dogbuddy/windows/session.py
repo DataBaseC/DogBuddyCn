@@ -77,6 +77,20 @@ class WindowSession:
                 and str(mute.get("marker") or "") in str(content or "")):
             group_id = ""
             mute["left"] = int(mute.get("left", 0)) - 1
+        # v0.10.43：**工具执行细节不进共享频道**（owner 2026-10-20 实测反馈：
+        # "群组里写入的工具显示了页面代码，会不会浪费 token"——会）。
+        # 实测一条群组流水线：58 条频道消息里 33 条是 role=tool，内容是
+        # read_file 返回的整份 HTML/CSS（最大 4.7KB）：
+        #   ① 群组页刷屏，人看到的是整段源码；
+        #   ② recap 从频道读消息 → 每个后续步骤的提示词都被这些工具输出占满
+        #      （3600 字符预算被吃光，真正的成员产出反被挤掉）。
+        # 工具调用不是"沟通"，是执行细节——留在自己的会话里就够了。
+        # 例外：assistant 消息**带文字**时照常进频道（那是发言）。
+        if group_id and role == "tool":
+            group_id = ""
+        if (group_id and role == "assistant" and not str(content or "").strip()
+                and isinstance(meta, dict) and meta.get("tool_calls")):
+            group_id = ""
         m = self.messages.add_message(self.window.id, role, content, tokens, meta,
                                       group_id=group_id)
         self._notify(m)

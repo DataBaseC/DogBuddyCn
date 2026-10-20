@@ -164,6 +164,14 @@ def router(svc, auth_deps) -> APIRouter:
                 cache = stats()
         except Exception:  # noqa: BLE001 — 用量条降级，绝不 500
             pass
+        # v0.10.43：平均缓存命中（owner："有时显示 0%，要像 dsh 一样的平均"）
+        _avg_hit = _avg_miss = 0
+        try:
+            wid = str(getattr(getattr(session, "window", None), "id", "") or "")
+            if wid:
+                _avg_hit, _avg_miss = svc.db.cache_totals(wid)
+        except Exception:  # noqa: BLE001 — 用量条降级
+            pass
         # 管理员的模型 = 运行时全局配置（管理员没有工位，所以在"模型管理"页点「设为当前」
         # 就是给管理员换模型；工位不单独指定模型时继承它）
         cur_model = str(getattr(llm, "model", "") or "")
@@ -181,7 +189,12 @@ def router(svc, auth_deps) -> APIRouter:
                 "estimated": bool(getattr(session, "context_tokens_estimated", True)),
                 "cache_hit_tokens": cache.get("cache_hit_tokens", 0),
                 "cache_miss_tokens": cache.get("cache_miss_tokens", 0),
-                "cache_hit_ratio": cache.get("cache_hit_ratio", 0.0)}
+                "cache_hit_ratio": cache.get("cache_hit_ratio", 0.0),
+                # v0.10.43：平均缓存命中（同工位口径，见 windows.py 的说明）
+                "cache_avg_hit_tokens": _avg_hit,
+                "cache_avg_miss_tokens": _avg_miss,
+                "cache_avg_ratio": (round(_avg_hit / (_avg_hit + _avg_miss), 4)
+                                    if (_avg_hit + _avg_miss) else 0.0)}
 
     @r.post("/admin/chat", dependencies=auth_deps)
     async def chat(body: ChatIn) -> dict:

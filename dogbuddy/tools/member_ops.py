@@ -101,7 +101,9 @@ class MemberDispatchTool:
             if hasattr(self.coordinator, "dispatch_pending"):
                 try:
                     fut = self.coordinator.dispatch_pending(
-                        w.id, task, run_parent_id=extra.get("run_id", ""))
+                        w.id, task, run_parent_id=extra.get("run_id", ""),
+                        # v0.10.43：前端要显示"组长·方向 派发"，不是"我"
+                        sender=str(extra.get("window_name") or "组长"))
                 except TypeError:      # 兼容不支持 run_parent_id 的实现
                     try:
                         fut = self.coordinator.dispatch_pending(w.id, task)
@@ -119,6 +121,7 @@ class MemberDispatchTool:
         try:
             outcome = await self.coordinator.dispatch_and_wait(
                 w.id, task, coordinated=True, run_parent_id=extra.get("run_id", ""),
+                sender=str(extra.get("window_name") or "组长"),
                 **({"timeout": float(timeout)} if timeout else {}))
         except TypeError:  # 兼容没有 coordinated/timeout/run_parent_id 参数的实现
             try:

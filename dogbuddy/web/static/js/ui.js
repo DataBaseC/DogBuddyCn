@@ -265,12 +265,18 @@
     var pct = Math.round(ratio * 100);
     /* v0.10.20：缓存命中（DeepSeek 的 prompt_cache_hit/miss_tokens）。
        服务商没给这些字段时（全 0）不显示这一行，而不是显示假的 0%。 */
-    var cacheHit = Number(u.cache_hit_tokens) || 0;
-    var cacheMiss = Number(u.cache_miss_tokens) || 0;
+    /* v0.10.43：优先显示**平均**命中（owner："有时显示 0%，要像 dsh 一样的平均"）。
+       只用最后一次调用会被个别 0% 的调用带偏；没有累计数据时才退回最后一次。 */
+    var avgHit = Number(u.cache_avg_hit_tokens) || 0;
+    var avgMiss = Number(u.cache_avg_miss_tokens) || 0;
+    var cacheHit = avgHit + avgMiss > 0 ? avgHit : (Number(u.cache_hit_tokens) || 0);
+    var cacheMiss = avgHit + avgMiss > 0 ? avgMiss : (Number(u.cache_miss_tokens) || 0);
     var cacheTotal = cacheHit + cacheMiss;
+    var isAvg = avgHit + avgMiss > 0;
     var cacheLine = cacheTotal > 0
-      ? '<span class="hint">缓存命中 ' + Math.round(cacheHit / cacheTotal * 100) + '%' +
-        ' (' + fmtInt(cacheHit) + ' 命中 / ' + fmtInt(cacheMiss) + ' 未命中)</span>'
+      ? '<span class="hint">' + (isAvg ? '平均缓存命中 ' : '缓存命中 ') +
+        Math.round(cacheHit / cacheTotal * 100) + '%' +
+        ' (' + fmtInt(cacheHit) + ' / ' + fmtInt(cacheTotal) + ')</span>'
       : '';
     return '<div class="ctx-usage-top">' +
       '<span class="ctx-usage-label">' + icon('activity', 'sm') +

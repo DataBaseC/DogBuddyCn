@@ -330,11 +330,16 @@
     renderChannel: function () {
       var host = document.getElementById('grp-chan-list');
       if (!host) return;
-      if (!Groups.channel.length) {
+      /* v0.10.43：**工具执行细节不显示在群频道**（owner：群组里出现了整段页面
+         代码）。新消息已不再进频道；这里再滤掉历史遗留的 role=tool 与空消息。 */
+      var shown = Groups.channel.filter(function (m) {
+        return String(m.role || '') !== 'tool' && String(m.content || '').trim() !== '';
+      });
+      if (!shown.length) {
         host.innerHTML = '<p class="muted small grp-chan-empty">频道暂无消息——派个任务，员工们会在这里留下协作记录。</p>';
         return;
       }
-      host.innerHTML = Groups.channel.map(function (m) {
+      host.innerHTML = shown.map(function (m) {
         return '<div class="grp-msg grp-msg-' + U.esc(m.role || 'system') + '">' +
           avatar(m.window_name || m.window_id, m.window_id) +
           '<div class="grp-msg-body">' +

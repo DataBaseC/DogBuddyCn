@@ -79,6 +79,42 @@ def _response_tokens(resp: Any) -> int:
     return max(0, int(total))
 
 
+def _cache_ints(resp: Any) -> dict[str, int]:
+    """本轮**缓存命中/未命中**（v0.10.43）。
+
+    provider 层（`openai_compat._usage_dict`）已把两种形状规范化成
+    `cache_hit_tokens` / `cache_miss_tokens`；这里再兜底认一次原始形状
+    （DeepSeek 顶层 / OpenAI 嵌套），让每条助手消息都带上本轮缓存数字 ——
+    前端才能在气泡下面显示"缓存 92%"，用量条才能算**平均命中**（而不是
+    只看最后一次调用，那个可能恰好是 0%）。
+    """
+    raw = getattr(resp, "usage", None) or {}
+    if not isinstance(raw, dict):
+        return {}
+
+    def num(src: Any, *keys: str) -> int | None:
+        if not isinstance(src, dict):
+            return None
+        for k in keys:
+            v = src.get(k)
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                return int(v)
+        return None
+
+    hit = num(raw, "cache_hit_tokens", "prompt_cache_hit_tokens")
+    miss = num(raw, "cache_miss_tokens", "prompt_cache_miss_tokens")
+    if hit is None:
+        hit = num(raw.get("prompt_tokens_details"), "cached_tokens")
+    if hit is None:
+        return {}
+    if miss is None:
+        prompt = num(raw, "prompt_tokens")
+        miss = max(0, prompt - hit) if prompt is not None else 0
+    return {"cache_hit": int(hit), "cache_miss": int(miss or 0)}
+
+
 @dataclass
 class AgentResult:
     content: str = ""
@@ -129,7 +165,11 @@ class AgentLoop:
         the model streams them — wired to the SSE feed for the typewriter UI."""
         result = AgentResult()
         if user_input:
-            self.session.append("user", user_input)
+            # v0.10.43：**这条是谁派的** —— 群组里派活的是组长，不是 owner。
+            # 以前不记，前端只能把所有 user 消息显示成"我"（owner 实测反馈）。
+            sender = str((ctx.extra or {}).get("sender") or "")
+            self.session.append("user", user_input,
+                                meta={"sender": sender} if sender else None)
         schemas = self.registry.schemas(only=self.tool_names)
 
         for step in range(1, self.max_iterations + 1):
@@ -175,10 +215,12 @@ class AgentLoop:
             #   note_usage() → 本轮 prompt_tokens，供压缩器判断"上下文有多满"
             tokens = _response_tokens(resp)
             self._note_usage(resp)
+            cache = _cache_ints(resp)  # v0.10.43：气泡下的"缓存 x%"
 
             if not resp.tool_calls:
                 result.content = resp.content or ""
-                self.session.append("assistant", result.content, tokens=tokens)
+                self.session.append("assistant", result.content, tokens=tokens,
+                                    meta=dict(cache) or None)
                 result.stop_reason = "done"
                 break
 
@@ -189,7 +231,7 @@ class AgentLoop:
                 for tc in resp.tool_calls
             ]
             self.session.append("assistant", resp.content or "", tokens=tokens,
-                                meta={"tool_calls": llm_tool_calls})
+                                meta={"tool_calls": llm_tool_calls, **cache})
             for tc in resp.tool_calls:
                 result.tool_calls += 1
                 tool_result = await self._run_tool(tc, ctx, result)
