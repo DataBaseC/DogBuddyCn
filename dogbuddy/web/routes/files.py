@@ -94,6 +94,8 @@ def router(svc, auth_deps) -> APIRouter:
             raise HTTPException(status_code=403, detail=str(e)) from e
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
+        except ValueError as e:  # 体积超限等业务拒绝 → 400（不是服务器错误）
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except Exception as e:  # noqa: BLE001 — 打包失败给 500，别把临时文件留在盘上
             if tmp is not None:
                 try:
@@ -121,11 +123,14 @@ def router(svc, auth_deps) -> APIRouter:
         return {"image_base64": data.get("image_base64", "")}
 
     @r.post("/files/upload", dependencies=auth_deps)
-    async def upload(file: UploadFile = File(...), path: str = Form("")) -> dict:
+    async def upload(file: UploadFile = File(...), path: str = Form(""),
+                     workspace: str = Form("")) -> dict:
         data = await file.read()
         rel = f"{path.rstrip('/')}/{file.filename}" if path else file.filename
         try:
-            size = svc.files.save_upload(rel, data)
+            # v0.10.41：上传也要认 workspace——否则跳转到项目/工位工作区后，
+            # 拖拽上传会静默落到默认根目录（与读路径不一致）
+            size = svc.files.save_upload(rel, data, workspace or None)
         except PermissionError as e:
             raise HTTPException(status_code=403, detail=str(e)) from e
         return {"uploaded": rel, "size": size}

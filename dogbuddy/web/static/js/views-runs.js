@@ -49,13 +49,23 @@
       for (var i = 0; i < Runs.active.length; i++) {
         if (String(Runs.active[i].id) === id) { idx = i; break; }
       }
-      var live = p.live !== false && String(p.status) !== 'done'
-        && String(p.status) !== 'failed' && String(p.status) !== 'cancelled'
-        && String(p.status) !== 'timeout' && String(p.status) !== 'interrupted';
+      var terminal = ['done', 'partial', 'failed', 'cancelled', 'timeout', 'interrupted']
+        .indexOf(String(p.status)) >= 0;
+      var live = p.live !== false && !terminal;
       if (live) {
         if (idx >= 0) Runs.active[idx] = p; else Runs.active.push(p);
       } else if (idx >= 0) {
         Runs.active.splice(idx, 1);
+      }
+      if (terminal) {
+        /* v0.10.41：刚结束的运行要出现在「最近结束（可唤醒）」里——否则
+           用户看着它跑完，却没有地方点重试（要等下一次刷新） */
+        var rIdx = -1;
+        for (var j = 0; j < Runs.recent.length; j++) {
+          if (String(Runs.recent[j].id) === id) { rIdx = j; break; }
+        }
+        if (rIdx >= 0) Runs.recent[rIdx] = p; else Runs.recent.unshift(p);
+        Runs.recent = Runs.recent.slice(0, 8);
       }
       Runs.render();
     },
@@ -140,7 +150,8 @@
       }
       /* v0.10.40：最近结束的运行——"异常停下后要能唤醒"，先让它看得见 */
       var recent = (Runs.recent || []).filter(function (r) {
-        return String(r.status) !== 'done';
+        /* 排除 done 与仍在跑的（后者已在上半段渲染，避免同一运行出现两次） */
+        return String(r.status) !== 'done' && !r.live;
       }).slice(0, 6);
       if (recent.length) {
         html += '<div class="runs-empty" style="margin-top:8px">最近结束（可唤醒）</div>' +
@@ -177,7 +188,8 @@
       if (!A || !A.runs) return;
       if (btn) { btn.disabled = true; btn.textContent = '取消中…'; }
       A.runs.cancel(id).then(function () {
-        U.toast('ok', '已取消 ' + id + '（产物保留，不算失败）');
+        /* v0.10.41：'ok' 不是 ui.js 认识的等级（没有 toast-ok 样式/图标）→ 用 success */
+        U.toast('success', '已取消 ' + id + '（产物保留，不算失败）');
         return Runs.refresh();
       }).catch(function (e) {
         U.toast('warn', '取消失败：' + (e && e.message ? e.message : e));
@@ -209,7 +221,7 @@
       if (btn) { btn.disabled = true; btn.textContent = '唤醒中…'; }
       A.runs.retry(id).then(function (d) {
         var note = (d && d.note) ? d.note : '已重新发起';
-        U.toast('ok', note);
+        U.toast('success', note);
         return Runs.refresh();
       }).catch(function (e) {
         U.toast('warn', '唤醒失败：' + (e && e.message ? e.message : e));

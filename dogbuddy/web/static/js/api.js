@@ -372,23 +372,31 @@
       image: function (path, workspace) {
         return request('GET', '/api/files/image' + qs({ path: path, workspace: workspace || undefined }), null, { blob: true });
       },
-      upload: function (path, file) {
+      /* v0.10.41：**写操作也必须带 workspace**——否则跳转到项目/工位工作区后，
+         预览/编辑/上传/新建/重命名/删除全部静默打向默认根目录（2026-10-20 复查
+         发现的真 bug：在项目里改文件会写到另一个工作区的同名路径上）。 */
+      upload: function (path, file, workspace) {
         var fd = new FormData();
         fd.append('file', file);
         fd.append('path', path || '');
+        if (workspace) fd.append('workspace', workspace);
         return request('POST', '/api/files/upload', fd);
       },
-      mkdir: function (path, name) {
-        return request('POST', '/api/files/mkdir', { path: path || '', name: name });
+      mkdir: function (path, name, workspace) {
+        return request('POST', '/api/files/mkdir',
+          { path: path || '', name: name, workspace: workspace || undefined });
       },
-      rename: function (path, newName) {
-        return request('POST', '/api/files/rename', { path: path, new_name: newName });
+      rename: function (path, newName, workspace) {
+        return request('POST', '/api/files/rename',
+          { path: path, new_name: newName, workspace: workspace || undefined });
       },
-      remove: function (path) {
-        return request('POST', '/api/files/delete', { path: path });
+      remove: function (path, workspace) {
+        return request('POST', '/api/files/delete',
+          { path: path, workspace: workspace || undefined });
       },
-      write: function (path, content) {
-        return request('POST', '/api/files/write', { path: path, content: content });
+      write: function (path, content, workspace) {
+        return request('POST', '/api/files/write',
+          { path: path, content: content, workspace: workspace || undefined });
       }
     },
 

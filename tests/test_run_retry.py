@@ -201,3 +201,34 @@ def test_terminal_mapping_stays_honest():
     assert _run_terminal(SimpleNamespace(stop_reason="error", summary=""))[0] == "failed"
     assert _run_terminal(SimpleNamespace(status="timeout"))[0] == "timeout"
     assert _run_terminal(SimpleNamespace(stop_reason="rate_limited"))[0] == "paused"
+
+
+# ------------------------------------------- v0.10.41 复查修掉的三个真 bug
+def test_prompt_truncated_in_dto_but_full_in_db(tmp_path):
+    """/api/runs（50 条）与每个 SSE 事件都会带 prompt——不截断就是几百 KB 白扛；
+    但 run_retry 读的是 DB 全文，必须完整。"""
+    svc, db = _svc(tmp_path)
+    long_prompt = "任务" * 500  # 1000 字
+    run = svc.runs.start(kind="manual", window_id="w1", prompt=long_prompt)
+    dto = [d for d in svc.runs.recent(limit=5) if d["id"] == run.id][0]
+    assert len(dto["prompt"]) == 500, "DTO 必须截断到 500"
+    assert svc.runs.get(run.id).prompt == long_prompt, "DB 里必须是全文"
+    out = _run(retry_run(svc, run.id))
+    assert out["ok"] and svc.windows.dispatched[0][1] == long_prompt, "重试要用全文"
+    db.close()
+
+
+def test_recent_for_window_not_crowded_out_by_busy_windows(tmp_path):
+    """window_status 的"最近运行"必须按工位直接查——用 recent(30) 再筛，
+    忙碌时该工位的记录会被其他工位挤出前 30 条（假阴性）。"""
+    import time
+    svc, db = _svc(tmp_path)
+    mine = svc.runs.start(kind="manual", window_id="w-mine", prompt="我的活")
+    svc.runs.finish(mine.id, "failed", summary="我的失败")
+    for i in range(40):  # 其他工位更忙
+        r = svc.runs.start(kind="manual", window_id="w-other", prompt=f"别人的活 {i}")
+        svc.runs.finish(r.id, "done")
+        time.sleep(0.002)
+    got = svc.runs.recent_for_window("w-mine", limit=3)
+    assert [d["id"] for d in got] == [mine.id], "按工位查必须能查到（不能被挤掉）"
+    db.close()

@@ -746,23 +746,31 @@
       image: function (path, workspace) {
         return request('GET', '/api/files/image' + qs({ path: path, workspace: workspace || undefined }), null, { blob: true });
       },
-      upload: function (path, file) {
+      /* v0.10.41：**写操作也必须带 workspace**——否则跳转到项目/工位工作区后，
+         预览/编辑/上传/新建/重命名/删除全部静默打向默认根目录（2026-10-20 复查
+         发现的真 bug：在项目里改文件会写到另一个工作区的同名路径上）。 */
+      upload: function (path, file, workspace) {
         var fd = new FormData();
         fd.append('file', file);
         fd.append('path', path || '');
+        if (workspace) fd.append('workspace', workspace);
         return request('POST', '/api/files/upload', fd);
       },
-      mkdir: function (path, name) {
-        return request('POST', '/api/files/mkdir', { path: path || '', name: name });
+      mkdir: function (path, name, workspace) {
+        return request('POST', '/api/files/mkdir',
+          { path: path || '', name: name, workspace: workspace || undefined });
       },
-      rename: function (path, newName) {
-        return request('POST', '/api/files/rename', { path: path, new_name: newName });
+      rename: function (path, newName, workspace) {
+        return request('POST', '/api/files/rename',
+          { path: path, new_name: newName, workspace: workspace || undefined });
       },
-      remove: function (path) {
-        return request('POST', '/api/files/delete', { path: path });
+      remove: function (path, workspace) {
+        return request('POST', '/api/files/delete',
+          { path: path, workspace: workspace || undefined });
       },
-      write: function (path, content) {
-        return request('POST', '/api/files/write', { path: path, content: content });
+      write: function (path, content, workspace) {
+        return request('POST', '/api/files/write',
+          { path: path, content: content, workspace: workspace || undefined });
       }
     },
 
@@ -1033,13 +1041,23 @@
       for (var i = 0; i < Runs.active.length; i++) {
         if (String(Runs.active[i].id) === id) { idx = i; break; }
       }
-      var live = p.live !== false && String(p.status) !== 'done'
-        && String(p.status) !== 'failed' && String(p.status) !== 'cancelled'
-        && String(p.status) !== 'timeout' && String(p.status) !== 'interrupted';
+      var terminal = ['done', 'partial', 'failed', 'cancelled', 'timeout', 'interrupted']
+        .indexOf(String(p.status)) >= 0;
+      var live = p.live !== false && !terminal;
       if (live) {
         if (idx >= 0) Runs.active[idx] = p; else Runs.active.push(p);
       } else if (idx >= 0) {
         Runs.active.splice(idx, 1);
+      }
+      if (terminal) {
+        /* v0.10.41：刚结束的运行要出现在「最近结束（可唤醒）」里——否则
+           用户看着它跑完，却没有地方点重试（要等下一次刷新） */
+        var rIdx = -1;
+        for (var j = 0; j < Runs.recent.length; j++) {
+          if (String(Runs.recent[j].id) === id) { rIdx = j; break; }
+        }
+        if (rIdx >= 0) Runs.recent[rIdx] = p; else Runs.recent.unshift(p);
+        Runs.recent = Runs.recent.slice(0, 8);
       }
       Runs.render();
     },
@@ -1124,7 +1142,8 @@
       }
       /* v0.10.40：最近结束的运行——"异常停下后要能唤醒"，先让它看得见 */
       var recent = (Runs.recent || []).filter(function (r) {
-        return String(r.status) !== 'done';
+        /* 排除 done 与仍在跑的（后者已在上半段渲染，避免同一运行出现两次） */
+        return String(r.status) !== 'done' && !r.live;
       }).slice(0, 6);
       if (recent.length) {
         html += '<div class="runs-empty" style="margin-top:8px">最近结束（可唤醒）</div>' +
@@ -1161,7 +1180,8 @@
       if (!A || !A.runs) return;
       if (btn) { btn.disabled = true; btn.textContent = '取消中…'; }
       A.runs.cancel(id).then(function () {
-        U.toast('ok', '已取消 ' + id + '（产物保留，不算失败）');
+        /* v0.10.41：'ok' 不是 ui.js 认识的等级（没有 toast-ok 样式/图标）→ 用 success */
+        U.toast('success', '已取消 ' + id + '（产物保留，不算失败）');
         return Runs.refresh();
       }).catch(function (e) {
         U.toast('warn', '取消失败：' + (e && e.message ? e.message : e));
@@ -1193,7 +1213,7 @@
       if (btn) { btn.disabled = true; btn.textContent = '唤醒中…'; }
       A.runs.retry(id).then(function (d) {
         var note = (d && d.note) ? d.note : '已重新发起';
-        U.toast('ok', note);
+        U.toast('success', note);
         return Runs.refresh();
       }).catch(function (e) {
         U.toast('warn', '唤醒失败：' + (e && e.message ? e.message : e));
@@ -7654,9 +7674,24 @@
     /* ---------- 加载 ---------- */
     /* initial: {path, workspace} —— 从别处跳转进来时指定起点（v0.10.39） */
     load: function (initial) {
-      if (initial && typeof initial === 'object') {
-        if (typeof initial.workspace === 'string') FileMgr.workspace = initial.workspace;
-        if (typeof initial.path === 'string') FileMgr.path = initial.path;
+      if (initial && typeof initial === 'object' && typeof initial.workspace === 'string') {
+        /* v0.10.41：换工作区时必须**重置相对路径**——以前只改 workspace 不重置
+           path，从 A 工作区的 src/ 跳到 B 工作区会继续留在 src/（目录错乱） */
+        if (initial.workspace !== FileMgr.workspace) FileMgr.path = '';
+        FileMgr.workspace = initial.workspace;
+        FileMgr.selected = null;
+        FileMgr.keyword = '';
+        FileMgr.preview = null;
+        var s0 = document.getElementById('fm-search');
+        if (s0) s0.value = '';
+        var pv0 = document.getElementById('fm-preview');
+        if (pv0) {
+          pv0.innerHTML = U.empty({ art: 'doc', title: '选择文件以预览',
+            desc: '左键单击预览，双击打开目录或文件。' });
+        }
+      }
+      if (initial && typeof initial === 'object' && typeof initial.path === 'string') {
+        FileMgr.path = initial.path;
       }
       FileMgr.loadList();
       FileMgr.loadTree();
@@ -7691,10 +7726,12 @@
       var host = document.getElementById('fm-crumb');
       if (!host) return;
       /* v0.10.39：工作区指示——从工位/群组/项目跳进来时，用户必须一眼看到
-         "我现在在哪个工作区里翻"，否则和默认根目录混淆。 */
+         "我现在在哪个工作区里翻"，否则和默认根目录混淆。
+         v0.10.41：加 ✕ 退出（以前跳进去后没有回到默认根的入口，只能刷新页面）。 */
       var wsChip = FileMgr.workspace
         ? '<span class="fm-ws-chip" title="当前工作区：' + U.esc(FileMgr.workspace) + '">' +
-          U.icon('folder', 'sm') + '<span class="mono">' + U.esc(FileMgr.workspace) + '</span></span>'
+          U.icon('folder', 'sm') + '<span class="mono">' + U.esc(FileMgr.workspace) + '</span>' +
+          '<button class="fm-ws-close" id="fm-ws-exit" title="回到默认工作区">✕</button></span>'
         : '';
       var crumbs = FileMgr.breadcrumbs.slice();
       if (!crumbs.length || crumbs[crumbs.length - 1].path !== FileMgr.path) {
@@ -7706,11 +7743,24 @@
           '<button class="' + (isLast ? 'current' : '') + '" data-path="' + U.esc(c.path) + '">' +
           U.esc(c.name || '根目录') + '</button>';
       }).join('');
-      U.$$('button', host).forEach(function (b) {
+      U.$$('button[data-path]', host).forEach(function (b) {
         b.addEventListener('click', function () {
           FileMgr.navigate(b.getAttribute('data-path'));
         });
       });
+      /* v0.10.41：✕ 退出当前工作区 → 回到默认根目录 */
+      var exit = document.getElementById('fm-ws-exit');
+      if (exit) {
+        exit.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          FileMgr.workspace = '';
+          FileMgr.path = '';
+          FileMgr.selected = null;
+          FileMgr.preview = null;
+          FileMgr.loadList();
+          FileMgr.loadTree();
+        });
+      }
     },
 
     /* ---------- 渲染：左树 ---------- */
@@ -7874,7 +7924,7 @@
       var list = Array.prototype.slice.call(files);
       var total = list.length, done = 0, failed = 0;
       list.forEach(function (f) {
-        A.files.upload(FileMgr.path, f).then(function () {
+        A.files.upload(FileMgr.path, f, FileMgr.workspace).then(function () {
           done++;
           if (done === total) {
             U.toast(failed ? 'warn' : 'success', failed ? (failed + ' 个文件上传失败') : ('已上传 ' + total + ' 个文件'));
@@ -7915,13 +7965,13 @@
       if (window.innerWidth <= 720) host.classList.add('show');
 
       if (IMG_EXT.test(entry.name)) {
-        A.files.image(entry.path).then(function (blob) {
+        A.files.image(entry.path, FileMgr.workspace).then(function (blob) {
           var url = URL.createObjectURL(blob);
           FileMgr.preview = { path: entry.path, name: entry.name, isImage: true, size: entry.size };
           FileMgr.renderPreview(null, url);
         }).catch(function () {
           /* 回退：用 read 的 image_base64 */
-          A.files.read(entry.path).then(function (data) {
+          A.files.read(entry.path, FileMgr.workspace).then(function (data) {
             var url = data.image_base64 ? ('data:image/*;base64,' + data.image_base64) : '';
             FileMgr.preview = { path: entry.path, name: entry.name, isImage: true, size: entry.size };
             FileMgr.renderPreview(null, url);
@@ -7932,7 +7982,7 @@
         return;
       }
 
-      A.files.read(entry.path).then(function (data) {
+      A.files.read(entry.path, FileMgr.workspace).then(function (data) {
         FileMgr.preview = {
           path: entry.path, name: entry.name, mode: 'preview',
           content: data.content || '', language: data.language || '',
@@ -8016,7 +8066,7 @@
       var p = FileMgr.preview;
       var editor = document.getElementById('fmp-editor');
       if (!p || !editor) return;
-      A.files.write(p.path, editor.value).then(function () {
+      A.files.write(p.path, editor.value, FileMgr.workspace).then(function () {
         p.content = editor.value;
         U.toast('success', '已保存：' + p.name);
       }).catch(function (e) {
@@ -8082,7 +8132,7 @@
 
     mkdir: function () {
       FileMgr.promptName('新建文件夹', '新建文件夹', function (name) {
-        A.files.mkdir(FileMgr.path, name).then(function () {
+        A.files.mkdir(FileMgr.path, name, FileMgr.workspace).then(function () {
           U.toast('success', '已创建文件夹：' + name);
           FileMgr.load();
         }).catch(function (e) { U.toast('error', e.message); });
@@ -8092,7 +8142,7 @@
     mkfile: function () {
       FileMgr.promptName('新建文件', 'untitled.txt', function (name) {
         var path = FileMgr.path ? (FileMgr.path + '/' + name) : name;
-        A.files.write(path, '').then(function () {
+        A.files.write(path, '', FileMgr.workspace).then(function () {
           U.toast('success', '已创建文件：' + name);
           FileMgr.load();
         }).catch(function (e) { U.toast('error', e.message); });
@@ -8102,7 +8152,7 @@
     renameEntry: function (entry) {
       FileMgr.promptName('重命名 · ' + entry.name, entry.name, function (name) {
         if (name === entry.name) return;
-        A.files.rename(entry.path, name).then(function () {
+        A.files.rename(entry.path, name, FileMgr.workspace).then(function () {
           U.toast('success', '已重命名为：' + name);
           if (FileMgr.preview && FileMgr.preview.path === entry.path) FileMgr.preview = null;
           FileMgr.load();
@@ -8120,7 +8170,7 @@
         text: '确定删除「' + entry.name + '」？此操作不可恢复。'
       }).then(function (ok) {
         if (!ok) return;
-        A.files.remove(entry.path).then(function () {
+        A.files.remove(entry.path, FileMgr.workspace).then(function () {
           U.toast('success', '已删除：' + entry.name);
           if (FileMgr.preview && FileMgr.preview.path === entry.path) {
             FileMgr.preview = null;

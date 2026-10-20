@@ -27,9 +27,24 @@
     /* ---------- 加载 ---------- */
     /* initial: {path, workspace} —— 从别处跳转进来时指定起点（v0.10.39） */
     load: function (initial) {
-      if (initial && typeof initial === 'object') {
-        if (typeof initial.workspace === 'string') FileMgr.workspace = initial.workspace;
-        if (typeof initial.path === 'string') FileMgr.path = initial.path;
+      if (initial && typeof initial === 'object' && typeof initial.workspace === 'string') {
+        /* v0.10.41：换工作区时必须**重置相对路径**——以前只改 workspace 不重置
+           path，从 A 工作区的 src/ 跳到 B 工作区会继续留在 src/（目录错乱） */
+        if (initial.workspace !== FileMgr.workspace) FileMgr.path = '';
+        FileMgr.workspace = initial.workspace;
+        FileMgr.selected = null;
+        FileMgr.keyword = '';
+        FileMgr.preview = null;
+        var s0 = document.getElementById('fm-search');
+        if (s0) s0.value = '';
+        var pv0 = document.getElementById('fm-preview');
+        if (pv0) {
+          pv0.innerHTML = U.empty({ art: 'doc', title: '选择文件以预览',
+            desc: '左键单击预览，双击打开目录或文件。' });
+        }
+      }
+      if (initial && typeof initial === 'object' && typeof initial.path === 'string') {
+        FileMgr.path = initial.path;
       }
       FileMgr.loadList();
       FileMgr.loadTree();
@@ -64,10 +79,12 @@
       var host = document.getElementById('fm-crumb');
       if (!host) return;
       /* v0.10.39：工作区指示——从工位/群组/项目跳进来时，用户必须一眼看到
-         "我现在在哪个工作区里翻"，否则和默认根目录混淆。 */
+         "我现在在哪个工作区里翻"，否则和默认根目录混淆。
+         v0.10.41：加 ✕ 退出（以前跳进去后没有回到默认根的入口，只能刷新页面）。 */
       var wsChip = FileMgr.workspace
         ? '<span class="fm-ws-chip" title="当前工作区：' + U.esc(FileMgr.workspace) + '">' +
-          U.icon('folder', 'sm') + '<span class="mono">' + U.esc(FileMgr.workspace) + '</span></span>'
+          U.icon('folder', 'sm') + '<span class="mono">' + U.esc(FileMgr.workspace) + '</span>' +
+          '<button class="fm-ws-close" id="fm-ws-exit" title="回到默认工作区">✕</button></span>'
         : '';
       var crumbs = FileMgr.breadcrumbs.slice();
       if (!crumbs.length || crumbs[crumbs.length - 1].path !== FileMgr.path) {
@@ -79,11 +96,24 @@
           '<button class="' + (isLast ? 'current' : '') + '" data-path="' + U.esc(c.path) + '">' +
           U.esc(c.name || '根目录') + '</button>';
       }).join('');
-      U.$$('button', host).forEach(function (b) {
+      U.$$('button[data-path]', host).forEach(function (b) {
         b.addEventListener('click', function () {
           FileMgr.navigate(b.getAttribute('data-path'));
         });
       });
+      /* v0.10.41：✕ 退出当前工作区 → 回到默认根目录 */
+      var exit = document.getElementById('fm-ws-exit');
+      if (exit) {
+        exit.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          FileMgr.workspace = '';
+          FileMgr.path = '';
+          FileMgr.selected = null;
+          FileMgr.preview = null;
+          FileMgr.loadList();
+          FileMgr.loadTree();
+        });
+      }
     },
 
     /* ---------- 渲染：左树 ---------- */
@@ -247,7 +277,7 @@
       var list = Array.prototype.slice.call(files);
       var total = list.length, done = 0, failed = 0;
       list.forEach(function (f) {
-        A.files.upload(FileMgr.path, f).then(function () {
+        A.files.upload(FileMgr.path, f, FileMgr.workspace).then(function () {
           done++;
           if (done === total) {
             U.toast(failed ? 'warn' : 'success', failed ? (failed + ' 个文件上传失败') : ('已上传 ' + total + ' 个文件'));
@@ -288,13 +318,13 @@
       if (window.innerWidth <= 720) host.classList.add('show');
 
       if (IMG_EXT.test(entry.name)) {
-        A.files.image(entry.path).then(function (blob) {
+        A.files.image(entry.path, FileMgr.workspace).then(function (blob) {
           var url = URL.createObjectURL(blob);
           FileMgr.preview = { path: entry.path, name: entry.name, isImage: true, size: entry.size };
           FileMgr.renderPreview(null, url);
         }).catch(function () {
           /* 回退：用 read 的 image_base64 */
-          A.files.read(entry.path).then(function (data) {
+          A.files.read(entry.path, FileMgr.workspace).then(function (data) {
             var url = data.image_base64 ? ('data:image/*;base64,' + data.image_base64) : '';
             FileMgr.preview = { path: entry.path, name: entry.name, isImage: true, size: entry.size };
             FileMgr.renderPreview(null, url);
@@ -305,7 +335,7 @@
         return;
       }
 
-      A.files.read(entry.path).then(function (data) {
+      A.files.read(entry.path, FileMgr.workspace).then(function (data) {
         FileMgr.preview = {
           path: entry.path, name: entry.name, mode: 'preview',
           content: data.content || '', language: data.language || '',
@@ -389,7 +419,7 @@
       var p = FileMgr.preview;
       var editor = document.getElementById('fmp-editor');
       if (!p || !editor) return;
-      A.files.write(p.path, editor.value).then(function () {
+      A.files.write(p.path, editor.value, FileMgr.workspace).then(function () {
         p.content = editor.value;
         U.toast('success', '已保存：' + p.name);
       }).catch(function (e) {
@@ -455,7 +485,7 @@
 
     mkdir: function () {
       FileMgr.promptName('新建文件夹', '新建文件夹', function (name) {
-        A.files.mkdir(FileMgr.path, name).then(function () {
+        A.files.mkdir(FileMgr.path, name, FileMgr.workspace).then(function () {
           U.toast('success', '已创建文件夹：' + name);
           FileMgr.load();
         }).catch(function (e) { U.toast('error', e.message); });
@@ -465,7 +495,7 @@
     mkfile: function () {
       FileMgr.promptName('新建文件', 'untitled.txt', function (name) {
         var path = FileMgr.path ? (FileMgr.path + '/' + name) : name;
-        A.files.write(path, '').then(function () {
+        A.files.write(path, '', FileMgr.workspace).then(function () {
           U.toast('success', '已创建文件：' + name);
           FileMgr.load();
         }).catch(function (e) { U.toast('error', e.message); });
@@ -475,7 +505,7 @@
     renameEntry: function (entry) {
       FileMgr.promptName('重命名 · ' + entry.name, entry.name, function (name) {
         if (name === entry.name) return;
-        A.files.rename(entry.path, name).then(function () {
+        A.files.rename(entry.path, name, FileMgr.workspace).then(function () {
           U.toast('success', '已重命名为：' + name);
           if (FileMgr.preview && FileMgr.preview.path === entry.path) FileMgr.preview = null;
           FileMgr.load();
@@ -493,7 +523,7 @@
         text: '确定删除「' + entry.name + '」？此操作不可恢复。'
       }).then(function (ok) {
         if (!ok) return;
-        A.files.remove(entry.path).then(function () {
+        A.files.remove(entry.path, FileMgr.workspace).then(function () {
           U.toast('success', '已删除：' + entry.name);
           if (FileMgr.preview && FileMgr.preview.path === entry.path) {
             FileMgr.preview = null;

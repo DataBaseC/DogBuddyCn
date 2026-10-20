@@ -23,6 +23,9 @@ MAX_PREVIEW_BYTES = 200 * 1024
 
 #: 打包下载排除的目录（与 list/tree 的可见性口径一致——这些不进用户的成果包）
 ZIP_EXCLUDE_DIRS = {".git", ".venv", "__pycache__", "node_modules"}
+#: 打包体积上限（未压缩字节）。超过就拒绝——临时 tar.gz 写在同一块盘上，
+#: 一次误点可能把盒子写满（v0.10.41）。
+MAX_ZIP_BYTES = 1536 * 1024 * 1024
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg"}
 LANG_MAP = {
@@ -202,10 +205,26 @@ class FileService:
         （路由用 BackgroundTasks；本方法中途失败也会留下半成品，由调用方的
         except 分支清理）。排除 `.git`/`.venv`/`__pycache__`/`node_modules`：
         与 list/tree 的可见性口径一致，成果包里不该有这些。
+
+        v0.10.41：先算总体积，超过 `MAX_ZIP_BYTES` 直接拒绝——否则一次误点
+        就能把盒子磁盘写满（临时文件 + 传输都在同一块盘上）。
         """
         target = self.resolve(rel_path, workspace)
         if not target.is_dir():
             raise FileNotFoundError(f"not a directory: {rel_path or '(root)'}")
+        total = 0
+        for p in target.rglob("*"):
+            if any(part in ZIP_EXCLUDE_DIRS for part in p.relative_to(target).parts):
+                continue
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    continue
+                if total > MAX_ZIP_BYTES:
+                    raise ValueError(
+                        f"目录太大（超过 {MAX_ZIP_BYTES // (1024 * 1024)} MB），"
+                        f"拒绝打包——请改打包子目录（例如只打 dist/ 或 src/）")
         fd, tmp_name = tempfile.mkstemp(prefix="dogbuddy-zip-", suffix=".tar.gz")
         os.close(fd)
         out = Path(tmp_name)

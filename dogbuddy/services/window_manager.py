@@ -790,13 +790,39 @@ class WindowManager:
                     f"**停止自动续跑**。请换模型/换 key，或稍后手动重发。")
         rec["attempts"] = attempts
         prompt = rec["prompt"]
+        # v0.10.41：续跑要**继续同一条运行台账**，并且开火前要检查它是否已被
+        # 取消/结束。修的是两个真 bug：
+        #  ① 以前 `_later()` 无条件 `dispatch(prompt)`（不带 run_id）——管理员
+        #     取消/唤醒之后 60 秒，定时器仍会把同一任务再跑一遍（双跑、双烧
+        #     token，还可能并发写同一批文件）；
+        #  ② 续跑的执行没有 run_id → 台账里旧 run 永远停在 paused（顶栏一直显示
+        #     "限速暂停"），实际工作却在无台账状态下跑完。
+        rid = str(rec.get("run_id") or "")
         self.db.audit("system", "window:requeue_rate_limited",
                       f"{window_id} 第 {attempts} 次自动续跑（{delay:.0f}s 后）")
+        _TERMINAL = ("done", "partial", "failed", "cancelled", "timeout", "interrupted")
+
+        def _resume_still_wanted() -> bool:
+            runs = getattr(self, "runs", None)
+            if not rid or runs is None:
+                return True
+            r = runs.get(rid)
+            if r is None or r.status in _TERMINAL:
+                self.db.audit("system", "window:requeue_skipped",
+                              f"{window_id} 运行 {rid} 已结束（{getattr(r, 'status', '缺失')}），"
+                              f"不再自动续跑")
+                return False
+            return True
 
         async def _later() -> None:
             try:
                 await asyncio.sleep(max(0.0, float(delay)))
-                self.dispatch(window_id, prompt, urgent=True)
+                if not _resume_still_wanted():
+                    return
+                runs = getattr(self, "runs", None)
+                if rid and runs is not None:
+                    runs.update(rid, status="running")
+                self.dispatch(window_id, prompt, urgent=True, run_id=rid)
             except asyncio.CancelledError:  # pragma: no cover — 关停时取消
                 raise
             except Exception:  # noqa: BLE001 — 续跑失败不能炸事件循环
@@ -806,7 +832,9 @@ class WindowManager:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             # 没有事件循环（脚本/测试）→ 直接同步重排，不假装延迟
-            self.dispatch(window_id, prompt, urgent=True)
+            if not _resume_still_wanted():
+                return "该运行已结束，不再续跑"
+            self.dispatch(window_id, prompt, urgent=True, run_id=rid)
             return f"已立即续跑（第 {attempts} 次；当前无事件循环，延迟被跳过）"
         loop.create_task(_later())
         return f"已自动续跑（第 {attempts} 次，{delay:.0f}s 后）"

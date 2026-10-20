@@ -109,3 +109,55 @@ def test_workspace_jump_is_wired():
     assert "data-prj=\"open-ws\"" in projects and "data-prj=\"zip\"" in projects
     # app.js 透传跳转参数
     assert "global.FileMgr.load(params || {})" in (js / "app.js").read_text(encoding="utf-8")
+
+
+# ------------------------------------------- v0.10.41 复查：写操作必须也带 workspace
+def test_write_ops_pass_workspace():
+    """复查发现（2026-10-20）：跳转到项目/工位工作区后，预览/编辑/上传/新建/
+    重命名/删除全部**静默打向默认根目录**——在项目里改文件会写到另一个工作区的
+    同名路径上。读路径带了 workspace，写路径一个都没带。"""
+    js = Path(__file__).resolve().parents[1] / "dogbuddy/web/static/js"
+    mgr = (js / "filemanager.js").read_text(encoding="utf-8")
+    api = (js / "api.js").read_text(encoding="utf-8")
+    for call in ("A.files.read(entry.path, FileMgr.workspace)",
+                 "A.files.image(entry.path, FileMgr.workspace)",
+                 "A.files.write(p.path, editor.value, FileMgr.workspace)",
+                 "A.files.mkdir(FileMgr.path, name, FileMgr.workspace)",
+                 "A.files.rename(entry.path, name, FileMgr.workspace)",
+                 "A.files.remove(entry.path, FileMgr.workspace)",
+                 "A.files.upload(FileMgr.path, f, FileMgr.workspace)"):
+        assert call in mgr, f"调用点没带 workspace：{call}"
+    for sig in ("upload: function (path, file, workspace)",
+                "mkdir: function (path, name, workspace)",
+                "rename: function (path, newName, workspace)",
+                "remove: function (path, workspace)",
+                "write: function (path, content, workspace)"):
+        assert sig in api, f"api.js 签名缺 workspace：{sig}"
+    # 换工作区时必须重置相对路径（否则会停在上一个工作区的同名子目录里）
+    assert "initial.workspace !== FileMgr.workspace" in mgr
+
+
+def test_upload_respects_workspace(tmp_path):
+    """后端上传端点也要认 workspace（否则拖拽上传落错工作区）。"""
+    app, client = _client(tmp_path)
+    ws = _ws(tmp_path)
+    app.files.roots.append(ws.resolve())
+    r = client.post("/api/files/upload",
+                    files={"file": ("up.txt", b"uploaded-body", "text/plain")},
+                    data={"path": "", "workspace": str(ws)})
+    assert r.status_code == 200, r.text
+    assert (ws / "up.txt").read_bytes() == b"uploaded-body"
+    app.db.close()
+
+
+def test_zip_refuses_oversized_directory(tmp_path, monkeypatch):
+    """体积上限：临时 tar.gz 与源数据同一块盘，一次误点不能把盒子写满。"""
+    from dogbuddy.services import file_service
+    app, client = _client(tmp_path)
+    ws = _ws(tmp_path)
+    app.files.roots.append(ws.resolve())
+    monkeypatch.setattr(file_service, "MAX_ZIP_BYTES", 5)  # 测试目录 ~10 字节
+    r = client.get("/api/files/zip", params={"workspace": str(ws)})
+    assert r.status_code == 400, r.text
+    assert "目录太大" in r.text
+    app.db.close()

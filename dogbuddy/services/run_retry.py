@@ -29,6 +29,15 @@ logger = logging.getLogger("dogbuddy.services.run_retry")
 _BACKGROUND: set[asyncio.Task] = set()
 
 
+def _log_task_error(task: asyncio.Task) -> None:
+    """后台重跑失败要留痕（否则只在解释器退出时打一行无上下文的警告）。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("retried background run failed: %s", exc, exc_info=True)
+
+
 def _live(status: str) -> bool:
     return status in ("queued", "running", "paused", "cancelling")
 
@@ -93,6 +102,9 @@ async def retry_run(svc: Any, run_id: str) -> dict[str, Any]:
             task = asyncio.create_task(groups.run(run.group_id, prompt))
             _BACKGROUND.add(task)
             task.add_done_callback(_BACKGROUND.discard)
+            # v0.10.41：后台任务异常若不取回，只在进程退出时打一行
+            # "Task exception was never retrieved"——重跑的失败就悄无声息了
+            task.add_done_callback(_log_task_error)
             notes.append("群组运行已在后台重新发起（用 run_list 看新运行）")
             return {"ok": True, "mode": "group", "group_id": run.group_id,
                     "note": "；".join(notes)}

@@ -1614,3 +1614,26 @@ owner：「要确保因为异常导致的循环停止后，管理员能够唤醒
 基线：**725 passed / 4 skipped**（新增 11 条：prompt 落库/重启后可重试/老数据拒绝/
 活着的先取消/群组后台/定时任务/工具登记/终态映射）；`audit_ui --strict` exit 0；
 五条守卫变异全部仍被抓住；schema 13 → 14。
+
+---
+
+## 35. 第二十八轮：上线后复查——6 个真 bug（2026-10-20 晚，`0.10.41`）
+
+owner："再检查有什么bug"。对自己刚交付的两个批次做一次系统复查，**查出 6 个真问题**，
+其中两个会造成实际损失（写错工作区、任务双跑）：
+
+| # | bug | 后果 | 修法 |
+|---|---|---|---|
+| 1 | **跳转工作区后写操作打向默认根目录** — 0.10.39 只给读路径（list/tree/read/download/zip/image）加了 `workspace`；`upload/mkdir/rename/delete/write` 的 api.js 签名与 `/files/upload` 端点**都不认** workspace，调用点也一个都没传 | 在项目工作区里改文件 → **静默写到默认根目录的同名路径**（用户以为改了，实际没改） | api.js 五个写方法 + `/files/upload` 端点（Form 字段）都接受 workspace；filemanager 全部调用点透传；**换工作区时重置相对路径**（以前会停在上个工作区的同名子目录） |
+| 2 | **限速续跑定时器不认取消** — `requeue_after_rate_limit` 的 `_later()` 无条件 `dispatch(prompt)`，且不带 run_id | 管理员取消/唤醒后 60 秒，同一任务**再跑一遍**（双烧 token、可能并发写同一批文件）；续跑的执行无台账，旧 run 永远停在 `paused`（顶栏一直显示限速暂停） | 开火前查原 run 是否已取消/结束（`window:requeue_skipped` 留痕）；续跑带原 run_id 并把台账拉回 running |
+| 3 | `window_status` 的"最近运行"用 `recent(30)` 再筛 → 忙碌时该工位的记录被其他工位挤出前 30 条 | 探测假阴性（"没有最近运行"） | 新增 `RunRegistry.recent_for_window()` 按工位直接查 |
+| 4 | `Run.as_dict()` 带**全文** prompt | `/api/runs`（50 条）与每个 SSE `run.*` 事件都扛整段任务文本，前端 15 秒轮询一次 | DTO 截断 500 字（DB 存全文供 run_retry） |
+| 5 | `U.toast('ok', ...)` | `toast-ok` 没有样式/图标（一直是未样式化的灰条） | 改 `success` |
+| 6 | 打包下载**无体积上限** | 一次误点就能把盒子磁盘写满（临时包与源数据同盘） | `MAX_ZIP_BYTES=1.5GB`，超限 400 + 明确提示"改打子目录" |
+
+顺带：群组重试的后台任务补异常留痕（否则只在进程退出时一行"Task exception was
+never retrieved"）；工作区指示条加 ✕ 退出（以前跳进去没有回默认根的入口）；
+运行抽屉"最近结束"段与 SSE 同步、并排除仍在跑的（避免同一运行出现两次）。
+
+基线：**734 passed / 4 skipped**（新增 9 条：续跑守卫 4 / DTO 截断与按工位查 2 /
+上传认 workspace 与打包上限 2 / 写操作透传 1）；`audit_ui --strict` exit 0。

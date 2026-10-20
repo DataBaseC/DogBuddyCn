@@ -85,7 +85,10 @@ class Run:
             "started_at": self.started_at, "updated_at": self.updated_at,
             "finished_at": self.finished_at,
             "error_code": self.error_code, "summary": self.summary,
-            "prompt": self.prompt,
+            # v0.10.41：DTO 里**截断**任务原文（DB 存全文供 run_retry 用）。
+            # 不截断的话 /api/runs（50 条）与每个 SSE run.* 事件都会带上整段
+            # 任务文本——15 秒轮询一次，白白扛几百 KB。
+            "prompt": (self.prompt or "")[:500],
             "live": self.status in LIVE_STATUSES,
         }
 
@@ -244,6 +247,30 @@ class RunRegistry:
             d.setdefault("window_name", names[0].get(d.get("window_id", ""), ""))
             d.setdefault("group_name", names[1].get(d.get("group_id", ""), ""))
         return rows[: max(1, int(limit))]
+
+    def recent_for_window(self, window_id: str, limit: int = 3) -> list[dict[str, Any]]:
+        """某个工位**最近几次**运行（v0.10.41）。
+
+        为什么不复用 `recent(30)` 再筛：忙碌时该工位的运行可能已被全局更新的
+        记录挤出前 30 条，window_status 就会显示"没有最近运行"（假阴性）。
+        """
+        if not window_id or self.db is None:
+            return []
+        rows: list[dict[str, Any]] = []
+        try:
+            cur = self.db._conn.execute(
+                "SELECT * FROM runs WHERE window_id=? "
+                "ORDER BY started_at DESC, id DESC LIMIT ?",
+                (window_id, max(1, int(limit))))
+            for row in cur.fetchall():
+                d = {k: row[k] for k in row.keys() if k in _DB_COLUMNS}
+                d["prompt"] = (d.get("prompt") or "")[:500]
+                d["live"] = d.get("status") in LIVE_STATUSES
+                d["cancel_requested"] = bool(d.get("cancel_requested"))
+                rows.append(d)
+        except Exception:  # noqa: BLE001 — 台账读失败不影响调用方
+            logger.debug("recent_for_window failed", exc_info=True)
+        return rows
 
     def _name_maps(self) -> tuple[dict[str, str], dict[str, str]]:
         win: dict[str, str] = {}

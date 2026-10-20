@@ -222,16 +222,13 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         if runs is not None:
             try:
                 lines = []
-                # 注意：runs.recent() 返回的是 **dict**（活跃 + 历史合并），不是对象
-                for r in runs.recent(limit=30):
-                    if r.get("window_id") != info.get("window_id"):
-                        continue
+                # v0.10.41：按工位**直接查**（recent(30) 再筛会被更忙的工位挤掉）
+                # 注意：返回的是 **dict**（活跃 + 历史合并），不是对象
+                for r in runs.recent_for_window(info.get("window_id", ""), limit=3):
                     lines.append(
                         f"  {r.get('id')} [{r.get('kind')}] {r.get('status')} "
                         f"{str(r.get('started_at'))[:19]} "
                         f"{(r.get('summary') or '')[:100]}")
-                    if len(lines) >= 3:
-                        break
                 if lines:
                     text += "\n最近运行:\n" + "\n".join(lines)
             except Exception:  # noqa: BLE001 — 台账读失败不影响状态本身
