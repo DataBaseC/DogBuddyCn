@@ -168,7 +168,7 @@ def test_群组运行把组长身份与群组上下文交给工具(tmp_path, mon
         def __init__(self, *a, **k):
             pass
 
-        async def run(self, prompt, ctx):
+        async def run(self, prompt, ctx, on_delta=None):
             seen.append(dict(ctx.extra))
             # 用产品自己的"已派过活"清单当守卫：它在各步之间是**共享的同一个 list**
             if ctx.extra.get("is_lead") and not ctx.extra.get("dispatched_windows"):
@@ -208,7 +208,7 @@ def test_群组运行时成员状态翻成running再翻回来(tmp_path, monkeypa
         def __init__(self, *a, **k):
             pass
 
-        async def run(self, prompt, ctx):
+        async def run(self, prompt, ctx, on_delta=None):
             seen_status.append((ctx.window_id, db.get_window(ctx.window_id).status))
             return AgentResult(content="ok", stop_reason="done")
 
@@ -263,7 +263,7 @@ def _run_group_with_lead_dispatch(tmp_path, monkeypatch, coord, timeline, wait_f
         def __init__(self, *a, **k):
             pass
 
-        async def run(self, prompt, ctx):
+        async def run(self, prompt, ctx, on_delta=None):
             is_lead = bool(ctx.extra.get("is_lead"))
             # 组长开场轮派活；收尾轮记录"汇总时"的时点
             if is_lead and not ctx.extra.get("delegated"):

@@ -272,7 +272,7 @@ def test_T7_3_群组挂项目后成员共享工作区(tmp_path):
             def __init__(self, *a, **k):
                 pass
 
-            async def run(self, prompt, ctx):
+            async def run(self, prompt, ctx, on_delta=None):
                 seen.append(ctx.workspace)
                 from dogbuddy.agents.core.loop import AgentResult
                 return AgentResult(content="ok", stop_reason="done")
@@ -421,7 +421,7 @@ def test_T7_6_群组挂项目并可查共享工作区(tmp_path, monkeypatch):
             def __init__(self, *a, **k):
                 pass
 
-            async def run(self, prompt, ctx):
+            async def run(self, prompt, ctx, on_delta=None):
                 seen.append(ctx.workspace)
                 from dogbuddy.agents.core.loop import AgentResult
                 return AgentResult(content="ok", stop_reason="done")

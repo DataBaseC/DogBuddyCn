@@ -105,7 +105,9 @@ def test_jobs_flow(tmp_path):
     r = client.post("/api/jobs", json={"window_id": wid, "name": "bad", "schedule": "nope",
                                        "prompt": "x"})
     assert r.status_code == 400  # invalid schedule surfaced
-    assert client.post(f"/api/jobs/{jid}/run_now").json()["result"].startswith("dispatched")
+    # v0.10.46：立即执行返回 {ok, mode, note}（群组任务会在后台起一条流水线）
+    _rn = client.post(f"/api/jobs/{jid}/run_now").json()
+    assert _rn["ok"] is True and _rn["mode"] == "window"
     assert isinstance(client.get(f"/api/jobs/{jid}/runs").json(), list)
     assert client.delete(f"/api/jobs/{jid}").json()["result"] == "removed"
     app.db.close()

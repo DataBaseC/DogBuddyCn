@@ -395,6 +395,13 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         def make(verb: str):
             async def fn(args: dict, ctx: ToolContext) -> ToolResult:
                 need(J, "jobs")
+                # v0.10.46：群组任务的"立即执行"要在后台起整条流水线
+                if verb == "run_now" and hasattr(J, "run_now_async"):
+                    res = await J.run_now_async(args["job_id"])
+                    if not res.get("ok"):
+                        return ToolResult.failure(res.get("reason") or "启动失败")
+                    return ToolResult.success(
+                        f"run_now {args['job_id']}: {res.get('note', '已启动')}")
                 out = getattr(J, verb)(args["job_id"])
                 return ToolResult.success(f"{verb} {args['job_id']}: {out}")
             return fn

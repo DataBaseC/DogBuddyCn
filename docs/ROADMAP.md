@@ -1755,3 +1755,19 @@ owner：「部署一下，然后继续让其完成前端模板任务。每隔 1 
 
 基线：新增 5 条测试（group_id 落库/`every 1 hour` 解析/终态映射 done+partial→ok/
 rate_limited 与 failed/群组崩溃不炸调度）；定向回归 34 passed。
+
+---
+
+## 39. 第三十二轮：验收后的 4 个问题（2026-10-21 凌晨，`0.10.46`）
+
+owner 验收基本通过后报了 4 条，逐条定位：
+
+| # | 现象 | 根因（读码 + 生产数据确认） | 修法 |
+|---|---|---|---|
+| 1 | 流式输出不即时 / 大延迟 | **群组路径根本没传 `on_delta`**：单工位有打字机效果，`GroupManager` 里 `loop.run(step_prompt, ctx)` 却漏了这个参数 → 一整步（几分钟）零输出，只能等整段落库。日志里 46 次 `stream failed mid-flight` 是 10-17/18 的 429 历史，不是现在 | 群组每步传 `on_delta` → `window.stream`（带 `group_id`/`window_name`）；**群组页新增实时直播条**（成员名 + 末尾 160 字，SSE 驱动） |
+| 2 | 群组消息一进入要显示最新 | `renderChannel` 渲染完没滚到底 | 首次渲染/原本在底部 → 贴底；**用户正在翻历史时不被 30s 刷新拽走**（按 `scrollHeight - scrollTop - clientHeight` 判断） |
+| 3 | 立即执行点了没反应 | 0.10.45 只是"拒绝"（怕误单派给组长），前端又永远弹"已触发执行" —— 两头都不对 | 新增 `JobManager.run_now_async`：群组任务**后台起整条流水线**（`asyncio.create_task(groups.run)`），普通任务照旧；路由改 async 返回 `{ok, mode, note}`，前端按真实结果提示 |
+| 4 | 缓存命中率偏低 | 生产数据：同一工位 **90% 与 0% 交替**（平均 34%）。根因：压缩只在 **run 结束后**跑一次，而工具密集的运行里消息数会从 48 冲到 60+ → `recent(60)` 窗口**中途滑动** → 请求头部位移 → 前缀匹配不上 | `build_context` 之前（第 2 轮起）也调 `maybe_compact`：窗口不再跨过 60，前缀稳定。单轮运行不多付压缩成本 |
+
+基线：**756 passed / 4 skipped**（新增 3 条运行中压缩回归 + 群组任务立即执行回归）；
+`audit_ui --strict` exit 0；bundle 已重建。

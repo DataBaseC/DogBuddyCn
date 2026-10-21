@@ -98,8 +98,13 @@ def router(svc, auth_deps) -> APIRouter:
         return {"result": svc.jobs.resume(job_id)}
 
     @r.post("/jobs/{job_id}/run_now", dependencies=auth_deps)
-    def run_now(job_id: str) -> dict:
-        return {"result": svc.jobs.run_now(job_id)}
+    async def run_now(job_id: str) -> dict:
+        """立即执行（v0.10.46）：群组任务在后台起整条流水线，普通任务派给工位。
+
+        以前这里是同步 `svc.jobs.run_now` → 群组任务被拒 / 误派给组长，
+        前端却一律弹"已触发执行"（owner 实测："点了没反应"）。
+        """
+        return await svc.jobs.run_now_async(job_id)
 
     @r.get("/jobs/{job_id}/runs", dependencies=auth_deps)
     def runs(job_id: str) -> list[dict]:

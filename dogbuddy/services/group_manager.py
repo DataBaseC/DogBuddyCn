@@ -28,6 +28,7 @@ from typing import Any
 
 from ..agents.core.roles import get_role
 from ..db import new_id
+from ..events.bus import Event
 from ..ports import Group
 
 logger = logging.getLogger("dogbuddy.services.groups")
@@ -611,7 +612,25 @@ class GroupManager:
                 # （默认 1800s）给每个成员封顶：到点就停这一步、如实记成 timeout，
                 # 而不是无限等下去。
                 budget = float(self.windows.params_for(w).get("task_timeout") or 1800)
-                result = await asyncio.wait_for(loop.run(step_prompt, ctx), timeout=budget)
+
+                # v0.10.46（owner："流式输出不是即时的"）：**群组步骤也要流式**。
+                # 以前这里 `loop.run(step_prompt, ctx)` 没传 on_delta —— 单工位有人
+                # 打字机效果，群组运行却全程零输出、只能等整段落库（一次群组步要
+                # 跑几分钟，观感就是"卡住了"）。现在每个成员的增量都按
+                # `window.stream` 推出去（带 group_id，群组页也能显示）。
+                def _on_delta(delta: str, _wid: str = wid, _name: str = w.name) -> None:
+                    if self.bus is None:
+                        return
+                    try:
+                        self.bus.emit(Event(type="window.stream",
+                                            payload={"window_id": _wid, "delta": delta,
+                                                     "group_id": g.id,
+                                                     "window_name": _name}))
+                    except Exception:  # noqa: BLE001 — UI 推流失败不能影响运行
+                        logger.debug("group stream emit failed", exc_info=True)
+
+                result = await asyncio.wait_for(loop.run(step_prompt, ctx, on_delta=_on_delta),
+                                                timeout=budget)
                 # v0.10.28：成员被限速而**暂停**（非失败）要如实标出来，别混进 ok=False
                 # 的"失败"里 —— 它只是"这次没轮上"，稍后重跑就能继续。
                 limited = result.stop_reason == "rate_limited"

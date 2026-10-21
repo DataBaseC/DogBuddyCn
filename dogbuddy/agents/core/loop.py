@@ -174,6 +174,16 @@ class AgentLoop:
 
         for step in range(1, self.max_iterations + 1):
             result.iterations = step
+            # v0.10.46（owner："显示的缓存命中率比较低，请排查"）：**运行中也要压缩**。
+            # 以前只在 run 结束之后压一次；一次工具密集的运行里消息数会从 48 冲到
+            # 60+，而 `ContextBuilder` 只取 `recent(60)` —— 窗口中途滑动 → 请求的
+            # **头部位移** → 提供商前缀匹配不上 → 那几次调用 0% 命中（实测同一工位
+            # 90%/0% 交替，平均被拉到 34%）。在 build_context 之前压，就不会跨过 60。
+            if step > 1 and self.compactor is not None:
+                try:
+                    await self.compactor.maybe_compact(self.session)
+                except Exception:  # noqa: BLE001 — 压缩失败不影响本轮
+                    logger.warning("mid-run compaction failed", exc_info=True)
             messages = self.session.build_context(self.builder)
             try:
                 # C1: transient failures get continuation attempts instead of

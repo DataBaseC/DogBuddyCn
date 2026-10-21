@@ -320,6 +320,8 @@
         '<div class="grp-side-head">' + U.icon('chat', 'sm') + '共享频道' +
         '<span class="muted small grp-chan-note">每 30 秒自动刷新</span></div>' +
         '<div class="grp-chan-list" id="grp-chan-list"></div>' +
+        /* v0.10.46：成员**实时**打字的直播条（SSE window.stream） */
+        '<div class="grp-live hidden" id="grp-live"></div>' +
         '</div>';
     },
 
@@ -330,6 +332,11 @@
     renderChannel: function () {
       var host = document.getElementById('grp-chan-list');
       if (!host) return;
+      /* v0.10.46：进入群组时直接看**最新消息**（以前停在最顶上）。
+         但用户往上翻历史时，30s 自动刷新不该把人拽回底部 —— 只有原本就在
+         底部（或首次渲染）才贴底。 */
+      var atBottom = host.dataset.rendered !== '1' ||
+        (host.scrollHeight - host.scrollTop - host.clientHeight) < 60;
       /* v0.10.43：**工具执行细节不显示在群频道**（owner：群组里出现了整段页面
          代码）。新消息已不再进频道；这里再滤掉历史遗留的 role=tool 与空消息。 */
       var shown = Groups.channel.filter(function (m) {
@@ -351,6 +358,65 @@
           '<div class="grp-msg-content">' + U.esc(m.content || '') + '</div>' +
           '</div></div>';
       }).join('');
+      /* v0.10.46（owner："群组消息一进入应该显示最新消息"）：首次渲染/原本在
+         底部 → 贴底；正在翻历史则保持位置。 */
+      host.dataset.rendered = '1';
+      if (atBottom) host.scrollTop = host.scrollHeight;
+    },
+
+    /* ---------- v0.10.46：群组页的实时打字（SSE window.stream） ---------- */
+
+    /** @type {Object.<string, {name: string, text: string}>} 成员窗口 → 正在输入的文本 */
+    live: {},
+
+    /**
+     * 收到成员流式增量：只认当前群组，拼进缓冲并更新直播条。
+     * @param {Object} p payload {window_id, delta, group_id, window_name}
+     * @returns {void}
+     */
+    onStream: function (p) {
+      p = p || {};
+      if (!p.group_id || String(p.group_id) !== String(Groups.selectedId)) return;
+      var wid = String(p.window_id || '');
+      if (!wid) return;
+      var st = Groups.live[wid] || { name: p.window_name || wid, text: '' };
+      st.name = p.window_name || st.name;
+      st.text += String(p.delta || '');
+      if (st.text.length > 600) st.text = st.text.slice(-600);
+      Groups.live[wid] = st;
+      Groups.renderLive();
+    },
+
+    /**
+     * 渲染/隐藏直播条（每个正在输出的成员一行，显示末尾 160 字）。
+     * @returns {void}
+     */
+    renderLive: function () {
+      var host = document.getElementById('grp-live');
+      if (!host) return;
+      var keys = Object.keys(Groups.live || {});
+      if (!keys.length) {
+        host.classList.add('hidden');
+        host.innerHTML = '';
+        return;
+      }
+      host.classList.remove('hidden');
+      var chan = document.getElementById('grp-chan-list');
+      var atBottom = chan ? (chan.scrollHeight - chan.scrollTop - chan.clientHeight) < 40 : true;
+      host.innerHTML = keys.map(function (k) {
+        var it = Groups.live[k];
+        return '<div class="grp-live-row">' + U.icon('activity', 'sm') +
+          '<b>' + U.esc(it.name) + '</b><span class="muted tiny">正在输入…</span>' +
+          '<span class="grp-live-text mono">' + U.esc(it.text.slice(-160)) + '</span></div>';
+      }).join('');
+      if (chan && atBottom) chan.scrollTop = chan.scrollHeight;
+    },
+
+    /** 清掉直播缓冲（切换群组 / 运行结束）。 */
+    clearLive: function (wid) {
+      if (wid) delete Groups.live[String(wid)];
+      else Groups.live = {};
+      Groups.renderLive();
     },
 
     /**
@@ -631,4 +697,12 @@
   };
 
   global.DogBuddyViews.Groups = Groups;
+
+  /* v0.10.46：SSE 钩子——群组页的实时打字（成员窗口的 window.stream） */
+  if (global.SSE) {
+    global.SSE.on('window.stream', function (p) { Groups.onStream(p); });
+    global.SSE.on('window.run_finished', function (p) {
+      if (p && p.window_id) Groups.clearLive(p.window_id);
+    });
+  }
 })(window);

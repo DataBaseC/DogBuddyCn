@@ -132,10 +132,17 @@
     action: function (act, job, tr) {
       if (!job) return;
       if (act === 'run') {
-        A.jobs.runNow(job.id).then(function () {
-          U.toast('success', '已触发执行：' + job.name);
-          setTimeout(function () { Jobs.load(); }, 800);
-        }).catch(function (e) { U.toast('error', e.message); });
+        /* v0.10.46：显示后端**真实结果**（以前无论成败都弹"已触发执行"，
+         群组任务其实被拒——owner 实测"点了没反应"） */
+      A.jobs.runNow(job.id).then(function (r) {
+        r = r || {};
+        if (r.ok === false) {
+          U.toast('warn', r.reason || '未能启动');
+          return;
+        }
+        U.toast('success', r.note || ('已触发执行：' + job.name));
+        setTimeout(function () { Jobs.load(); }, 800);
+      }).catch(function (e) { U.toast('error', e.message); });
       } else if (act === 'edit') {
         Jobs.openForm(job);
       } else if (act === 'history') {

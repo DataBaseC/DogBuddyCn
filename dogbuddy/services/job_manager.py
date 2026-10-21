@@ -3,6 +3,7 @@
 """JobManager: CRUD over JobStore + run_now (head-of-queue dispatch)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -11,6 +12,18 @@ from ..cron.jobs import JobStore
 from ..ports import Job
 
 logger = logging.getLogger("dogbuddy.services.jobs")
+
+#: 后台群组运行要留引用（asyncio 只持弱引用，任务可能被 GC 掉）
+_BACKGROUND: set[asyncio.Task] = set()
+
+
+def _log_bg_error(task: asyncio.Task) -> None:
+    """后台"立即执行"失败要留痕（否则只在解释器退出时一行无上下文警告）。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("background group run failed: %s", exc, exc_info=True)
 
 #: 一次性任务的下次运行时间超过这个天数 → 视为"挂死"（圆桌实测：管理员把
 #: 一次性 prompt 任务 park 到 2030-01-01，`enabled=1` 但永不再触发，
@@ -88,16 +101,43 @@ class JobManager:
         self.windows.db.audit("system", "job:remove", job_id)
         return "removed" if ok else "not found"
 
+    async def run_now_async(self, job_id: str) -> dict[str, Any]:
+        """「立即执行」（v0.10.46）。
+
+        - 群组任务：**后台起一条完整流水线**（以前要么误单派给组长、要么直接拒绝
+          —— owner 实测"点了没反应"）；
+        - 普通任务：照旧派给工位。
+
+        返回 `{ok, mode, note}`，前端据此显示真实结果（别再假装"已触发"）。
+        """
+        job = self.store.get(job_id)
+        if job is None:
+            return {"ok": False, "reason": f"没有这个任务：{job_id}"}
+        gid = str(getattr(job, "group_id", "") or "")
+        if gid:
+            groups = getattr(self, "groups", None)
+            if groups is None:
+                return {"ok": False, "reason": "群组服务不可用"}
+            try:
+                task = asyncio.create_task(groups.run(gid, job.prompt))
+                _BACKGROUND.add(task)
+                task.add_done_callback(_BACKGROUND.discard)
+                task.add_done_callback(_log_bg_error)
+                return {"ok": True, "mode": "group",
+                        "note": f"群组流水线已在后台启动（{job.name}）"}
+            except Exception as e:  # noqa: BLE001
+                logger.warning("group job run_now failed", exc_info=True)
+                return {"ok": False, "reason": f"启动群组运行失败：{e}"}
+        return {"ok": True, "mode": "window", "note": self.run_now(job_id)}
+
     def run_now(self, job_id: str) -> str:
         job = self.store.get(job_id)
         if job is None:
             return "not found"
-        # v0.10.45：**群组任务不能走单工位派单**。以前点"立即运行"会把群组任务的
-        # 提示词直接派给组长工位单跑——组长不在群组上下文里，member_dispatch
-        # 会 refuse，等于白跑一轮还烧 token。等调度器到点跑（或让管理员 group_run）。
+        # 群组任务走 `run_now_async`（要起后台任务）；同步入口只做单工位派单。
         if getattr(job, "group_id", ""):
-            return ("这是群组任务：到点由调度器跑整条流水线；要提前跑请让管理员"
-                    "用 group_run（别用单工位派单）")
+            return ("这是群组任务：请用异步入口启动（控制台/API 的 run_now 已支持）；"
+                    "单工位派单会把提示词直接给组长，member_dispatch 会被拒")
         self.windows.dispatch(job.window_id, job.prompt, urgent=True, job_id=job.id,
                               kind=job.kind, llm_profile=job.llm_profile)
         # v0.10.20（圆桌实测）：`run_now` 过去**从不更新任务生命周期**——
