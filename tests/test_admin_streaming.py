@@ -127,3 +127,41 @@ def test_frontend_renders_the_streaming_bubble():
     assert "正在输入…" in js
     # 结束后必须收起流式气泡（否则会跟正式消息重叠）
     assert "stream.active = false" in js
+
+
+def test_late_delta_cannot_recreate_the_bubble():
+    """0.10.47（owner："管理员会发出莫名的气泡"）。
+
+    实测复现：POST 已经返回、正式消息渲染完之后，服务端 finally 里补发的尾巴帧才到，
+    老代码 `onStream` 自己把 stream.active 置 true → 又建了一个气泡，内容只有最后
+    几个字、标题"正在输入…"，再也没人收走（截图里就是底部那条莫名气泡）。
+    所以 onStream 必须**只认发送中的状态**，收尾后到达的增量一律丢弃。
+    """
+    js = (REPO / "dogbuddy/web/static/js/views-chat.js").read_text(encoding="utf-8")
+    marker = "function onStream(payload) {"
+    body = js[js.index(marker):js.index("function setBusy(")]
+    assert "if (!stream.active) return;" in body, "收尾后到达的尾巴帧还会重建气泡"
+    assert "stream.active = true" not in body, "onStream 不能再自己置 active（那正是残留气泡的来源）"
+    # 收尾必须是幂等的单一出口，两条路径（成功/失败）都要走它
+    assert "function finishStreamTurn()" in js
+    assert js.count("finishStreamTurn();") >= 2
+    assert "clearInterval" in js, "等待计时器必须被清掉，否则一直 setInterval"
+
+
+def test_blank_assistant_messages_are_not_rendered():
+    """工具调用轮的 assistant 消息 content 只有空白 —— 以前照样渲染成空气泡。
+
+    工位视图 0.10.43 已修，对话页漏了；这里用 DB 里真实出现的那些 "  " 消息做断言。
+    """
+    js = (REPO / "dogbuddy/web/static/js/views-chat.js").read_text(encoding="utf-8")
+    assert "function visibleMessages()" in js
+    assert "String(m.content || '').trim() !== ''" in js
+    assert "state.messages.map(bubble)" not in js, "渲染仍在用未过滤的 state.messages"
+
+
+def test_first_token_wait_is_visible():
+    """首帧经常要等 20–90s（实测），期间页面必须能证明自己没卡死，否则人就手动刷新。"""
+    js = (REPO / "dogbuddy/web/static/js/views-chat.js").read_text(encoding="utf-8")
+    assert "function startTick()" in js and "setInterval" in js
+    assert "等待模型响应… " in js
+    assert "elapsedSec()" in js

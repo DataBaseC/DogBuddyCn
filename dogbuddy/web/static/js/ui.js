@@ -68,6 +68,8 @@
     else if (s < 3600) txt = Math.floor(s / 60) + ' 分钟';
     else if (s < 86400) txt = Math.floor(s / 3600) + ' 小时';
     else txt = Math.floor(s / 86400) + ' 天';
+    /* 「刚刚」后面不该再缀「前/后」（以前会显示成"刚刚前"） */
+    if (txt === '刚刚') return txt;
     return future ? (txt + '后') : (txt + '前');
   }
   function countdown(v) {

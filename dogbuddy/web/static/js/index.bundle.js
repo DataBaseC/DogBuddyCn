@@ -74,6 +74,8 @@
     else if (s < 3600) txt = Math.floor(s / 60) + ' 分钟';
     else if (s < 86400) txt = Math.floor(s / 3600) + ' 小时';
     else txt = Math.floor(s / 86400) + ' 天';
+    /* 「刚刚」后面不该再缀「前/后」（以前会显示成"刚刚前"） */
+    if (txt === '刚刚') return txt;
     return future ? (txt + '后') : (txt + '前');
   }
   function countdown(v) {
@@ -2521,10 +2523,12 @@
   /* v9（v2 口径）：只有一个管理员与用户对接；用户可以开多个对话，
      每个对话是一份独立上下文。`sender` 字段保留为"对话 id"（后端同名）。 */
   var state = { sender: 'default', messages: [], admins: [], conversations: [],
-                llmOk: true, sending: false, streamText: '' };
+               llmOk: true, sending: false, streamText: '' };
 
   /** 打字机缓冲：本次发送正在流式输出的文本（按对话隔离，切换对话就丢弃） */
-  var stream = { conv: '', text: '', active: false };
+  var stream = { conv: '', text: '', active: false, startedAt: 0 };
+  /** 等待计时器：首帧还没到时每秒刷新"等待模型响应…Ns"，让人看得见页面是活的 */
+  var tick = null;
 
   function sender() {
     try { return global.localStorage.getItem(SENDER_KEY) || 'default'; } catch (e) { return 'default'; }
@@ -2671,10 +2675,23 @@
       '<div class="chat-body">' + content + '</div></div>';
   }
 
+  /* v0.10.47（owner："管理员会发出莫名的空白气泡"）：工具调用轮的 assistant 消息
+     content 是空的/只有空白、只有 tool_calls，以前照样渲染成一个空壳气泡。
+     工位视图 0.10.43 已经这么过滤了，对话页当时漏了 —— 这里补齐：
+     非 user 消息只要 content trim 后为空就不渲染（工具本身也没有正文可看）。 */
+  function visibleMessages() {
+    return state.messages.filter(function (m) {
+      if (!m) return false;
+      if (String(m.role || '') === 'user') return true;
+      return String(m.content || '').trim() !== '';
+    });
+  }
+
   function render() {
     var log = U.$('#chat-log');
     if (!log) return;
-    if (!state.messages.length && !stream.active) {
+    var msgs = visibleMessages();
+    if (!msgs.length && !stream.active) {
       log.innerHTML = U.empty({
         art: 'chat',
         title: state.llmOk ? '还没有对话' : 'LLM 尚未配置',
@@ -2684,7 +2701,7 @@
       });
       return;
     }
-    log.innerHTML = state.messages.map(bubble).join('');
+    log.innerHTML = msgs.map(bubble).join('');
     renderStream();
     log.scrollTop = log.scrollHeight;
   }
@@ -2692,11 +2709,44 @@
   /* ---------------- 打字机（SSE admin.stream） ----------------
      管理员以前没有 on_delta（只有工位有 window.stream），所以控制台上永远是
      "发送中… → 整段蹦出来"。现在按对话收 admin.stream，边收边渲染。 */
+  function stopTick() {
+    if (tick) { global.clearInterval(tick); tick = null; }
+  }
+
+  function elapsedSec() {
+    return stream.startedAt ? Math.max(0, Math.round((Date.now() - stream.startedAt) / 1000)) : 0;
+  }
+
+  /* 首帧之前的"活着"的证据：POST 常常要等模型 20–90s 才吐第一个字，
+     以前页面就干瞪着"思考中…"，人以为卡死 → 手动刷新。这里每秒刷一次计时。 */
+  function startTick() {
+    stopTick();
+    stream.startedAt = Date.now();
+    tick = global.setInterval(function () {
+      if (!stream.active) { stopTick(); return; }
+      var node = U.$('#chat-stream-bubble');
+      if (!node) return;
+      var t = node.querySelector('.chat-time');
+      if (t) t.textContent = '正在输入… ' + elapsedSec() + 's';
+      var ph = node.querySelector('.stream-wait');
+      if (ph) ph.textContent = '等待模型响应… ' + elapsedSec() + 's';
+    }, 1000);
+  }
+
+  /** 本轮收尾：关掉打字机、清计时器、把半截气泡摘掉（幂等）。 */
+  function finishStreamTurn() {
+    stream.active = false;
+    stream.text = '';
+    stopTick();
+    var node = U.$('#chat-stream-bubble');
+    if (node && node.parentNode) node.parentNode.removeChild(node);
+  }
+
   function renderStream() {
     var log = U.$('#chat-log');
     if (!log) return;
     var node = U.$('#chat-stream-bubble');
-    if (!stream.active || !stream.text) {
+    if (!stream.active) {
       if (node && node.parentNode) node.parentNode.removeChild(node);
       return;
     }
@@ -2705,13 +2755,23 @@
       log.insertAdjacentHTML('beforeend',
         '<div class="chat-msg chat-bot" id="chat-stream-bubble">' +
         '<div class="chat-meta"><span class="chat-who">管理员</span>' +
-        '<span class="chat-time">正在输入…</span></div>' +
+        '<span class="chat-time">正在输入… 0s</span></div>' +
         '<div class="chat-body"><span class="stream-text"></span>' +
         '<span class="stream-caret"></span></div></div>');
       node = U.$('#chat-stream-bubble');
     }
     var body = node ? node.querySelector('.stream-text') : null;
     if (body && body.textContent !== stream.text) body.textContent = stream.text;
+    /* v0.10.47：首帧没到就别留"空壳"——那正是 owner 说的空白气泡。
+       放一行可读的等待提示 + 秒数，字一到就撤掉。 */
+    var ph = node ? node.querySelector('.stream-wait') : null;
+    var bodyBox = node ? node.querySelector('.chat-body') : null;
+    if (!stream.text && !ph && bodyBox) {
+      bodyBox.insertAdjacentHTML('beforeend',
+        '<span class="stream-wait hint">等待模型响应… ' + elapsedSec() + 's</span>');
+    } else if (stream.text && ph && ph.parentNode) {
+      ph.parentNode.removeChild(ph);
+    }
     var gap = log.scrollHeight - log.scrollTop - log.clientHeight;
     if (gap <= 80) log.scrollTop = log.scrollHeight;   // 用户在看上文就别抢滚动条
   }
@@ -2720,9 +2780,12 @@
     payload = payload || {};
     if (String(payload.conversation || '') !== String(state.sender)) return;  // 别的对话，不串屏
     if (payload.delta === undefined || payload.delta === null) return;
-    if (!global.SSE || !global.SSE.state || !global.SSE.state.connected) return;
-    stream.active = true;
-    stream.conv = state.sender;
+    /* v0.10.47（owner："管理员会发出莫名的气泡"）：**只在本轮发送中**收增量。
+       以前这里会自己把 stream.active 置 true —— 于是 POST 已经返回、正式消息都渲染完
+       之后才到的尾巴帧（服务端 finally 里补发的最后一帧）又把气泡**重新建出来**，
+       内容只有最后几个字、标题还写着"正在输入…"，且再也没人收走它。
+       收尾态直接丢弃：整段正文已经在正式消息里了。 */
+    if (!stream.active) return;
     stream.text += String(payload.delta);
     renderStream();
   }
@@ -2779,18 +2842,19 @@
     stream.active = true;                 // 立刻出现"正在输入…"气泡，等第一个 delta
     stream.conv = state.sender;
     stream.text = '';
+    startTick();                          // v0.10.47：首帧之前的秒数计时，证明页面没卡死
     render();
     ta.value = '';
     setBusy(true);
 
     A.adminChat(text, state.sender).then(function (res) {
-      stream.active = false; stream.text = '';   // 整段回复到手 → 收起流式气泡，渲染正式消息
+      finishStreamTurn();                 // 整段回复到手 → 收起流式气泡，渲染正式消息
       state.messages = (res && res.messages) || state.messages;
       setBusy(false);
       render();
       refreshUsage(state.sender);
     }).catch(function (e) {
-      stream.active = false; stream.text = '';
+      finishStreamTurn();
       state.messages = state.messages.filter(function (m) { return m !== optimistic; });
       var msg = (e && e.message) ? e.message : String(e);
       setBusy(false);
