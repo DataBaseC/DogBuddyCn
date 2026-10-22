@@ -278,7 +278,9 @@
                 '<div class="grp-member-info">' +
                 '<div class="grp-member-name">' + U.esc(m.window_name || m.window_id) +
                 (m.exists === false ? ' <span class="badge badge-grey">工位已删除</span>' : '') + '</div>' +
-                '<div class="muted small">加入 ' + U.esc(U.relTime(m.joined_at)) + '</div></div>' +
+                /* v0.10.51：原来用 muted small（全局小字），在窄侧栏里被压得贴住名字；
+                   换成专用类，行高/省略号由 CSS 控制 */
+                '<div class="grp-member-meta">加入于 ' + U.esc(U.relTime(m.joined_at)) + '</div></div>' +
                 (ROLE_BADGE[m.role] || ROLE_BADGE.member) +
                 '<div class="row-actions">' +
                 (m.role === 'lead' ? '' :

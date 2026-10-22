@@ -2525,7 +2525,10 @@
   /* v9（v2 口径）：只有一个管理员与用户对接；用户可以开多个对话，
      每个对话是一份独立上下文。`sender` 字段保留为"对话 id"（后端同名）。 */
   var state = { sender: 'default', messages: [], admins: [], conversations: [],
-               llmOk: true, sending: false, streamText: '' };
+               llmOk: true, sending: false, streamText: '',
+               /* v0.10.51：本轮实时工具回执（SSE admin.tool）。收尾时清空，
+                  之后由持久化的 tool 消息（折叠卡片）接管。 */
+               liveTools: [] };
 
   /** 打字机缓冲：本次发送正在流式输出的文本（按对话隔离，切换对话就丢弃） */
   var stream = { conv: '', text: '', active: false, startedAt: 0 };
@@ -2689,6 +2692,67 @@
     });
   }
 
+  /* ---------------- 工具调用卡片（v0.10.51） ----------------
+     owner 两条反馈："管理员调用工具不是实时显示" + "没有折叠选项"。
+     做法：① 服务端每次工具返回就发一帧 admin.tool（本轮实时追加）；
+     ② 持久化的连续 tool 消息折成一张 <details>（默认收起，点开看参数与输出）。
+     用原生 <details>/<summary>——不需要额外 JS 状态，键盘也能操作。 */
+  function toolDetailsHtml(items, opts) {
+    opts = opts || {};
+    var open = opts.open ? ' open' : '';
+    var failed = 0;
+    var rows = items.map(function (t) {
+      if (t.ok === false || t.pending) failed += 1;
+      var flag = t.pending ? '待确认' : (t.ok === false ? '失败' : '完成');
+      var cls = t.pending ? 'warn' : (t.ok === false ? 'err' : 'ok');
+      var out = String(t.output || '');
+      return '<div class="chat-tool-one">' +
+        '<div class="chat-tool-head">' +
+        '<span class="chat-tool-name mono">' + U.esc(t.name || 'tool') + '</span>' +
+        '<span class="chat-tool-flag chat-tool-' + cls + '">' + flag + '</span>' +
+        (out ? '<span class="hint">' + out.length + ' 字</span>' : '') +
+        '</div>' +
+        (t.args ? '<pre class="chat-pre chat-tool-args">' + U.esc(t.args) + '</pre>' : '') +
+        (out ? '<pre class="chat-pre">' + U.esc(out) + '</pre>' : '') +
+        '</div>';
+    }).join('');
+    var label = opts.live
+      ? ('正在调用工具 ×' + items.length + (failed ? '（' + failed + ' 个异常）' : ''))
+      : ('工具调用 ×' + items.length + (failed ? '（' + failed + ' 个失败/待确认）' : ''));
+    return '<details class="chat-tools" data-count="' + items.length + '"' + open + '>' +
+      '<summary>' + U.icon('zap', 'sm') + '<span>' + label + '</span>' +
+      '<span class="chat-tools-hint">点开看参数与输出</span></summary>' +
+      '<div class="chat-tools-body">' + rows + '</div></details>';
+  }
+
+  function renderLiveTools() {
+    var log = U.$('#chat-log');
+    if (!log) return;
+    var host = U.$('#chat-tool-live');
+    if (!state.liveTools.length) {
+      if (host && host.parentNode) host.parentNode.removeChild(host);
+      return;
+    }
+    if (!host) {
+      log.insertAdjacentHTML('beforeend', '<div id="chat-tool-live"></div>');
+      host = U.$('#chat-tool-live');
+    }
+    if (!host) return;
+    host.innerHTML = toolDetailsHtml(state.liveTools, { live: true, open: true });
+    var gap = log.scrollHeight - log.scrollTop - log.clientHeight;
+    if (gap <= 80) log.scrollTop = log.scrollHeight;
+  }
+
+  function onTool(payload) {
+    payload = payload || {};
+    if (String(payload.conversation || '') !== String(state.sender)) return;  // 别的对话不串屏
+    state.liveTools.push({
+      name: payload.name, args: payload.args || '', ok: payload.ok,
+      pending: !!payload.pending, output: payload.output || ''
+    });
+    renderLiveTools();
+  }
+
   function render() {
     var log = U.$('#chat-log');
     if (!log) return;
@@ -2703,8 +2767,29 @@
       });
       return;
     }
-    log.innerHTML = msgs.map(bubble).join('');
+    /* v0.10.51：连续的 tool 消息合并成一张可折叠卡片，其余仍逐条气泡。
+       工具一多（一轮 10+ 次）时，以前是十几段 JSON 铺满整个对话流。 */
+    var parts = [];
+    var group = [];
+    function flushTools() {
+      if (!group.length) return;
+      parts.push(toolDetailsHtml(group.map(function (m) {
+        var meta = m.meta || {};
+        return { name: meta.tool_name || m.role, args: '',
+                 ok: String(m.content || '').indexOf('[DENIED/ERROR]') !== 0,
+                 output: String(m.content || '') };
+      }), {}));
+      group = [];
+    }
+    msgs.forEach(function (m) {
+      if (String(m.role || '') === 'tool') { group.push(m); return; }
+      flushTools();
+      parts.push(bubble(m));
+    });
+    flushTools();
+    log.innerHTML = parts.join('');
     renderStream();
+    renderLiveTools();
     log.scrollTop = log.scrollHeight;
   }
 
@@ -2735,13 +2820,17 @@
     }, 1000);
   }
 
-  /** 本轮收尾：关掉打字机、清计时器、把半截气泡摘掉（幂等）。 */
+  /** 本轮收尾：关掉打字机、清计时器、把半截气泡与实时工具卡片摘掉（幂等）。 */
   function finishStreamTurn() {
     stream.active = false;
     stream.text = '';
     stopTick();
     var node = U.$('#chat-stream-bubble');
     if (node && node.parentNode) node.parentNode.removeChild(node);
+    // 实时工具卡片交给持久化的 tool 消息（render 里折成同一张卡片）
+    state.liveTools = [];
+    var live = U.$('#chat-tool-live');
+    if (live && live.parentNode) live.parentNode.removeChild(live);
   }
 
   function renderStream() {
@@ -2844,6 +2933,7 @@
     stream.active = true;                 // 立刻出现"正在输入…"气泡，等第一个 delta
     stream.conv = state.sender;
     stream.text = '';
+    state.liveTools = [];                 // v0.10.51：新的一轮，实时工具卡片清空
     startTick();                          // v0.10.47：首帧之前的秒数计时，证明页面没卡死
     render();
     ta.value = '';
@@ -2893,6 +2983,7 @@
     if (global.SSE && global.SSE.on) {
       global.SSE.on('admin.stream', onStream);
       global.SSE.on('admin.notice', onNotice);
+      global.SSE.on('admin.tool', onTool);      // v0.10.51：工具调用实时回执
     }
 
     var form = U.$('#chat-send');
@@ -7084,7 +7175,9 @@
                 '<div class="grp-member-info">' +
                 '<div class="grp-member-name">' + U.esc(m.window_name || m.window_id) +
                 (m.exists === false ? ' <span class="badge badge-grey">工位已删除</span>' : '') + '</div>' +
-                '<div class="muted small">加入 ' + U.esc(U.relTime(m.joined_at)) + '</div></div>' +
+                /* v0.10.51：原来用 muted small（全局小字），在窄侧栏里被压得贴住名字；
+                   换成专用类，行高/省略号由 CSS 控制 */
+                '<div class="grp-member-meta">加入于 ' + U.esc(U.relTime(m.joined_at)) + '</div></div>' +
                 (ROLE_BADGE[m.role] || ROLE_BADGE.member) +
                 '<div class="row-actions">' +
                 (m.role === 'lead' ? '' :

@@ -831,6 +831,31 @@ tr.history-row td { background: rgba(255, 255, 255, 0.02); padding: 0 12px 14px;
   margin: 0; font-family: var(--mono); font-size: 11.5px; color: var(--tx-2);
   white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto;
 }
+/* v0.10.51：工具调用折叠卡片（实时 + 持久化共用）。
+   以前工具输出是一段段裸 JSON 铺满对话流；现在收成一行摘要，点开才看细节。 */
+.chat-tools {
+  align-self: flex-start; max-width: 92%; width: 100%;
+  border: 1px dashed var(--line-strong); border-radius: var(--r-md);
+  background: var(--bg-1);
+}
+.chat-tools > summary {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 11px; cursor: pointer; list-style: none;
+  font-size: 12px; color: var(--tx-2);
+}
+.chat-tools > summary::-webkit-details-marker { display: none; }
+.chat-tools > summary .ic { color: var(--acc-1); flex: none; }
+.chat-tools-hint { margin-left: auto; font-size: 11px; color: var(--tx-4); }
+.chat-tools[open] > summary { border-bottom: 1px dashed var(--line); }
+.chat-tools-body { padding: 8px 11px 10px; display: flex; flex-direction: column; gap: 8px; }
+.chat-tool-one { display: flex; flex-direction: column; gap: 4px; }
+.chat-tool-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chat-tool-name { font-size: 11.5px; font-weight: 600; color: var(--tx-1); }
+.chat-tool-flag { font-size: 10.5px; padding: 0 6px; border-radius: 999px; border: 1px solid; }
+.chat-tool-ok { color: var(--ok, #34d399); border-color: currentColor; }
+.chat-tool-err { color: var(--danger, #f87171); border-color: currentColor; }
+.chat-tool-warn { color: var(--warn, #fbbf24); border-color: currentColor; }
+.chat-tool-args { max-height: 90px; color: var(--tx-3); }
 .chat-input {
   display: flex; align-items: flex-end; gap: 10px; padding: 12px 14px;
   border-top: 1px solid var(--line); background: var(--bg-1);
@@ -1154,14 +1179,26 @@ tr.history-row td { background: rgba(255, 255, 255, 0.02); padding: 0 12px 14px;
 .grp-add-row .select { flex: 1; min-width: 110px; }
 .grp-member-list { display: flex; flex-direction: column; gap: 6px; }
 .grp-member-row {
-  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  /* v0.10.51：owner 反馈"加入 3 分钟前"这类文字太挤。
+     原因：一行里挤了 头像 / 名字+副标题 / 角色徽标 / 两个图标按钮，副标题被压到换行。
+     现在给行内留白、把副标题单独一行并允许省略号、操作区固定不压缩。 */
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px;
   border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-2);
 }
-.grp-member-info { flex: 1; min-width: 0; }
+.grp-member-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .grp-member-name {
-  font-size: 12.5px; color: var(--tx-1); font-weight: 600;
+  font-size: 12.5px; color: var(--tx-1); font-weight: 600; line-height: 1.35;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 副标题（加入时间）：单独一行、字号更小、超长省略，不再把名字挤变形 */
+.grp-member-meta {
+  font-size: 11px; line-height: 1.45; color: var(--tx-4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.grp-member-row > .badge,
+.grp-member-row > .role-badge,
+.grp-member-row > .grp-avatar { flex: none; }
+.grp-member-row .row-actions { display: flex; align-items: center; gap: 2px; flex: none; }
 .grp-avatar {
   width: 28px; height: 28px; border-radius: 50%; flex: none; border: 1px solid;
   display: flex; align-items: center; justify-content: center;
