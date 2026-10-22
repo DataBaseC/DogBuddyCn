@@ -77,6 +77,7 @@
         Settings.cardSecurity();
       Settings.bind();
       if (Approval) Approval.bind();
+      Settings.refreshGatewayStatus();   // v0.10.50：网关状态（进页面先拉一次）
     },
 
     /* ---------- 卡片模板 ---------- */
@@ -148,9 +149,44 @@
         '<select class="select" id="set-report-strategy">' +
         STRATEGIES.map(function (s) {
           return '<option' + (rep.default_strategy === s ? ' selected' : '') + '>' + s + '</option>';
-        }).join('') + '</select></div></div>' +
+        }).join('') + '</select></div>' +
+        /* v0.10.50：连接状态。以前"机器人不回话"只能翻日志；现在一眼能看出是
+           "没监听 / 没客户端连 / 被白名单丢了 / 群里没 @ 机器人"。 */
+        '<div class="field"><span class="field-label">连接状态</span>' +
+        '<div id="gw-status" class="hint">读取中…</div>' +
+        '<div class="hint">QQ 只接管理员：白名单里的号都进同一个管理员会话；' +
+        '员工经管理员派活、不直连 QQ。群聊只在 @机器人 时响应。</div></div>' +
+        '</div>' +
         '<div class="set-card-foot"><div class="spacer"></div>' +
         '<button class="btn btn-primary btn-sm" data-save="gateway">保存该组</button></div></div>';
+    },
+
+    /** 拉一次 /api/gateway/status 并就地更新 `#gw-status`（幂等，失败静默）。 */
+    refreshGatewayStatus: function () {
+      var host = U.$('#gw-status');
+      if (!host) return;
+      A.settings.gateway().then(function (st) {
+        st = st || {};
+        var dot = st.listening ? (st.clients ? 'badge-green' : 'badge-amber') : 'badge-gray';
+        var txt = st.listening
+          ? (st.clients ? ('已连接 · ' + st.clients + ' 个客户端') : '监听中 · 还没有客户端连上来')
+          : (st.enabled ? '未监听' : '未启用');
+        var html = '<span class="badge ' + dot + '">' + U.esc(txt) + '</span> ' +
+          '<span class="mono">' + U.esc((st.host || '') + ':' + (st.port || '')) + '</span>';
+        if (st.accepted !== undefined) {
+          html += ' <span class="hint">收 ' + (st.accepted || 0) +
+            ' · 合并 ' + (st.merged || 0) +
+            ' · 丢弃(白名单) ' + (st.dropped_whitelist || 0) +
+            ' · 丢弃(未@) ' + (st.dropped_no_mention || 0) + '</span>';
+        }
+        if (st.last_message_at) {
+          html += '<div class="hint">最近一条消息：' + U.esc(U.relTime(st.last_message_at)) + '</div>';
+        }
+        if (st.hint) html += '<div class="hint">' + U.esc(st.hint) + '</div>';
+        host.innerHTML = html;
+      }).catch(function () {
+        if (host) host.textContent = '状态读取失败（网关可能未启用）';
+      });
     },
 
     /* 通知通道（只读展示 notify.channels；通道名供任务「回报通道」使用） */

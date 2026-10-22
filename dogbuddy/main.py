@@ -35,6 +35,7 @@ from .services.file_service import FileService
 from .services.job_manager import JobManager
 from .services.model_service import ModelService
 from .services.report_service import ReportService
+from .services.backup_service import BackupService
 from .services.decisions import DecisionService
 from .services.group_manager import GroupManager
 from .services.session_manager import SessionManager
@@ -84,6 +85,11 @@ class DogBuddyApp:
         self._last_rate_limit_wait = 0.0
         self._setup_logging()
         self.db = Database(config.db_path)
+        # v0.10.50：每日自动备份（以前只有手工 dump）。状态挂 /healthz。
+        self.backup = BackupService(
+            db_path=config.db_path,
+            backup_dir=Path(config.paths.data_dir) / "backups",
+            keep=7, db=self.db)
         self.memory = MemoryService(config.memory_dir)
         self.bus = EventBus()
         self.panel = self._build_panel()
@@ -117,7 +123,10 @@ class DogBuddyApp:
             self.adapter = OneBotV11Adapter(
                 host=config.gateway.host, port=config.gateway.port,
                 access_token=config.gateway.access_token,
-                whitelist=config.gateway.whitelist or self._whitelist_ids())
+                whitelist=config.gateway.whitelist or self._whitelist_ids(),
+                # v0.10.50：群里只认 @；连发 2 秒合并
+                mention_only=getattr(config.gateway, "mention_only", True),
+                merge_seconds=getattr(config.gateway, "merge_seconds", 2.0))
 
         self.windows = WindowManager(
             db=self.db, llm_factory=self.llm_factory, bus=self.bus, panel=self.panel,
@@ -176,6 +185,8 @@ class DogBuddyApp:
             sessions=self.sessions, workspaces=self.workspaces, memory=self.memory,
             config=self.config_svc, bus=self.bus, models=self.models, groups=self.groups,
             panel=self.panel, runs=self.runs,
+            # v0.10.50（方案B）：server_exec 的人工确认走待决队列
+            decisions=self.decisions,
             self_status=self.update_status, self_update=self.start_self_update)
         # v0.10.40（owner）：异常/崩溃/重启导致循环停下后，**管理员必须能唤醒**
         # 未完成的任务。启动清理把僵尸行标成 interrupted，这里主动告诉 owner
@@ -236,6 +247,8 @@ class DogBuddyApp:
             # v0.10.37：Web 层用的是**独立的服务包**（不是 app 本身）—— 漏了这条，
             # `GET /api/runs` 会 503「运行台账未启用」，而运行其实跑得好好的（刚实测到）
             runs=self.runs,
+            # v0.10.50：备份状态 + 网关状态（控制台「网关状态」卡片）
+            backup=self.backup, adapter=self.adapter,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)
@@ -628,6 +641,8 @@ class DogBuddyApp:
         self._tasks.append(asyncio.get_event_loop().create_task(self.scheduler.run_loop()))
         self._tasks.append(asyncio.get_event_loop().create_task(self.iteration_exec.run_loop()))
         self._tasks.append(self.decisions.start_sweeper())
+        # v0.10.50：每日备份（启动 60s 后按需补一次，之后每 24h）
+        await self.backup.start()
         if self.adapter is not None and self.router is not None:
             self._tasks.append(asyncio.get_event_loop().create_task(self.adapter.run()))
             self._tasks.append(asyncio.get_event_loop().create_task(self.router.run()))
@@ -660,6 +675,7 @@ class DogBuddyApp:
         await self._shutdown_step(self.mcp.close(), "mcp.close")
         for t in self._tasks:
             t.cancel()
+        await self._shutdown_step(self.backup.stop(), "backup.stop")
         try:
             self.db.close()
         except Exception:  # noqa: BLE001

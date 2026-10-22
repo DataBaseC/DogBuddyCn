@@ -301,6 +301,8 @@
     /* ---------------- 设置 ---------------- */
     settings: {
       get: function () { return request('GET', '/api/settings'); },
+      /* v0.10.50：网关状态（QQ 只接管理员：通没通、连了几个客户端、丢了多少条） */
+      gateway: function () { return request('GET', '/api/gateway/status'); },
       update: function (body) { return request('PUT', '/api/settings', body); },
       /* GET /api/settings/models?provider=&base_url=&api_key=&profile=&model_ref= → {models, error}
          profile 可选（v1.3）：按配置套拉模型；model_ref 可选：按**目录条目**自带密钥拉 */

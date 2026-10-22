@@ -127,6 +127,19 @@ class PermissionGate:
         scheduled = bool(ctx.extra.get("scheduled"))
         confirmed = bool(ctx.extra.get("confirmed"))
 
+        # --- v0.10.50 · 方案B：宿主机命令**每次都要人确认** ---
+        # 背景（P0，2026-10-22 实测）：应用进程的 env 里有 DOGBUDDY_PANEL_TOKEN
+        # （= 面板 root）。它本来是给 server_exec 用的，但员工只要有 shell，写个 .py
+        # 跑一下就能读到同一个令牌，绕过工作区边界与危险命令检查直接拿 root。
+        # 彻底修法是"令牌不进应用进程"（独立受限代理），本轮先按 owner 选的方案 B
+        # 把敞口降一级：**server_exec 一律 needs_confirm**，人点了才执行。
+        # 注意 `irreversible=True`：托管代审（approval_reviewer）绝不能自动放行它。
+        if tool_name == "server_exec" and not confirmed:
+            cmd = str(args.get("command", ""))[:150]
+            return GateDecision(
+                False, f"宿主机命令必须人工确认（server_exec）：{cmd}",
+                needs_confirm=True, irreversible=True)
+
         # --- hard rule: unattended scheduled tasks never run in AUTO ---
         if mode == "AUTO" and scheduled:
             return GateDecision(False, "AUTO mode is forbidden for unattended scheduled tasks; use BUILD")

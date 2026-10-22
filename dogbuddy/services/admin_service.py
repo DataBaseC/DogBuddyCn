@@ -49,6 +49,9 @@ class AdminService:
         # run_cancel/run_status 与 progress_report 都靠它（**"此刻谁在跑什么"的唯一真相**）
         runs: Any = None,
         bus: Any = None,
+        # v0.10.50（方案B）：server_exec 的人工确认通道 —— 落 pending_decision，
+        # 控制台「待决」页批准后重放。没有它时 server_exec 直接拒绝（fail-closed）。
+        decisions: Any = None,
         max_iterations: int = 20,
         self_status: Callable[[bool], dict] | None = None,
         self_update: Callable[..., dict] | None = None,
@@ -66,6 +69,7 @@ class AdminService:
         self.panel = panel
         self.runs = runs
         self.bus = bus
+        self.decisions = decisions
         self.max_iterations = max_iterations
         self.self_status = self_status
         self.self_update = self_update
@@ -359,8 +363,11 @@ class AdminService:
                           llm_factory=self.llm_factory,
                           scope=Scope(level="system", actor=f"admin:{sender}",
                                       source="role:admin"),
-                          memory_service=self.memory, extra={"manual": True,
-                                                             "conversation": sender})
+                          memory_service=self.memory,
+                          # v0.10.50（方案B）：宿主机命令的确认通道
+                          ask_user_fn=self._confirm_asker(sender),
+                          extra={"manual": True, "conversation": sender,
+                                 "decisions": self.decisions})
         loop = AgentLoop(
             llm=self.llm_factory(), registry=self.registry, session=session,
             builder=self.builder, tool_names=role_spec.tool_names if role_spec else [],
@@ -379,6 +386,40 @@ class AdminService:
             if on_delta is not None:
                 on_delta.flush()
         return result.content or "(no reply)"
+
+    def _confirm_asker(self, sender: str):
+        """给 `server_exec` 的人工确认通道（v0.10.50 · 方案B）。
+
+        `AgentLoop._approval_flow` 的契约是：`answer = ask(question, options=[...])`，
+        answer 可 await 就 await。所以这里返回**同步函数**，结果是个 coroutine。
+
+        确认不弹窗、不阻塞人找按钮：落一条 `pending_decision`（控制台「待决」页
+        有红点，批准/拒绝两个按钮），然后在这里等裁决。**没有 DecisionService
+        就判拒绝**——宁可让管理员说"这台机器上执行不了"，也不能静默放行 root 命令。
+        """
+        def ask(question: str, options: list | None = None):
+            return self._await_decision(sender, question, list(options or ["批准", "拒绝"]))
+        return ask
+
+    async def _await_decision(self, sender: str, question: str,
+                             options: list[str]) -> str:
+        decisions = getattr(self, "decisions", None)
+        if decisions is None:
+            return "拒绝：没有确认通道（fail-closed，server_exec 不执行）"
+        try:
+            pending = decisions.ask(f"admin:{sender}", question, options=options,
+                                    source="server_exec", supersede=False)
+        except Exception as e:  # noqa: BLE001 — 落不了库就拒绝
+            logger.warning("server_exec confirmation failed to enqueue: %s", e)
+            return f"拒绝：确认请求入队失败（{e}）"
+        try:
+            answer = await asyncio.wait_for(decisions.wait(pending.id), timeout=600)
+        except asyncio.TimeoutError:
+            return "拒绝：10 分钟内没有确认（已超时，命令未执行）"
+        except Exception as e:  # noqa: BLE001
+            logger.warning("server_exec confirmation wait failed: %s", e)
+            return f"拒绝：等待确认失败（{e}）"
+        return str(answer or "")
 
     def _delta_emitter(self, sender: str):
         """把 LLM 增量合并成 admin.stream 事件（没有 bus 时返回 None）。"""

@@ -94,13 +94,28 @@ def test_未声明作用域用不了_server_exec(tmp_path):
     assert panel.calls == []
 
 
-def test_管理员作用域可以用_server_exec(tmp_path):
-    """system 作用域（管理员）应放行——能力不能被一刀切砍掉。"""
+def test_管理员作用域可以用_server_exec_但要先人工确认(tmp_path):
+    """system 作用域（管理员）**仍能用** server_exec，但 v0.10.50 起必须先人工确认。
+
+    背景（方案B）：应用进程 env 里有 DOGBUDDY_PANEL_TOKEN（= root），员工写个 .py
+    就能读到同一个令牌绕过所有守卫。彻底修法是"令牌不进应用进程"，本轮先把
+    server_exec 变成"每次都有人点头才执行"——能力不砍，敞口降级。
+    """
     panel = _FakePanel()
     from dogbuddy.agents.core.scope import SYSTEM
-    reg = build_worker_registry("admin", gate=PermissionGate())
-    res = _run(reg.execute("server_exec", {"command": "uptime"}, _ctx(tmp_path, scope=SYSTEM, panel=panel)))
-    assert res.ok, f"管理员应能用 server_exec，实际: {res.output}"
+    reg = build_worker_registry("admin", gate=PermissionGate(confirm_available=True))
+    ctx = _ctx(tmp_path, scope=SYSTEM, panel=panel)
+
+    # ① 未确认 → needs_confirm，命令**不能**到达宿主机
+    res = _run(reg.execute("server_exec", {"command": "uptime"}, ctx))
+    assert res.needs_confirm is True, f"应要求人工确认，实际: {res.output}"
+    assert panel.calls == [], "没确认之前绝不许执行"
+
+    # ② 人批准后的重放（ctx.extra["confirmed"]）→ 照常执行
+    ctx2 = _ctx(tmp_path, scope=SYSTEM, panel=panel)
+    ctx2.extra["confirmed"] = True
+    res2 = _run(reg.execute("server_exec", {"command": "uptime"}, ctx2))
+    assert res2.ok, f"确认后管理员应能用 server_exec，实际: {res2.output}"
     assert panel.calls == [("uptime", 60)]
 
 

@@ -25,6 +25,7 @@ from .routes import chat as chat_routes
 from .routes import decisions as decisions_routes
 from .routes import events as events_routes
 from .routes import files as files_routes
+from .routes import gateway as gateway_routes
 from .routes import groups as groups_routes
 from .routes import iterations as iterations_routes
 from .routes import runs as runs_routes
@@ -71,6 +72,10 @@ class WebServices:
         self.decisions = kw.get("decisions")
         self.groups = kw.get("groups")
         self.sse = kw.get("sse")
+        #: v0.10.50：每日备份状态（`/healthz` 的 `backups` 字段）
+        self.backup = kw.get("backup")
+        #: v0.10.50：网关状态（`/api/gateway/status`；QQ 只接管理员）
+        self.adapter = kw.get("adapter")
         self.models = kw.get("models")
         self.iterations = kw.get("iterations")
         self.iteration_exec = kw.get("iteration_exec")
@@ -115,6 +120,8 @@ def create_app(svc: WebServices) -> FastAPI:
             "pid": os.getpid(),
             "python": platform.python_version(),
             "uptime_s": round(time.time() - STARTED_AT, 1),
+            # v0.10.50：每日备份的最后一口气（没有备份 = 出事就全丢，必须能一眼看到）
+            "backups": (svc.backup.status() if getattr(svc, "backup", None) else None),
         }
 
     @app.get("/api/version")
@@ -156,6 +163,8 @@ def create_app(svc: WebServices) -> FastAPI:
     app.include_router(events_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(ledger_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(groups_routes.router(svc, auth_deps), prefix="/api")
+    # v0.10.50：网关状态（QQ 只接管理员之后，"通没通"要一眼可见）
+    app.include_router(gateway_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(windows_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(jobs_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(files_routes.router(svc, auth_deps), prefix="/api")

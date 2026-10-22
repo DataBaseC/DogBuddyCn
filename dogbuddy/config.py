@@ -70,6 +70,10 @@ class GatewayConfig(BaseModel):
     whitelist: list[int] = Field(default_factory=list, description="allowed QQ user ids")
     # default push target for task reports: {"type": "private"|"group", "id": 123}
     push_target: dict[str, Any] = Field(default_factory=dict)
+    #: v0.10.50：群聊只在 @机器人 时响应（否则群里每个人的每句话都跑一轮管理员回合）
+    mention_only: bool = True
+    #: v0.10.50：连发合并窗口（秒）——同一人 2 秒内的几句拼成一段再跑一轮
+    merge_seconds: float = 2.0
 
 
 class WebConfig(BaseModel):

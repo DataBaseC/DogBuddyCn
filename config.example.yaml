@@ -26,6 +26,8 @@ gateway:
   access_token: ""                 # OneBot access token (NapCat config must match)
   whitelist: []                    # QQ ids allowed to talk to the bot
   push_target: {}                  # e.g. {type: private, id: 123456789} or {type: group, id: 987654321}
+  mention_only: true               # v0.10.50：群聊只在 @机器人 时响应（否则群里每句话都跑一轮）
+  merge_seconds: 2.0               # v0.10.50：连发合并窗口（同一人几秒内的几句拼成一段）
 
 web:
   host: 127.0.0.1

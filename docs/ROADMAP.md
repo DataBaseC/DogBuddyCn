@@ -1855,3 +1855,24 @@ playwright/selenium/weasyprint；纯文本模型读不懂截图像素，能读�
 
 基线：**767 passed / 4 skipped**。
 
+---
+
+## 43. 第三十六轮：P0 降级 + 自动备份 + QQ 只接管理员的打磨（2026-10-22，`0.10.50`）
+
+owner 定调两件事：**QQ 只接管理员**（不做 QQ→工位绑定）；P0 走**方案 B**（不重做授权，
+先把敞口降级）。这一轮把盘点出来的四项做完：
+
+| # | 事项 | 做法 |
+|---|---|---|
+| 1 | **server_exec 每次都要人工确认**（P0-B） | `PermissionGate.check` 里 `tool_name == "server_exec"` 直接 `needs_confirm=True, irreversible=True`；`AdminService` 注入 `ask_user_fn` → 落 `pending_decision`（控制台「待决」页可见/可批）→ 等裁决（600s 超时）→ 批准后重放、拒绝则不执行。**没有 DecisionService = 直接拒绝**（fail-closed）。`irreversible=True` 保证托管代审不会自动放行 |
+| 2 | **每日自动备份** | 新 `services/backup_service.py`：`wal_checkpoint(TRUNCATE)` → 把 `db / -wal / -shm` **三个文件一起**拷进 `data/backups/<时间戳>/`，保留 7 份，同秒撞目录自动加序号；失败只 WARNING（`last_error` 可见），状态挂 `/healthz.backups`。启动 60s 后按需补一次，之后每 24h |
+| 3 | **群聊 @ 过滤 + 连发合并** | `OneBotV11Adapter`：群里只认 `at` 段命中 `self_id`（`mention_only`，默认开）；同一人 `merge_seconds`（默认 2s）内的连发拼成一段再跑一轮（以前发三句=跑三轮） |
+| 4 | **控制台「网关状态」卡片** | 新 `GET /api/gateway/status`（只回状态、**绝不回 token**）+ 设置页「网关与回报」里显示：监听中/端口/客户端数/收·合并·按白名单丢弃·未 @ 丢弃/最近一条消息时间 |
+
+顺带修：`test_router` 与 `test_security_boundary` 里两处"旧口径"的断言（前者要求适配器立刻出事件 →
+适配器默认 `merge_seconds=0`，生产由配置注入 2.0；后者断言管理员可直接跑 server_exec → 改成
+"未确认 = needs_confirm 且命令不到宿主机 / 确认后照常执行"）。
+
+基线：**781 passed / 4 skipped**（新增 13 条：gate/确认通道/fail-closed/备份拷贝与保留/失败不抛/
+@过滤/合并/状态不泄漏 token）。`audit_ui` 与 bundle 指纹校验通过。
+
