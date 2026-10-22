@@ -89,11 +89,25 @@ class JobManager:
         return job
 
     def pause(self, job_id: str) -> str:
+        """停用定时任务。
+
+        v0.10.48（2026-10-22）：**必须留审计**。以前 pause/resume 一声不响，
+        生产上 13:24 流水线被停掉，`audit_log` 里查不到任何痕迹，只能去面板的
+        HTTP 访问日志里翻 `POST /api/jobs/<id>/pause` 才确定是谁干的。
+        记录里带上停用前的 next_run_at —— 恢复时才知道错过了哪几轮。
+        """
+        before = self.store.get(job_id)
         self.store.set_enabled(job_id, False)
+        missed = getattr(before, "next_run_at", "") or ""
+        self.windows.db.audit("system", "job:pause", f"{job_id} next_run_at={missed}")
         return "paused"
 
     def resume(self, job_id: str) -> str:
         self.store.set_enabled(job_id, True)
+        after = self.store.get(job_id)
+        self.windows.db.audit(
+            "system", "job:resume",
+            f"{job_id} next_run_at={getattr(after, 'next_run_at', '') or ''}")
         return "resumed"
 
     def remove(self, job_id: str) -> str:

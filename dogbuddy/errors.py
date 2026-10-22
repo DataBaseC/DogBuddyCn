@@ -44,6 +44,16 @@ _TRANSIENT_ERRNOS = frozenset({
     111,  # ECONNREFUSED
 })
 
+# DNS 解析失败（`socket.gaierror`）用的是**另一套负数 errno**，和上面的系统 errno 不通用。
+# 2026-10-22 生产实测：`[Errno -3] Temporary failure in name resolution` 被判成
+# PERMANENT —— 消息自称 Temporary，却被"重试无用"直接放弃，整条群组流水线 1.2 秒报废
+# （10-20 19:46、10-21 17:37、10-21 20:19 各丢一轮，共 3 轮）。容器/网络抖动导致的
+# 解析失败几乎都能在几十秒内自愈，必须交给 loop 的 C1 瞬态续跑（3 次 × 10s 退避）。
+_TRANSIENT_GAI = frozenset({
+    -3,   # EAI_AGAIN   临时失败（glibc 最常见）
+    -11,  # EAI_SYSTEM  解析器内部系统错误
+})
+
 
 class ErrorClass(str, enum.Enum):
     """错误分类（决定"怎么办"）。"""
@@ -192,6 +202,10 @@ def classify(exc: BaseException, *, assume_tool_args: bool = True) -> ErrorClass
     if isinstance(root, (TimeoutError, ConnectionError, ConnectionResetError,
                          ConnectionAbortedError, BrokenPipeError, socket.timeout)):
         return ErrorClass.TRANSIENT
+    # 2b) DNS 解析失败：按 errno 细分（gaierror 是 OSError 子类，必须排在下面那条前面）
+    if isinstance(root, socket.gaierror):
+        return (ErrorClass.TRANSIENT if root.errno in _TRANSIENT_GAI
+                else ErrorClass.PERMANENT)
     if isinstance(root, OSError) and root.errno in _TRANSIENT_ERRNOS:
         return ErrorClass.TRANSIENT
 

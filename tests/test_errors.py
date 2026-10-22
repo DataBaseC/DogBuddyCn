@@ -3,6 +3,7 @@
 """`dogbuddy/errors.py` 的分类与处置必须稳定：它是 C1-C5 的共同地基。"""
 from __future__ import annotations
 
+import socket
 import sys
 from pathlib import Path
 
@@ -33,6 +34,26 @@ def test_四类分类各自命中():
     assert errors.classify(KeyError("path")) is ErrorClass.TOOL_FAILURE
     assert errors.classify(errors.PolicyDeniedError("denied")) is ErrorClass.POLICY_DENIED
     assert errors.classify(RuntimeError("???")) is ErrorClass.PERMANENT
+
+
+def test_dns_解析失败按errno分瞬态与永久():
+    """2026-10-22 生产：`[Errno -3] Temporary failure in name resolution` 被判 PERMANENT，
+    整条流水线 1.2 秒报废（丢了 3 轮）。DNS 抖动用的是**负数** errno，不在系统 errno 集合里。
+
+    EAI_AGAIN(-3) 是"临时失败"，几十秒内会自愈 → 必须走 C1 瞬态续跑；
+    EAI_NONAME(-2) 是"域名不存在"，重试没用 → 保持永久。
+    """
+    transient = socket.gaierror(-3, "Temporary failure in name resolution")
+    assert transient.errno == -3
+    assert errors.classify(transient) is ErrorClass.TRANSIENT
+    assert errors.classify(transient) is not ErrorClass.PERMANENT
+    assert errors.disposition_for(errors.classify(transient)) is Disposition.RETRY
+
+    # provider 内部重试耗尽后包了一层，仍要能剥到根因判瞬态
+    assert errors.classify(RetryExhausted(transient, 3)) is ErrorClass.TRANSIENT
+
+    # 域名真的不存在：永久
+    assert errors.classify(socket.gaierror(-2, "Name or service not known")) is ErrorClass.PERMANENT
 
 
 def test_标准处置映射():

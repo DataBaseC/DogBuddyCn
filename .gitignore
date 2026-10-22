@@ -15,4 +15,22 @@ config.yaml
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
 *.log
+
+# 凭据类文件：一份都不许进仓库（2026-10-21 补；此前只挡了 config.yaml/*.db/*.log）
+.env
+.env.*
+.secrets*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+
+# 工具产物 / 临时文件
+node_modules/
+.playwright-cli/
+_tmp_*
+*.bak
+*.orig

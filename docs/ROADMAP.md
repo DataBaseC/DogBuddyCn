@@ -1805,3 +1805,21 @@ owner 报："管理员页面的流式输出还是不会自己刷新，得手动�
 基线：**759 passed / 4 skipped**（新增 3 条：尾巴帧不许重建气泡 / 空白消息不渲染 / 等待计时可见）；
 `audit_ui` exit 0（`.stream-wait` 仅 JS 选择器引用，样式复用 `.hint`）；bundle 与指纹已重建。
 
+---
+
+## 41. 第三十四轮：流水线跑了一整天的复盘（2026-10-22，`0.10.48`）
+
+24 小时观测（0.10.47 单进程连续运行 25.6h，今天 0 条 ERROR、限速 0 次、10 轮流水线全 `ok`
+4/4 步、产出第 14→23 套模板）暴露两个真问题：
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 群组任务偶发**整轮报废，只跑 1.2 秒** | 摘要写 `LLM 调用失败（permanent）：[Errno -3] Temporary failure in name resolution` —— 消息自称 Temporary 却被判永久。`errors.classify` 只认系统 errno（110/111/104…），而 **DNS 的 errno 是另一套负数**：`EAI_AGAIN = -3` 不在集合里 → 落到兜底的 PERMANENT → loop 的 C1 瞬态续跑（3 次 ×10s）根本不触发。10-20 19:46、10-21 17:37、10-21 20:19 各丢一轮 | `socket.gaierror` 单独判：`-3`(EAI_AGAIN)/`-11`(EAI_SYSTEM) → TRANSIENT，其余（如 `-2` EAI_NONAME）仍 PERMANENT。容器里 DNS 抖动几十秒就自愈，续跑能扛过去 |
+| 2 | 流水线"莫名其妙不跑了" | 13:24:51 任务被停用（`enabled=0`），但 `audit_log` 里**一条痕迹都没有**：create/update/remove/run_now 都记了，唯独 pause/resume 没记 → 只能去面板的 HTTP 访问日志翻 `POST /api/jobs/<id>/pause` | `JobManager.pause/resume` 补 `job:pause` / `job:resume` 审计，并带上停用前/启用后的 `next_run_at`（恢复时知道错过了哪几轮） |
+
+顺带记录（不改代码，进待办）：每加一套模板要改 `index.html` 三处 meta + `index.css` + 前后两套的
+导航链接，审查清单里已经出现"三处 meta 逐字一致""导航环闭环"这种**人肉 grep 核对**——23 套能撑，
+50 套会崩，下一步应改成"按 `styles/` 目录生成总览与导航环"。
+
+基线：**762 passed / 4 skipped**（新增 3 条：DNS 瞬态/永久分类、pause+resume 留痕、重复暂停也留痕）。
+
