@@ -353,6 +353,15 @@ class AgentLoop:
                                       fail_streak=streak)
 
         tool_result = await self.registry.execute(tc.name, tc.arguments, ctx)
+        # v0.10.51：实时回执钩子（管理员对话用它把"正在调用什么工具"推到控制台）。
+        # 挂在这里是因为**所有工具调用都走这条路**——加在 registry 里会漏掉子代理、
+        # 加在各个工具里则要改几十处。hook 抛错绝不能影响工具本身。
+        hook = ctx.extra.get("on_tool")
+        if callable(hook):
+            try:
+                hook(tc.name, dict(tc.arguments or {}), tool_result)
+            except Exception:  # noqa: BLE001
+                logger.debug("on_tool hook failed", exc_info=True)
         if tool_result.ok:
             self._fail_streak.pop(sig, None)
         else:

@@ -31,6 +31,9 @@ ADMIN_STREAM = "admin.stream"
 #: 管理员/系统**写进用户对话流**的汇报（控制台即时追加一条消息）
 #: payload: {conversation, text, message_id, created_at}
 ADMIN_NOTICE = "admin.notice"
+#: v0.10.51：管理员**每次调用工具**的实时回执（控制台边跑边显示，可折叠）。
+#: payload: {conversation, name, args, ok, output, pending, created_at}
+ADMIN_TOOL = "admin.tool"
 
 
 @dataclass

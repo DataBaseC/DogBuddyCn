@@ -8,8 +8,10 @@ management tool pack. Users never talk to employees directly (M-B rules).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from ..agents.admin.tools import AdminServices, build_admin_tools
@@ -367,7 +369,9 @@ class AdminService:
                           # v0.10.50（方案B）：宿主机命令的确认通道
                           ask_user_fn=self._confirm_asker(sender),
                           extra={"manual": True, "conversation": sender,
-                                 "decisions": self.decisions})
+                                 "decisions": self.decisions,
+                                 # v0.10.51：工具调用实时回执 → SSE admin.tool
+                                 "on_tool": self._tool_emitter(sender)})
         loop = AgentLoop(
             llm=self.llm_factory(), registry=self.registry, session=session,
             builder=self.builder, tool_names=role_spec.tool_names if role_spec else [],
@@ -386,6 +390,35 @@ class AdminService:
             if on_delta is not None:
                 on_delta.flush()
         return result.content or "(no reply)"
+
+    def _tool_emitter(self, sender: str):
+        """把"刚调用了哪个工具、成功没有"实时推给控制台（v0.10.51）。
+
+        owner 报："管理员调用工具不是实时显示"——以前工具卡片只在整轮结束后随
+        `/messages` 一起返回，一轮几十秒里界面像卡死。现在每次工具返回就发一帧
+        `admin.tool`（带参数摘要与输出前 1200 字），前端边跑边折成一张卡片。
+
+        没有 bus 时返回 None（loop 里 `callable(hook)` 会跳过）。
+        """
+        if self.bus is None:
+            return None
+        from ..events.bus import ADMIN_TOOL, Event
+
+        def hook(name: str, args: dict, result: Any) -> None:
+            try:
+                self.bus.emit(Event(type=ADMIN_TOOL, payload={
+                    "conversation": sender,
+                    "name": str(name),
+                    "args": str(json.dumps(args, ensure_ascii=False))[:600],
+                    "ok": bool(getattr(result, "ok", False)),
+                    "pending": bool(getattr(result, "needs_confirm", False)),
+                    "output": str(getattr(result, "output", "") or "")[:1200],
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }))
+            except Exception:  # noqa: BLE001 — 回执坏了不能影响工具结果
+                logger.debug("admin tool emit failed", exc_info=True)
+
+        return hook
 
     def _confirm_asker(self, sender: str):
         """给 `server_exec` 的人工确认通道（v0.10.50 · 方案B）。
