@@ -267,6 +267,7 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
     from . import file_ops as _file
     from . import member_ops as _member
     from . import memory_ops as _mem
+    from . import page_check as _page
     from . import project_memory_ops as _pmem
     from . import run_status as _run_status
     from . import search_ops as _search
@@ -283,6 +284,8 @@ def build_registry(gate: PermissionGate | None = None, audit: Any = None,
         *_pmem.all_tools(), *_mem.all_tools(),
         _ask.AskUserTool(), _srv.ServerExecTool(),
         *_run_status.all_tools(),
+        # v0.10.49：页面体检（测试员/前端用）。只读、纯 stdlib，不依赖浏览器内核。
+        *_page.all_tools(),
         # v0.10.33：组长 → 组员派活（子代理）。能力在工具内部按"群组+组长"裁决，
         # 不依赖作用域元数据（员工作用域是 none，`required_scope` 会把组长也挡住）。
         *_member.all_tools(coordinator),

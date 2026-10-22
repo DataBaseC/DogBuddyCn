@@ -1823,3 +1823,35 @@ owner 报："管理员页面的流式输出还是不会自己刷新，得手动�
 
 基线：**762 passed / 4 skipped**（新增 3 条：DNS 瞬态/永久分类、pause+resume 留痕、重复暂停也留痕）。
 
+---
+
+## 42. 第三十五轮：软件开发系列预设角色 + 页面体检（2026-10-22，`0.10.49`）
+
+owner：「新建几个预设角色，软件开发系列的，比如测试员（可以用浏览器沙盒进行测试）等等。」
+
+以前只有 3 个角色（管理员 / 主管 / 程序员），"审查"和"测试"只能拿程序员工位兼职 ——
+**自己审自己**，结论不可信。新增 5 个：
+
+| 角色 | 关键约束 | 工具集 |
+|---|---|---|
+| `worker_tester` 测试员 | **只读**（无 write/edit/checkpoint）；能跑测试套件 + `page_check` | 15 个 |
+| `worker_frontend` 前端工程师 | programmer 全集 + `page_check`（改完自己体检） | 22 个 |
+| `worker_backend` 后端工程师 | 同 programmer，提示词按「契约优先 / 迁移可回滚」收紧 | 21 个 |
+| `worker_reviewer` 代码审查员 | **只读**，只出 `PASS` / `FAIL + 问题清单`，改代码一律打回 | 14 个 |
+| `worker_architect` 架构师 | **只读 + 连 shell 都不给**（有 shell 就有一百种改文件的办法） | 14 个 |
+
+新工具 `page_check`（`tools/page_check.py`）：静态页面体检 —— 标签闭合、本地 css/js/img
+引用是否存在、`title`/`description`/`viewport`/`lang`、`img` 缺 alt、重复 id、内联颜色
+对比度。**为什么不是真浏览器**：盒子上 `/usr/bin/firefox` 只是 snap 空壳
+（`requires the firefox snap to be installed`），没有 chromium，也没有
+playwright/selenium/weasyprint；纯文本模型读不懂截图像素，能读懂的信号是结构
+（ROADMAP 37.6 的判断在这台机器上被实测确认）。工具如实说明"不做像素渲染"。
+
+回归：`tests/test_preset_roles_software.py`（5 条）钉住两条不变量 —— 只读角色不许有写工具、
+`page_check` 必须拒绝越界路径。顺带修掉 `_Audit` 把 `</head>/</body>` 误报成"多余关闭标签"。
+
+同时新增 `docs/QQ接入指南.md`：把"扫码登录"这件事故障定位到 NapCat（DogBuddy 只是反向 WS
+服务端，没有二维码、没有 QQ 协议实现），并写清"员工不能直连 QQ"的现状与改造方案。
+
+基线：**767 passed / 4 skipped**。
+

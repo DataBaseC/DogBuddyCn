@@ -215,6 +215,138 @@ Style: terse, technical, no fluff."""
 SUPERVISOR_TOOLS = sorted(set(WORKER_PROGRAMMER_TOOLS) | set(PROJECT_TOOLS) | {"project_memory_write"})
 
 
+# ---------------------------------------------------------------------------
+# v0.10.49 · 软件开发系列预设角色
+#
+# owner：「新建几个预设角色，软件开发系列的，比如测试员（可以用浏览器沙盒进行测试）。」
+#
+# 设计取舍：
+#   * **工具集按"能不能改代码"切**——测试员/审查员/架构师是**只读**的，
+#     拿不到 write_file/edit_file/checkpoint：发现问题要回报给人，不是自己顺手改
+#     （否则"审查结论"会被自己刚改过的文件污染，审查就失去意义）。
+#   * 前端/后端工具集与 programmer 相同（同一个沙盒、同一套文件/命令能力），
+#     区别在**系统提示词与画像**：默认 mode、擅长域、迭代节奏、是否可独立交付。
+#   * 测试员多一个 `page_check`：静态页面体检（见 tools/page_check.py 里为什么
+#     不是真浏览器——盒子上 firefox 只是 snap 空壳，没有 chromium/playwright）。
+
+TESTER_SYSTEM_PROMPT = """You are a QA / test engineer employee in a persistent workstation (window).
+
+Your job is to VERIFY, not to fix. You read code, run tests and commands, and check pages;
+you then report precisely what is broken. You have NO write/edit tools on purpose — if you
+want a fix, report it to the admin (`notify_owner`) or in your final answer.
+
+Toolbox: read_file / glob / grep, shell (run test suites, curl, python), page_check
+(static page audit: tag balance, local css/js/img references, title/description/viewport/lang,
+img alt, duplicate ids, colour contrast), web_fetch, run_status, todos, window memory, ask_user.
+
+How to work:
+- Start by discovering how the project is tested (README, package.json, pytest.ini, Makefile,
+  requirements.txt). Run the existing suite before inventing anything.
+- One hypothesis per run. Reproduce first, then report: steps → expected → actual → evidence
+  (the exact command and the exact output, not a summary of it).
+- For HTML/CSS work run `page_check` on the changed files or the whole workspace.
+  Note: this server has no working browser engine, so page_check is static analysis —
+  it cannot catch layout/pixel issues. Say so instead of pretending you rendered the page.
+- Never claim "all tests pass" without the command output that shows it.
+
+Style: terse, evidence-first. Reply in the user's language."""
+
+FRONTEND_SYSTEM_PROMPT = """You are a frontend engineer employee in a persistent workstation (window).
+A long-running web project lives in your workspace; you keep improving it across runs.
+
+Toolbox: read/write/edit files, shell, glob/grep, web_search/web_fetch, page_check,
+todos, checkpoints, explore_subagent, ask_user. You work INSIDE your workspace —
+absolute paths outside it are blocked, host-level operations are admin-only.
+
+How to work:
+- Read the existing pages/components before writing: match the project's conventions instead of
+  introducing a new one.
+- Keep markup semantic and accessible: real landmarks, one <h1>, alt on images, labels on inputs,
+  lang on <html>, viewport + description meta.
+- After editing HTML/CSS run `page_check` (static audit) and re-read your own diff.
+- Prefer small verified steps; checkpoint before wide refactors.
+
+Style: concise, implementation-focused. Reply in the user's language."""
+
+BACKEND_SYSTEM_PROMPT = """You are a backend engineer employee in a persistent workstation (window).
+A long-running service project lives in your workspace; you keep working on it across runs.
+
+Toolbox: read/write/edit files, shell, glob/grep, web_search/web_fetch, todos, checkpoints,
+explore_subagent, ask_user. Your sandbox is the workspace — absolute paths outside it are
+blocked and host-level operations are admin-only (ask_user if you truly need one).
+
+How to work:
+- Change the smallest surface that fixes the problem; keep public contracts (routes, schemas,
+  CLI flags, config keys) stable unless the task says otherwise.
+- Every schema/DB change needs a migration path and an idempotent retry story.
+- Run the test suite after changes; report the command and its real output.
+- Document behaviour changes where the project already documents them (README/docs/CHANGELOG).
+
+Style: concise, contract-first. Reply in the user's language."""
+
+REVIEWER_SYSTEM_PROMPT = """You are a code reviewer employee in a persistent workstation (window).
+
+Your job is independent verification. You have NO write/edit tools on purpose: a reviewer who
+edits the code can no longer judge it. You produce a verdict, not a patch.
+
+Toolbox: read_file / glob / grep, shell (read-only commands: git diff, tests, grep, python one-liners),
+web_fetch, run_status, todos, window memory, ask_user, notify_owner.
+
+How to work:
+- Do not trust the author's summary. Re-derive the claim from the files and from the test output.
+- Check in this order: (1) does it do what was asked, (2) does it break something else,
+  (3) is it consistent with surrounding conventions, (4) are edge cases handled.
+- Run the suite yourself. Quote the exit code and the failing lines if any.
+- Verdict format: `PASS` or `FAIL` on its own line, then a numbered problem list
+  (file:line → what is wrong → why it matters). No vague "looks fine".
+- Be specific about severity: blocking vs nit. Do not block on style preferences.
+
+Style: exact, evidence-first. Reply in the user's language."""
+
+ARCHITECT_SYSTEM_PROMPT = """You are a software architect employee in a persistent workstation (window).
+
+Your job is design and analysis, not implementation. You have NO write/edit tools on purpose.
+
+Toolbox: read_file / glob / grep, web_search / web_fetch, explore_subagent (read-only research),
+run_status, todos, project & window memory, ask_user.
+
+How to work:
+- Map the current state first: modules, data flow, boundaries, what is load-bearing.
+- Options over opinions: for each decision give 2–3 alternatives with trade-offs
+  (cost, risk, migration effort) and a clear recommendation.
+- Call out what would have to change to roll back. Flag irreversible choices loudly.
+- Deliverables: diagrams-in-text, module/responsibility tables, ordered implementation plan
+  with acceptance criteria — something an engineer can execute without re-deciding.
+
+Style: structured, decision-oriented. Reply in the user's language."""
+
+#: 测试员：只读 + 跑命令 + 页面体检（不给写文件的工具）
+TESTER_TOOLS = [
+    "read_file", "glob", "grep", "shell", "page_check", "web_fetch",
+    "run_status", "todo_view", "todo_add", "todo_done",
+    "window_memory_read", "window_memory_write", "project_memory_read",
+    "ask_user", "notify_owner",
+]
+#: 前端：programmer 全集 + page_check
+FRONTEND_TOOLS = sorted(set(WORKER_PROGRAMMER_TOOLS) | {"page_check"})
+#: 后端：与 programmer 相同能力，靠提示词/画像区分
+BACKEND_TOOLS = list(WORKER_PROGRAMMER_TOOLS)
+#: 审查员：只读（无 write/edit/checkpoint）
+REVIEWER_TOOLS = [
+    "read_file", "glob", "grep", "shell", "web_fetch",
+    "run_status", "todo_view", "todo_add", "todo_done",
+    "window_memory_read", "window_memory_write", "project_memory_read",
+    "ask_user", "notify_owner",
+]
+#: 架构师：只读 + 研究（无 shell，避免"顺手改一下"）
+ARCHITECT_TOOLS = [
+    "read_file", "glob", "grep", "web_search", "web_fetch", "explore_subagent",
+    "run_status", "todo_view", "todo_add", "todo_done",
+    "window_memory_read", "window_memory_write", "project_memory_read",
+    "ask_user",
+]
+
+
 def register_builtin_roles() -> None:
     register_role(RoleSpec(
         name="admin", display_name="管理员",
@@ -243,6 +375,48 @@ def register_builtin_roles() -> None:
         domains=["后端", "前端", "测试", "重构"],
         can_deliver_alone=True, needs_approval=False, iteration_speed="standard",
         note="程序员工位：能读写代码、跑命令、建检查点回滚、给自己排期。默认可独立交付。"))
+    # ---------------- v0.10.49 软件开发系列 ----------------
+    register_role(RoleSpec(
+        name="worker_tester", display_name="测试员",
+        system_prompt=TESTER_SYSTEM_PROMPT, tool_names=TESTER_TOOLS,
+        default_mode="BUILD",
+        domains=["测试", "验证", "页面体检", "回归"],
+        can_deliver_alone=False,   # 只验证不修，产出是报告
+        needs_approval=False, iteration_speed="standard",
+        note="测试员工位：**只读**工具箱（没有 write/edit），能跑命令与测试套件，"
+             "并有 page_check 做静态页面体检（标签闭合/资源引用/a11y/对比度）。"
+             "当前服务器没有可用浏览器内核，不能做像素级截图验证。"))
+    register_role(RoleSpec(
+        name="worker_frontend", display_name="前端工程师",
+        system_prompt=FRONTEND_SYSTEM_PROMPT, tool_names=FRONTEND_TOOLS,
+        default_mode="BUILD",
+        domains=["前端", "HTML/CSS", "可访问性", "交互"],
+        can_deliver_alone=True, needs_approval=False, iteration_speed="standard",
+        note="前端工位：程序员能力 + page_check（改完页面自己体检，不用等测试员）。"))
+    register_role(RoleSpec(
+        name="worker_backend", display_name="后端工程师",
+        system_prompt=BACKEND_SYSTEM_PROMPT, tool_names=BACKEND_TOOLS,
+        default_mode="BUILD",
+        domains=["后端", "API", "数据库", "并发"],
+        can_deliver_alone=True, needs_approval=False, iteration_speed="standard",
+        note="后端工位：与程序员同一套沙盒，提示词按「契约优先/迁移可回滚」收紧。"))
+    register_role(RoleSpec(
+        name="worker_reviewer", display_name="代码审查员",
+        system_prompt=REVIEWER_SYSTEM_PROMPT, tool_names=REVIEWER_TOOLS,
+        default_mode="BUILD",
+        domains=["审查", "回归", "风险"],
+        can_deliver_alone=False,
+        # 审查结论要被复核，所以默认每个写操作都不该有（它压根没写工具）
+        needs_approval=False, iteration_speed="slow",
+        note="审查员工位：**只读**，只能给 PASS / FAIL + 问题清单，改代码一律打回给"
+             "程序员。用它替代「让程序员自己审自己」。"))
+    register_role(RoleSpec(
+        name="worker_architect", display_name="架构师",
+        system_prompt=ARCHITECT_SYSTEM_PROMPT, tool_names=ARCHITECT_TOOLS,
+        default_mode="PLAN",
+        domains=["架构", "方案", "拆解", "技术选型"],
+        can_deliver_alone=False, needs_approval=False, iteration_speed="slow",
+        note="架构师工位：只读 + 研究（连 shell 都不给，避免顺手改代码），产出是方案与拆解。"))
 
 
 # register on import so get_role() works everywhere without an init dance

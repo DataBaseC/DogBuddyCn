@@ -10,6 +10,7 @@ older messages are compacted: an LLM summary + structured facts replace them."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -41,12 +42,16 @@ class Compactor:
 
     def __init__(self, llm: Any, compaction_repo: Any, memory_service: Any = None,
                  threshold: float = 0.8, max_context_tokens: int = 128000,
-                 max_messages: int = 48):
+                 max_messages: int = 48, summarize_timeout: float = 60.0):
         self.llm = llm
         self.repo = compaction_repo
         self.memory = memory_service
         self.threshold = threshold
         self.max_context_tokens = max_context_tokens
+        #: 摘要调用的上限（v0.10.48）。压缩跑在**每轮 LLM 调用之前**，以前没有超时：
+        #: provider 卡住时整轮就跟着卡（生产 10-21/10-22 各出现一次 `compaction LLM
+        #: failed`）。超时后按降级处理（截断保留原文），绝不让压缩拖死主流程。
+        self.summarize_timeout = summarize_timeout
         #: 消息数触发线（v0.10.38）。**为什么需要它**：token 阈值在长上下文库上
         #: 永远不触发——工位 `max_context_tokens=1048576`、阈值 0.8 → 要 84 万 token
         #: 才压缩，而 `ContextBuilder.build()` 只取 `recent(60)`：会话一超过 60 条，
@@ -103,7 +108,7 @@ class Compactor:
                                                                "todos": [], "decisions": [], "lessons": []}, 0)
 
         conversation = self._render(doomed)
-        summary = await self._summarize(conversation)
+        summary = await self._summarize(conversation, getattr(session.window, "id", ""))
 
         compaction = self.repo.add_compaction(
             session.window.id, summary, replaced_count=len(doomed))
@@ -127,15 +132,27 @@ class Compactor:
                 logger.warning("memory precipitation failed", exc_info=True)
         return compaction
 
-    async def _summarize(self, conversation: str) -> dict[str, Any]:
+    async def _summarize(self, conversation: str, window_id: str = "") -> dict[str, Any]:
         prompt = _EXTRACT_PROMPT.format(conversation=conversation[:60000])
         try:
-            resp = await self.llm.chat([{"role": "user", "content": prompt}])
+            resp = await asyncio.wait_for(
+                self.llm.chat([{"role": "user", "content": prompt}]),
+                timeout=self.summarize_timeout)
             text = (resp.content or "").strip()
         except Exception as e:  # noqa: BLE001 — fall back to a dumb summary on LLM failure
-            logger.warning("compaction LLM failed: %s", e)
+            # v0.10.48：降级**必须留痕**。以前只有一行 WARNING，台账和审计里都看不出
+            # 这次压缩是"LLM 总结"还是"原文截断"，出问题时无从判断上下文质量。
+            logger.warning(
+                "compaction LLM failed (%s: %s) — fell back to truncation, %d chars kept",
+                type(e).__name__, e, min(len(conversation), 2000))
+            try:
+                self.repo.audit("system", "compaction:degraded",
+                                f"{window_id} {type(e).__name__} kept={min(len(conversation), 2000)}")
+            except Exception:  # noqa: BLE001 — 审计写不进去也不能阻断压缩
+                logger.debug("compaction audit failed", exc_info=True)
             return {"narrative": conversation[:2000], "file_changes": [], "todos": [],
-                    "decisions": [], "lessons": []}
+                    "decisions": [], "lessons": [],
+                    "_degraded": True, "_degraded_reason": type(e).__name__}
         return self._parse_json(text, conversation)
 
     @staticmethod
