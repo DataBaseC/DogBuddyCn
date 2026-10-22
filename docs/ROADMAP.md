@@ -1890,3 +1890,7 @@ owner 两条反馈，都在前端：
 基线：**787 passed / 4 skipped**（新增 6 条：`admin.tool` 事件载荷 / 无 bus 不注册 / loop 钩子确实被调用 / 钩子抛错不影响工具 / 前端折叠卡片与订阅 / 组员副标题专用类）。
 `audit_ui` exit 0；bundle 与指纹已重建。
 
+**`0.10.52` 补一刀**（浏览器实测发现的）：折叠卡片展开后工具名显示成 `tool` ——
+`AdminService.history()` 的 DTO 里**没有 `tool_name` 列**，前端只能写死。补上该列
+（从消息 meta 取），前端优先用 `m.tool_name`。顺带把这条钉进测试。
+

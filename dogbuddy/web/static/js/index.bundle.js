@@ -2775,7 +2775,8 @@
       if (!group.length) return;
       parts.push(toolDetailsHtml(group.map(function (m) {
         var meta = m.meta || {};
-        return { name: meta.tool_name || m.role, args: '',
+        return { name: m.tool_name || meta.tool_name || '工具',
+                 args: '',
                  ok: String(m.content || '').indexOf('[DENIED/ERROR]') !== 0,
                  output: String(m.content || '') };
       }), {}));
