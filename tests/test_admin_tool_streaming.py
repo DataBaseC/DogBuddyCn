@@ -121,6 +121,14 @@ def test_frontend_renders_collapsible_tool_cards():
     assert "#chat-tool-live" in js
 
 
+def test_history_dto_exposes_tool_name():
+    """折叠卡片要显示真实工具名；DTO 少一列，前端只能写死 "tool"（实测到了）。"""
+    src = (REPO / "dogbuddy/services/admin_service.py").read_text(encoding="utf-8")
+    assert '"tool_name":' in src, "管理员 history DTO 必须带 tool_name"
+    js = (REPO / "dogbuddy/web/static/js/views-chat.js").read_text(encoding="utf-8")
+    assert "m.tool_name || meta.tool_name" in js
+
+
 def test_group_member_meta_uses_its_own_class():
     js = (REPO / "dogbuddy/web/static/js/views-groups.js").read_text(encoding="utf-8")
     css = (REPO / "dogbuddy/web/static/css/views.css").read_text(encoding="utf-8")

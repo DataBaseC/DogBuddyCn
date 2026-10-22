@@ -329,7 +329,10 @@ class AdminService:
         """Persisted conversation of one admin session (console chat view)."""
         session = self.session_for(sender)
         return [{"id": m.id, "role": m.role, "content": m.content,
-                 "tokens": m.tokens, "created_at": m.created_at}
+                 "tokens": m.tokens, "created_at": m.created_at,
+                 # v0.10.52：折叠卡片要显示**真实工具名**。以前 DTO 没这一列，
+                 # 前端只能写死 "tool"，展开后看不出这是哪次调用。
+                 "tool_name": str((getattr(m, "meta", None) or {}).get("tool_name", "") or "")}
                 for m in session.recent(limit)]
 
     def reset(self, sender: str = "default") -> int:
