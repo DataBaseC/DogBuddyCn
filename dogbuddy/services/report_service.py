@@ -264,8 +264,18 @@ class ReportService:
             except Exception:  # noqa: BLE001 — one channel failure must not block the rest
                 logger.exception("notifier %s send failed", getattr(notifier, "name", "?"))
 
-    def _targets(self, event: Event) -> list["Notifier"]:
-        """Channels for this event: `payload.report_channel` name, or all."""
+    def _targets(self, event: Event | None) -> list["Notifier"]:
+        """Channels for this event: `payload.report_channel` name, or all.
+
+        v0.10.54 修 bug：`_push_pending_asks()` 里调用的是 `self._targets(None)`，
+        而这里第一行就 `event.payload.get(...)` → `AttributeError: 'NoneType'
+        object has no attribute 'payload'`。生产两天崩了 20 次，全部被 asyncio
+        吞成一行 "Task exception was never retrieved"，后果是**待决汇总既没推送
+        出去、也没进最近记录**（崩在 `_remember()` 之前）——工位卡在等审批时，
+        根本没人收到通知。event 为 None 时按"所有渠道"处理。
+        """
+        if event is None:
+            return list(self.notifiers)
         want = str(event.payload.get("report_channel") or "").strip()
         if not want:
             return list(self.notifiers)

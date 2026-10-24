@@ -216,7 +216,10 @@ class AgentLoop:
                 result.stop_reason = "error"
                 result.error_code = str(getattr(cls, "value", cls))
                 result.error_detail = errors.describe(e)
-                result.content = (f"LLM 调用失败（{cls.value}）：{e}。"
+                # v0.10.54：异常字符串可能是空的（`RetryExhausted` 或 provider 返回空错误），
+                # 生产里就出现过 "LLM 调用失败（permanent）：。" —— 判了永久却把原因弄丢了。
+                _detail = str(e).strip() or type(e).__name__
+                result.content = (f"LLM 调用失败（{cls.value}）：{_detail}。"
                                   f"{errors.action_hint(e, assume_tool_args=False)}")
                 break
 

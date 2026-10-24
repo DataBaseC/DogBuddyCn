@@ -1929,3 +1929,19 @@ v0.10.50 的 `server_exec` 人工确认又是 `source: "server_exec"` —— 两
 
 基线：**802 passed / 4 skipped**（新增 14 条渲染回归）。`audit_ui` exit 0；bundle 已重建。
 
+---
+
+## 46. 第三十九轮：照遥测补三个洞（2026-10-24，`0.10.54`）
+
+owner 问"从测试结果看还有什么问题"，翻了两天的生产遥测，三个真问题：
+
+| # | 证据 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 近两天 **10 条待决全是清理命令**（`rm -rf games/__pycache__` ×7、`cd games && rm -rf …` ×2、`rm -f games/check_*` ×1），全部等人批 → 该步等掉 1800s → 9 条非 done 的 run 里 **4 条**是 `[超时] 该成员在 1800s 内没跑完` | `rm -rf` 一律命中 `IRREVERSIBLE_PATTERNS`（它**确实**是不可逆操作），但"删工作区里的 `__pycache__`"没有任何风险 | 新增 `is_benign_cleanup()`：只认 `rm -f/-rf/-fr(+-v)`、目标**全在工作区内**且名字是 `__pycache__`/`.pytest_cache`/`.mypy_cache`/`*.pyc/.pyo/.tmp`、允许 `&&/;/\\|\\|` 但每段必须是这种 rm 或 `echo/ls/wc/grep…` 只读命令；出现管道/重定向/反引号/`$(`/`cd` 一律不放行。命中则 gate 直接放行 |
+| 2 | `Task exception was never retrieved` **×20 / 2 天**：`ReportService._push_pending_asks()` → `AttributeError: 'NoneType' object has no attribute 'payload'` | `_targets(None)` 里第一行就 `event.payload.get(...)`；崩在 `_remember()` **之前** → 待决汇总既没推送、也没进最近记录，**工位卡在等审批时没人被通知** | `_targets(event: Event \\| None)`：None → 返回全部渠道 |
+| 3 | 两条 `LLM 调用失败（permanent）：。属于永久错误…` —— 冒号后面什么都没有 | `f"…：{e}。"`，`str(e)` 为空时什么都没写；判了永久还丢原因，排障无从下手 | `_detail = str(e).strip() or type(e).__name__` |
+
+`10-23` 那天缓存命中只有 **11.5%**（miss 31.7 万），与"压缩 19 次退化成截断"同源（压缩=重写前缀=缓存失效）——这条单独排，属于 D 项治理。
+
+基线：**824 passed / 4 skipped**（新增 22 条：清理白名单 17 条正反例 + gate 短路/真删除仍拦 + `_targets(None)` + `_push_pending_asks` 端到端 + 空错误兜底）。
+
