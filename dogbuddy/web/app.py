@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from ..updater import read_result
+from ..windows.compactor import compaction_stats as _compaction_stats
 from .routes import auth as auth_routes
 from .routes import capabilities as capabilities_routes
 from .routes import chat as chat_routes
@@ -122,6 +123,9 @@ def create_app(svc: WebServices) -> FastAPI:
             "uptime_s": round(time.time() - STARTED_AT, 1),
             # v0.10.50：每日备份的最后一口气（没有备份 = 出事就全丢，必须能一眼看到）
             "backups": (svc.backup.status() if getattr(svc, "backup", None) else None),
+            # v0.10.55：压缩的健康度（降级率/最近一次 token）——降级=上下文被截断，
+            # 会一路推高后续成本，必须能一眼看到
+            "compactions": _compaction_stats(),
         }
 
     @app.get("/api/version")
