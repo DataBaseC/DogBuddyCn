@@ -107,28 +107,58 @@
      * @param {Object} d 待决 DTO
      * @returns {string} 卡片 HTML
      */
+    /**
+     * 是否"审批类"待决（要人点「批准/拒绝」，而不是写一段话）。
+     *
+     * v0.10.53 修 bug 时一起理的：以前只认 `source === 'confirm'`，而
+     * ① `shell` 危险命令的等待是 `source: "ask_user"`（看库里的真实数据）
+     * ② v0.10.50 的 `server_exec` 人工确认是 `source: "server_exec"`
+     * 两者都落到"普通提问卡"，选项 chips 点一下只是**填进输入框**——用户以为
+     * 点了批准，其实什么都没提交。现在按 option 内容识别，三种来源统一成审批卡。
+     * @param {Object} d 待决 DTO
+     * @returns {boolean}
+     */
+    isApproval: function (d) {
+      var src = String((d && d.source) || '');
+      if (src === 'confirm' || src === 'server_exec') return true;
+      var opts = (d && Array.isArray(d.options)) ? d.options : [];
+      return opts.length === 2 && opts.indexOf('批准') >= 0 && opts.indexOf('拒绝') >= 0;
+    },
+
     card: function (d) {
+      /* ⚠ v0.10.53 修的关键 bug：普通分支以前**漏了卡片根元素**
+         （`return head + ... + '</div>'`——只写闭合、没写开头），于是
+         `bind()` 里 `U.$$('.dec-card')` 一个都找不到 → 点批准/点回答/按回车
+         全部无反应，还多出一个 </div> 把 #dec-list 提前闭合。
+         现在两个分支都必须以 `<div class="dec-card" data-dec-id="…">` 开头。 */
       var head = '<div class="dec-head">' +
         (STATUS_BADGE[d.status] || STATUS_BADGE.pending) +
         '<span class="dec-from">来自 <b>' + U.esc(Decisions.winName(d.window_id)) + '</b></span>' +
         '<span class="dec-time">提出 ' + U.esc(U.relTime(d.created_at)) +
         (d.expires_at ? ' · 超时 ' + U.esc(U.countdown(d.expires_at)) : ' · 不超时') + '</span>' +
         '</div>';
-      if (String(d.source || '') === 'confirm') {
-        /* 高危操作待审批（source=confirm）：命令等宽显示，批准/拒绝二选一 */
-        return '<div class="dec-card dec-card-danger" data-dec-id="' + U.esc(d.id) + '">' +
+      var open = '<div class="dec-card' + (Decisions.isApproval(d) ? ' dec-card-danger' : '') +
+        '" data-dec-id="' + U.esc(d.id) + '">';
+
+      if (Decisions.isApproval(d)) {
+        /* 审批卡：命令等宽显示，批准/拒绝二选一（点了就提交，不用再点「回答」） */
+        var isCmd = String(d.source || '') === 'confirm' ||
+          String(d.source || '') === 'server_exec';
+        return open +
           head.replace(STATUS_BADGE[d.status] || STATUS_BADGE.pending,
-            '<span class="badge badge-red">⚠ 高危操作待审批</span>') +
-          '<div class="dec-cmd-label">待执行命令</div>' +
-          '<pre class="dec-cmd">' + U.esc(d.question || '（空命令）') + '</pre>' +
+            '<span class="badge badge-red">⚠ 待审批</span>') +
+          (isCmd ? '<div class="dec-cmd-label">待执行内容</div>' +
+            '<pre class="dec-cmd">' + U.esc(d.question || '（空命令）') + '</pre>'
+            : '<div class="dec-question">' + U.esc(d.question || '（空问题）') + '</div>') +
           '<div class="dec-answer-row">' +
-          '<button class="btn btn-danger btn-sm dec-approve">' + U.icon('check', 'sm') + '批准执行</button>' +
+          '<button class="btn btn-danger btn-sm dec-approve">' + U.icon('check', 'sm') + '批准</button>' +
           '<button class="btn btn-ghost btn-sm dec-reject">' + U.icon('x', 'sm') + '拒绝</button>' +
           '<span class="hint">批准 = 放行执行；拒绝 = 告诉员工不要做。</span>' +
           '</div></div>';
       }
+
       var options = Array.isArray(d.options) ? d.options : [];
-      return head +
+      return open + head +
         '<div class="dec-question">' + U.esc(d.question || '（空问题）') + '</div>' +
         (options.length
           ? '<div class="chips dec-options">' + options.map(function (o) {
@@ -208,8 +238,15 @@
      * @returns {void}
      */
     bind: function () {
-      U.$$('.dec-card').forEach(function (card) {
+      /* 选择器兜底：优先 `.dec-card`，找不到就退回 `[data-dec-id]`。
+         v0.10.53 的 bug 正是"渲染时漏了 .dec-card，bind 一个都没绑上"，
+         结果按钮全哑——有了兜底就不会因为一个 class 写错而整页失灵。 */
+      var cards = U.$$('.dec-card');
+      if (!cards.length) cards = U.$$('[data-dec-id]');
+      cards.forEach(function (card) {
         var id = Number(card.getAttribute('data-dec-id'));
+        if (!id) return;                       // 没有 id 的卡片不绑（也说明渲染有问题）
+        card.setAttribute('data-bound', '1');
         var input = U.$('.dec-input', card);
         U.$$('.dec-opt', card).forEach(function (b) {
           b.addEventListener('click', function () {
