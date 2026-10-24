@@ -1894,3 +1894,38 @@ owner 两条反馈，都在前端：
 `AdminService.history()` 的 DTO 里**没有 `tool_name` 列**，前端只能写死。补上该列
 （从消息 meta 取），前端优先用 `m.tool_name`。顺带把这条钉进测试。
 
+---
+
+## 45. 第三十八轮：待决页整页按钮失灵（2026-10-24，`0.10.53`）
+
+owner 实测："待决的前端，无论点击批准按钮还是手动打字回复之后，都没有反应。"
+
+**真因不是样式、不是网络、也不是后端**：`views-decisions.js::card()` 的**普通分支漏了卡片根元素** ——
+
+```js
+// 改前（错）
+var head = '<div class="dec-head">…</div>';        // 自带闭合
+return head + '<div class="dec-question">…' + … + '</div>';   // 结尾那个 </div> 无处可闭合
+```
+
+`head` 自己就是闭合的，返回串里**从来没有** `<div class="dec-card" data-dec-id="…">`；
+而 `bind()` 是 `U.$$('.dec-card').forEach(...)` 找人的 —— 一个都找不到，于是
+**所有按钮都没有监听器**：点「回答」没反应、输入框回车没反应、「跳过」也没反应。
+多余的那个 `</div>` 还把 `#dec-list` 提前闭合，后面卡片的结构跟着错位。
+（`source === 'confirm'` 的分支是完整写的，所以只有高危卡那一支能点。）
+
+顺手修掉同一处逻辑缺陷：**审批类判定太窄**。库里真实的待决是
+`source: "ask_user"`（`shell` 危险命令，问题文本里写着"批准请回复「批准」"），
+v0.10.50 的 `server_exec` 人工确认又是 `source: "server_exec"` —— 两者以前都落到
+"普通提问卡"，选项 chip 点一下只是**把"批准"填进输入框**，用户以为点了批准，
+其实什么都没提交。现在 `isApproval()` 按来源 + options 内容识别，统一渲染成
+`批准 / 拒绝` 真按钮（点了立即提交）。
+
+再加两道防线，避免同类问题再整页失灵：
+* `bind()` 选择器兜底：`.dec-card` 找不到时退回 `[data-dec-id]`；没有 id 的卡片跳过。
+* 回归测试用 **node 真跑 `card()`**（不只是 grep 源码）：五种分支都必须以
+  `<div class="dec-card" data-dec-id>` 开头、`<div>` 开闭配平、审批类必须出真按钮、
+  自定义选项仍保持 chip 填入。
+
+基线：**802 passed / 4 skipped**（新增 14 条渲染回归）。`audit_ui` exit 0；bundle 已重建。
+
