@@ -13,6 +13,7 @@ The gate is injected into tools/registry (L4) which only calls it.
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,90 @@ def is_irreversible_command(command: str) -> str | None:
         if re.search(pattern, command):
             return reason
     return None
+
+
+# ---------------------------------------------------------------------------
+# v0.10.54：清"生成物"不需要人点头
+#
+# 生产实录（2026-10-22～24）：近两天 10 条待决里 **10 条**都是
+#   `rm -rf games/__pycache__` / `rm -f games/check_*` 这类清理，
+# 每次都要人批准；人不在线 → 该步等掉 1800s 预算 → 整轮 `[超时]` 报废
+# （9 条非 done 的 run 里 4 条是这个原因，缓存命中也被拖到 11.5%）。
+#
+# 规则刻意窄，只放行"**删的是工作区内的构建产物**"这一件事：
+#   * 只认 `rm -f / -rf / -fr`（可带 -v），不允许 `-d`、`--no-preserve-root` 之类；
+#   * 每个目标路径必须**在 workspace 之内**，且名字是 __pycache__ / .pytest_cache
+#     这类目录，或 *.pyc / *.pyo / *.tmp 这类文件；
+#   * 允许用 `&&`/`||`/`;` 连接，但**每一段**都得是"清生成物的 rm"或
+#     `_CLEAN_SAFE_VERBS` 里的只读命令（echo/ls/wc/find 之外的都不行）；
+#   * 出现管道、重定向、反引号、`$(`、`cd` 一律不放行（`cd x && rm -rf y` 的
+#     相对基准会变，静态判断容易出错，宁可多问一次）。
+# 任何一条不满足 → 落回原来的"危险命令要确认"路径。
+_CLEAN_ARTIFACT_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+_CLEAN_ARTIFACT_SUFFIX = (".pyc", ".pyo", ".tmp")
+_CLEAN_SAFE_VERBS = {
+    "echo", "printf", "ls", "pwd", "true", ":", "date", "cat", "head",
+    "tail", "wc", "grep", "test", "stat", "du", "df", "which", "uname",
+}
+_CLEAN_SEGMENTS = re.compile(r"\s*(?:&&|\|\||;)\s*")
+_CLEAN_FORBIDDEN = re.compile(r"[|<>`]|\$\(")
+
+
+def _artifact_target_ok(raw: str, base: Path, root: Path) -> bool:
+    """这个 rm 目标是不是"工作区内的构建产物"。"""
+    text = raw.strip().strip("'\"")
+    if not text or text in ("-", "*", "/", "~"):
+        return False
+    try:
+        target = Path(text).expanduser()
+        target = (target if target.is_absolute() else root / target).resolve()
+    except (OSError, RuntimeError):
+        return False
+    if target != base and base not in target.parents:
+        return False                      # 越出工作区 → 交回人工
+    return target.name in _CLEAN_ARTIFACT_DIRS or target.name.endswith(_CLEAN_ARTIFACT_SUFFIX)
+
+
+def is_benign_cleanup(command: str, workspace: str = ".", cwd: str = "") -> bool:
+    """True = 这条命令只是在清工作区里的生成物，不需要人工确认。"""
+    if not command.strip() or _CLEAN_FORBIDDEN.search(command):
+        return False
+    base = Path(workspace or ".").resolve()
+    root = Path(cwd).resolve() if cwd else base
+    if root != base and base not in root.parents:
+        root = base
+    saw_rm = False
+    for seg in _CLEAN_SEGMENTS.split(command):
+        seg = seg.strip()
+        if not seg:
+            continue
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            return False
+        if not tokens:
+            continue
+        verb = tokens[0]
+        if verb == "rm":
+            saw_rm = True
+            flags, targets = [], []
+            for tok in tokens[1:]:
+                (flags if tok.startswith("-") else targets).append(tok)
+            flat = "".join(f.lstrip("-") for f in flags)
+            if not targets or any(ch not in "frRv" for ch in flat):
+                return False
+            if "f" not in flat and "r" not in flat and "R" not in flat:
+                return False
+            if any(t in ("--no-preserve-root", "--one-file-system") for t in flags):
+                return False
+            if not all(_artifact_target_ok(t, base, root) for t in targets):
+                return False
+        elif verb in _CLEAN_SAFE_VERBS:
+            if any(t.startswith("/") for t in tokens[1:] if not t.startswith("-")):
+                return False              # 只读命令也别去碰绝对路径
+        else:
+            return False
+    return saw_rm
 
 
 def is_dangerous_command(command: str) -> str | None:
@@ -264,6 +349,11 @@ class PermissionGate:
         # （审查报告 P0-1 附带发现）。这里补在 shell 通道上，且优先于危险命令判定。
         if PANEL_PATH_PATTERN.search(command):
             return GateDecision(False, "modifying AegisServerPanel files is forbidden")
+        # v0.10.54：只清工作区内生成物（__pycache__ / *.pyc / .pytest_cache / *.tmp）
+        # 的 rm 不再需要人工确认 —— 否则每轮都要人点一次，人不在就等掉 1800s 预算。
+        if is_benign_cleanup(command, getattr(ctx, "workspace", ".") or ".",
+                             str(args.get("cwd") or "")):
+            return GateDecision(True)
         reason = is_dangerous_command(command)
         irreversible = is_irreversible_command(command)
         # T4.3: the irreversible check is WIDER than the dangerous list —
