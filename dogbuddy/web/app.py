@@ -35,6 +35,7 @@ from .routes import ledger as ledger_routes
 from .routes import jobs as jobs_routes
 from .routes import logs as logs_routes
 from .routes import models as models_routes
+from .routes import industry as industry_routes
 from .routes import pipelines as pipelines_routes
 from .routes import qc as qc_routes
 from .routes import projects as projects_routes
@@ -88,6 +89,9 @@ class WebServices:
         self.pipelines = kw.get("pipelines")
         #: v0.12.2：抽检服务（`/api/qc/*`、`/healthz.qc`）
         self.qc = kw.get("qc")
+        #: v0.13.0：指标推送与视觉服务（`/api/metrics/*`、`/api/ingress/*`）
+        self.metrics = kw.get("metrics")
+        self.cv = kw.get("cv")
         self.models = kw.get("models")
         self.iterations = kw.get("iterations")
         self.iteration_exec = kw.get("iteration_exec")
@@ -146,6 +150,9 @@ def create_app(svc: WebServices) -> FastAPI:
                           if getattr(svc, "pipelines", None) else None),
             # v0.12.2：抽检（缺陷率/漏检估计是工业线的核心指标）
             "qc": (svc.qc.health() if getattr(svc, "qc", None) else None),
+            # v0.13.0：指标新鲜度 + 视觉服务是否配好（"数据过期"是工业现场最常见故障）
+            "metrics": (svc.metrics.health() if getattr(svc, "metrics", None) else None),
+            "cv": (svc.cv.health() if getattr(svc, "cv", None) else None),
         }
 
     @app.get("/api/version")
@@ -202,6 +209,8 @@ def create_app(svc: WebServices) -> FastAPI:
     app.include_router(pipelines_routes.router(svc, auth_deps), prefix="/api")
     # v0.12.2：抽检与复核
     app.include_router(qc_routes.router(svc, auth_deps), prefix="/api")
+    # v0.13.0：工业信号与事件接入
+    app.include_router(industry_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(settings_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(logs_routes.router(svc, auth_deps), prefix="/api")
 

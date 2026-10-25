@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -542,6 +542,34 @@ def _migrate_v19(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v20(conn: sqlite3.Connection) -> None:
+    """工业信号接入（2026-10-25，0.13.0）。
+
+    产线的"现状"是一串数字：产量、节拍、设备温度、缺陷率、探针可用性。
+    这一版只做**接收与取用**（push 模型）：
+
+      * 边缘只推**指标**（`metrics` 一行一个采样），原图/原始数据留厂内；
+      * 流水线步骤 `sensor_read` 取最新值（可设 `max_age_s` 防用陈旧数据做决策）；
+      * 判定走本地视觉服务（`cv_detect`），DogBuddy 不碰像素。
+
+    刻意不建"设备表"：设备是外部系统的资产，我们只关心它报出来的数字。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS metrics(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      value REAL DEFAULT 0,
+      unit TEXT DEFAULT '',
+      source TEXT DEFAULT '',
+      ts TEXT NOT NULL,
+      meta_json TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_metrics_name_ts ON metrics(name, ts);
+    CREATE INDEX IF NOT EXISTS ix_metrics_ts ON metrics(ts);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -565,6 +593,7 @@ _MIGRATIONS: dict[int, Any] = {
     17: _migrate_v17,
     18: _migrate_v18,
     19: _migrate_v19,
+    20: _migrate_v20,
 }
 
 
@@ -1967,6 +1996,48 @@ class Database:
             row = self._conn.execute(q, args).fetchone()
         return dict(row) if row else {"calls": 0, "amount": 0.0,
                                       "in_tokens": 0, "out_tokens": 0}
+
+    # ------------------------------------------------- 指标（0.13.0）
+    def push_metric(self, row: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO metrics(name, value, unit, source, ts, meta_json) "
+                "VALUES(?,?,?,?,?,?)",
+                (str(row.get("name") or ""), float(row.get("value") or 0),
+                 str(row.get("unit") or ""), str(row.get("source") or ""),
+                 row.get("ts") or datetime.now(timezone.utc).isoformat(),
+                 row.get("meta_json") or ""))
+            self._conn.commit()
+            mid = cur.lastrowid
+        return {"id": mid, **{k: row.get(k) for k in ("name", "value", "unit", "source", "ts")}}
+
+    def latest_metrics(self, names: list[str] | None = None) -> list[dict[str, Any]]:
+        """每个指标名取最新一条（控制台/流水线都用它）。"""
+        if names:
+            marks = ",".join("?" for _ in names)
+            q = (f"SELECT m.* FROM metrics m JOIN (SELECT name, MAX(id) AS mx "
+                 f"FROM metrics WHERE name IN ({marks}) GROUP BY name) t ON m.id = t.mx "
+                 f"ORDER BY m.name")
+            args: list[Any] = list(names)
+        else:
+            q = ("SELECT m.* FROM metrics m JOIN (SELECT name, MAX(id) AS mx "
+                 "FROM metrics GROUP BY name) t ON m.id = t.mx ORDER BY m.name")
+            args = []
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(q, args).fetchall()]
+
+    def metric_history(self, name: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM metrics WHERE name=? ORDER BY id DESC LIMIT ?",
+                (str(name), int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+    def metric_names(self) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT name FROM metrics ORDER BY name").fetchall()
+        return [r["name"] for r in rows]
 
     # ------------------------------------------------- 抽检（0.12.2）
     def create_qc_batch(self, row: dict[str, Any]) -> dict[str, Any]:

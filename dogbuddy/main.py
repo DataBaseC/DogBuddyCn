@@ -38,7 +38,9 @@ from .services.report_service import ReportService
 from .services.backup_service import BackupService
 from .services.cost_service import CostService
 from .services.pipeline_service import PipelineService
+from .services.cv_adapter import CvAdapter
 from .services.qc_service import QcService
+from .services.sensor_hub import SensorHub
 from .services.routing_service import RoutingService
 from .services.decisions import DecisionService
 from .services.group_manager import GroupManager
@@ -157,9 +159,14 @@ class DogBuddyApp:
         # v0.12.1：流水线编排（步骤级 checkpoint / 幂等续跑）。
         # `dispatch` 直接用工位的 `dispatch_and_wait` —— 引擎不重复造派活通道。
         self.qc = QcService(self.db)
+        # v0.13.0：工业信号（边缘推指标）+ 本地视觉服务适配器（图像不出厂）
+        self.metrics = SensorHub(self.db)
+        self.cv = CvAdapter(cost=self.cost)
         self.pipelines = PipelineService(
             self.db,
             qc=self.qc,
+            cv=self.cv,
+            sensors=self.metrics,
             dispatch=self.windows.dispatch_and_wait,
             workspace_root=str(getattr(config.paths, "workspaces_dir",
                                        "/var/lib/dogbuddy/workspaces")))
@@ -283,6 +290,9 @@ class DogBuddyApp:
             pipelines=self.pipelines,
             # v0.12.2：抽检（/api/qc/* 与 /healthz.qc）
             qc=self.qc,
+            # v0.13.0：指标与视觉服务（/api/metrics/*、/api/ingress/*）
+            metrics=self.metrics,
+            cv=self.cv,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)

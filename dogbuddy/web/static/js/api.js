@@ -243,6 +243,13 @@
         return request('DELETE', '/api/costs/budgets/' + enc(id));
       }
     },
+    /* v0.13.0：工业看板（指标 / 抽检批次 / 流水线运行） */
+    industry: {
+      metrics: function () { return request('GET', '/api/metrics'); },
+      qcBatches: function (limit) { return request('GET', '/api/qc/batches?limit=' + (limit || 5)); },
+      pipelineRuns: function (limit) { return request('GET', '/api/pipelines/runs?limit=' + (limit || 5)); }
+    },
+
     models: {
       /* GET /api/models?enabled_only= → {models:[...], current:{...}, summary:{...}} */
       list: function (enabledOnly) {

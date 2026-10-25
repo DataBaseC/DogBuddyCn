@@ -625,6 +625,13 @@
         return request('DELETE', '/api/costs/budgets/' + enc(id));
       }
     },
+    /* v0.13.0：工业看板（指标 / 抽检批次 / 流水线运行） */
+    industry: {
+      metrics: function () { return request('GET', '/api/metrics'); },
+      qcBatches: function (limit) { return request('GET', '/api/qc/batches?limit=' + (limit || 5)); },
+      pipelineRuns: function (limit) { return request('GET', '/api/pipelines/runs?limit=' + (limit || 5)); }
+    },
+
     models: {
       /* GET /api/models?enabled_only= → {models:[...], current:{...}, summary:{...}} */
       list: function (enabledOnly) {
@@ -8137,7 +8144,8 @@
   global.DogBuddyViews = global.DogBuddyViews || {};
 
   var state = { days: 7, summary: {}, prices: [], budgets: [], routes: [],
-                routesHealth: {}, loaded: false };
+                routesHealth: {}, metrics: [], qcBatches: [], pipelineRuns: [],
+                loaded: false };
 
   function money(v) {
     var n = Number(v || 0);
@@ -8253,6 +8261,73 @@
           .catch(function (e) { U.toast('error', e.message); });
       });
     });
+  }
+
+  /* ---------------- v0.13.0 工业看板 ----------------
+     三块东西放一起，因为现场看的是"现在能不能跑"：
+     指标（新不新鲜）→ 抽检（这一批漏没漏）→ 流水线（卡在哪一步）。 */
+  function renderIndustry() {
+    var host = U.$('#cost-industry');
+    if (!host) return;
+    var metrics = state.metrics || [];
+    var now = Date.now();
+    var mRows = metrics.map(function (m) {
+      var age = (now - new Date(m.ts || 0).getTime()) / 1000;
+      var stale = isFinite(age) && age > 3600;
+      return '<tr><td class="mono">' + U.esc(m.name) + '</td>' +
+        '<td class="mono">' + U.esc(String(m.value)) + '</td>' +
+        '<td>' + U.esc(m.unit || '') + '</td>' +
+        '<td>' + (stale ? '<span class="badge badge-red">' + Math.round(age / 60) + ' 分钟前</span>'
+                        : '<span class="hint">' + U.esc(U.relTime(m.ts)) + '</span>') + '</td></tr>';
+    });
+    var qRows = (state.qcBatches || []).map(function (b) {
+      var rate = Number(b.defect_rate || 0) * 100;
+      return '<tr><td class="mono">' + U.esc(b.id) + '</td>' +
+        '<td>' + (b.total || 0) + ' / ' + (b.sampled || 0) + '</td>' +
+        '<td class="mono">' + rate.toFixed(1) + '%</td>' +
+        '<td class="mono">' + (Number(b.miss_estimate || 0) * 100).toFixed(1) + '%</td>' +
+        '<td>' + U.esc(b.status || '') + '</td></tr>';
+    });
+    var pRows = (state.pipelineRuns || []).map(function (r) {
+      var cls = r.status === 'done' ? 'badge-green'
+        : (r.status === 'failed' ? 'badge-red' : 'badge-amber');
+      return '<tr><td class="mono">' + U.esc(r.id) + '</td>' +
+        '<td class="mono">' + U.esc(r.pipeline_id) + '</td>' +
+        '<td><span class="badge ' + cls + '">' + U.esc(r.status) + '</span></td>' +
+        '<td class="hint">' + U.esc(U.relTime(r.started_at)) + '</td></tr>';
+    });
+    host.innerHTML = '<h3 class="card-title">工业看板 ' +
+      '<span class="card-sub">（边缘推指标 → 抽检算漏检 → 流水线跑步骤）</span></h3>' +
+      '<div class="card-sub" style="margin:8px 0 4px">最新指标（超过 1 小时标红 = 数据可能断了）</div>' +
+      (mRows.length
+        ? '<table class="table"><thead><tr><th>指标</th><th>值</th><th>单位</th><th>时间</th></tr></thead>' +
+          '<tbody>' + mRows.join('') + '</tbody></table>'
+        : '<p class="muted">还没有指标 —— 让边缘 <code>POST /api/metrics/push</code>。</p>') +
+      '<div class="card-sub" style="margin:12px 0 4px">最近抽检批次（总量 / 抽样 → 缺陷率 → 漏检估计）</div>' +
+      (qRows.length
+        ? '<table class="table"><thead><tr><th>批次</th><th>总量/抽样</th><th>缺陷率</th>' +
+          '<th>漏检估计</th><th>状态</th></tr></thead><tbody>' + qRows.join('') + '</tbody></table>'
+        : '<p class="muted">还没有抽检批次。</p>') +
+      '<div class="card-sub" style="margin:12px 0 4px">最近流水线运行</div>' +
+      (pRows.length
+        ? '<table class="table"><thead><tr><th>run</th><th>流水线</th><th>状态</th>' +
+          '<th>开始</th></tr></thead><tbody>' + pRows.join('') + '</tbody></table>'
+        : '<p class="muted">还没有流水线运行。</p>');
+  }
+
+  function loadIndustry() {
+    A.industry.metrics().then(function (r) {
+      state.metrics = (r && r.metrics) || [];
+      renderIndustry();
+    }).catch(function () { /* 指标拿不到不影响成本页 */ });
+    A.industry.qcBatches(5).then(function (r) {
+      state.qcBatches = (r && r.batches) || [];
+      renderIndustry();
+    }).catch(function () {});
+    A.industry.pipelineRuns(5).then(function (r) {
+      state.pipelineRuns = (r && r.runs) || [];
+      renderIndustry();
+    }).catch(function () {});
   }
 
   /* ---------------- v0.12.0 分级路由 ---------------- */
@@ -8412,6 +8487,7 @@
       state.routesHealth = (r && r.health) || {};
       renderRoutes();
     }).catch(function () { /* 路由是增强项，挂了不影响其他 */ });
+    loadIndustry();   // v0.13.0：工业看板（指标/抽检/流水线）
   }
 
   function seed() {
