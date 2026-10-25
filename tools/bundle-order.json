@@ -17,6 +17,7 @@
     "js/views-groups.js",
     "js/views-approval.js",
     "js/views-ledger.js",
+    "js/views-costs.js",
     "js/filemanager.js",
     "js/app.js"
   ]

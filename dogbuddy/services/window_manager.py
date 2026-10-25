@@ -127,6 +127,8 @@ class WindowManager:
         model_resolver: Callable[[str | None, str], str] | None = None,
         param_resolver: Callable[[Any], dict] | None = None,
         decisions: Any = None,
+        #: v0.11.0：成本账本（每一位员工的每次 LLM 调用都要记账）
+        cost: Any = None,
         approval_config: Callable[..., Any] | None = None,
         mcp_bridge: Any = None,
     ):
@@ -137,6 +139,7 @@ class WindowManager:
         self.panel = panel
         self.memory = memory
         self.decisions = decisions
+        self.cost = cost
         # T4.2/T4.3: approval knobs (allowlist / 托管代审) read through here
         self.approval_config = approval_config
         # T5.1: bridged MCP tools are registered into every window registry
@@ -399,13 +402,48 @@ class WindowManager:
                 "max_context_tokens": self.max_context_tokens,
                 "compact_threshold": self.threshold}
 
+    def _usage_hook(self, w: Window, run_id: str, model: str | None):
+        """v0.11.0：成本账本钩子 —— 员工每轮 LLM 调用记一笔。
+
+        挂法与 `on_tool` 同构（`ctx.extra`），所以群组步骤、子代理、续跑都自动覆盖。
+        幂等键 `run_id:轮次` 防重放重复计费；provider 拿不到时由 CostService
+        按 model 名兜底匹配单价，不会静默记成 0。
+        """
+        cost = getattr(self, "cost", None)
+        if cost is None:
+            return None
+        wid = str(getattr(w, "id", "") or "")
+        wname = str(getattr(w, "name", "") or "")
+        default_model = str(model or "")
+        seq = {"n": 0}
+
+        def hook(resp: Any) -> None:
+            seq["n"] += 1
+            usage = getattr(resp, "usage", None) or {}
+            cost.record(
+                run_id=run_id, window_id=wid, kind="llm",
+                provider=str(getattr(resp, "provider", "") or ""),
+                model=str(getattr(resp, "model", "") or default_model),
+                in_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+                out_tokens=int(usage.get("completion_tokens")
+                               or usage.get("output_tokens") or 0),
+                cache_hit_tokens=int(usage.get("cache_read_input_tokens")
+                                     or usage.get("prompt_cache_hit_tokens") or 0),
+                idem_key=f"{run_id or wid}:{seq['n']}",
+                meta={"phase": "window", "window_name": wname},
+            )
+
+        return hook
+
     def _compactor_for(self, w: Window) -> Compactor:
         p = self.params_for(w)
         ovr = self._llm_overrides(p)
         return Compactor(self._llm(w.llm_profile or None, w.model or None, ovr or None),
                          self.db, self.memory,
                          threshold=p.get("compact_threshold", self.threshold),
-                         max_context_tokens=p.get("max_context_tokens", self.max_context_tokens))
+                         max_context_tokens=p.get("max_context_tokens", self.max_context_tokens),
+                         # v0.11.0：压缩摘要也是钱，进同一本账
+                         cost=getattr(self, "cost", None))
 
     # ---------------------------------------------------------- crud facade
     #: 工位级参数的范围（与参数面板一致）。越界**直接报错**——否则一个 "compact_threshold: 5"
@@ -897,6 +935,8 @@ class WindowManager:
         # per-window model override: was decorative in v1.3 (never read), so users
         # had to set the model in several places to get any effect
         model = w.model or None
+        #: v0.11.0：成本账本的幂等键要用到本次 run（重放不重复计费）
+        run_id = str((getattr(task, "meta", None) or {}).get("run_id") or "")
         # per-window params (T1.1/T7.2): workbench → project → profile → global
         p = self.params_for(w)
         ovr = self._llm_overrides(p) or None
@@ -927,6 +967,8 @@ class WindowManager:
                    "project_id": getattr(w, "project_id", "") or "",
                    # T9.6：审批逐级路由（员工→主管→管理员）+ 向主管投递的通道
                    "approval_router": self.approval_router,
+                   # v0.11.0：成本账本（每轮 LLM 调用记一笔，幂等键 = run + 轮次）
+                   "on_usage": self._usage_hook(w, run_id, model),
                    "supervision_dispatch": self.supervision_dispatch,
                    # P1-6：升级给主管的待决事项要落 queue、主管要用工具裁决它们
                    "decisions": self.decisions,

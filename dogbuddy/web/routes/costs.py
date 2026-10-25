@@ -1,0 +1,112 @@
+# DogBuddyCn — 成本账本路由（0.11.0）
+# Copyright (C) DogBuddyCn contributors — AGPL-3.0
+"""成本查询与单价表/预算维护（docs/工业自动化设计.md §5）。
+
+设计约束（都在测试里）：
+  * 金额**只由服务层换算**（`CostService.amount_for`），路由不做算术；
+  * 改价必须留审计（单价配错会让整个调度决策偏掉）；
+  * 汇总的分组维度是白名单（列名会进 SQL，绝不能让外部决定）。
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+
+class PriceIn(BaseModel):
+    provider: str = ""
+    model: str = ""
+    unit: str = "token"                 # token | image | minute
+    in_price: float = 0.0               # 每 1K token（unit=image 时=每张）
+    out_price: float = 0.0
+    cache_price: float = 0.0
+    currency: str = "CNY"
+    note: str = ""
+    enabled: bool = True
+
+
+class BudgetIn(BaseModel):
+    scope_type: str = "global"          # global | group | job
+    scope_id: str = ""
+    period: str = "day"                 # day | week
+    limit_amount: float = 0.0
+    strategy: str = "downgrade"         # downgrade | queue | pause
+    enabled: bool = True
+
+
+def router(svc, auth_deps) -> APIRouter:
+    r = APIRouter(tags=["costs"])
+
+    def _cost():
+        cost = getattr(svc, "cost", None)
+        if cost is None:
+            raise HTTPException(status_code=503, detail="成本账本未启用")
+        return cost
+
+    @r.get("/costs/summary", dependencies=auth_deps)
+    def summary(days: int = 7, group_by: str = "day") -> dict:
+        return _cost().summary(days=days, group_by=group_by)
+
+    @r.get("/costs/ledger", dependencies=auth_deps)
+    def ledger(limit: int = 100, since: str = "") -> dict:
+        return {"rows": _cost().ledger(since=since, limit=limit)}
+
+    @r.get("/costs/models", dependencies=auth_deps)
+    def list_prices() -> dict:
+        cost = _cost()
+        return {"prices": cost.db.list_cost_models(), "count": len(cost.db.list_cost_models())}
+
+    @r.put("/costs/models/{price_id}", dependencies=auth_deps)
+    def put_price(price_id: str, body: PriceIn) -> dict:
+        cost = _cost()
+        payload: dict[str, Any] = body.model_dump()
+        payload["id"] = price_id
+        try:
+            return cost.upsert_price(payload)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @r.delete("/costs/models/{price_id}", dependencies=auth_deps)
+    def delete_price(price_id: str) -> dict:
+        return {"deleted": _cost().db.delete_cost_model(price_id)}
+
+    @r.post("/costs/models/seed", dependencies=auth_deps)
+    def seed_prices() -> dict:
+        """按模型目录的 `cost` 档位生成占位价（已存在的不覆盖）。"""
+        models = getattr(svc, "models", None)
+        catalog = models.catalog() if models is not None else []
+        return _cost().seed_from_models(catalog)
+
+    @r.get("/costs/budgets", dependencies=auth_deps)
+    def list_budgets() -> dict:
+        return {"budgets": _cost().db.list_budgets()}
+
+    @r.put("/costs/budgets/{budget_id}", dependencies=auth_deps)
+    def put_budget(budget_id: str, body: BudgetIn) -> dict:
+        if body.scope_type not in ("global", "group", "job"):
+            raise HTTPException(status_code=400, detail="scope_type 只能是 global/group/job")
+        if body.period not in ("day", "week"):
+            raise HTTPException(status_code=400, detail="period 只能是 day/week")
+        if body.strategy not in ("downgrade", "queue", "pause"):
+            raise HTTPException(status_code=400,
+                                detail="strategy 只能是 downgrade/queue/pause")
+        if float(body.limit_amount) < 0:
+            raise HTTPException(status_code=400, detail="limit_amount 不能为负")
+        payload = body.model_dump()
+        payload["id"] = budget_id
+        saved = _cost().db.upsert_budget(payload)
+        try:
+            _cost().db.audit("web", "cost:budget",
+                             f"{budget_id} limit={saved.get('limit_amount')} "
+                             f"period={saved.get('period')} strategy={saved.get('strategy')}")
+        except Exception:  # noqa: BLE001
+            pass
+        return saved
+
+    @r.delete("/costs/budgets/{budget_id}", dependencies=auth_deps)
+    def delete_budget(budget_id: str) -> dict:
+        return {"deleted": _cost().db.delete_budget(budget_id)}
+
+    return r

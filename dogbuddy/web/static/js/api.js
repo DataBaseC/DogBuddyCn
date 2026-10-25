@@ -214,6 +214,30 @@
        （能力清单页的数据源；v0.10.39 修复：这个方法整好漏了——views-capabilities.js
        调 A.capabilities() 时同步抛 TypeError，.catch 接不住，页面整个空白） */
     capabilities: function () { return request('GET', '/api/capabilities'); },
+    /* ---------------- v0.11.0 成本账本 ---------------- */
+    costs: {
+      /* GET /api/costs/summary?days=7&group_by=day|window|model */
+      summary: function (days, groupBy) {
+        return request('GET', '/api/costs/summary' + qs({ days: days, group_by: groupBy }));
+      },
+      /* GET /api/costs/ledger?limit=&since= → {rows:[...]} */
+      ledger: function (limit, since) {
+        return request('GET', '/api/costs/ledger' + qs({ limit: limit, since: since }));
+      },
+      /* GET /api/costs/models → {prices:[...]} */
+      prices: function () { return request('GET', '/api/costs/models'); },
+      /* PUT /api/costs/models/{id} —— 改价（留审计，历史不回算） */
+      putPrice: function (id, body) {
+        return request('PUT', '/api/costs/models/' + enc(id), body);
+      },
+      /* POST /api/costs/models/seed —— 按模型目录 cost 档位生成占位价 */
+      seed: function () { return request('POST', '/api/costs/models/seed', {}); },
+      /* 三级预算（0.11.x 才执行，这里先能读写） */
+      budgets: function () { return request('GET', '/api/costs/budgets'); },
+      putBudget: function (id, body) {
+        return request('PUT', '/api/costs/budgets/' + enc(id), body);
+      }
+    },
     models: {
       /* GET /api/models?enabled_only= → {models:[...], current:{...}, summary:{...}} */
       list: function (enabledOnly) {

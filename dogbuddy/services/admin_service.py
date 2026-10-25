@@ -54,6 +54,8 @@ class AdminService:
         # v0.10.50（方案B）：server_exec 的人工确认通道 —— 落 pending_decision，
         # 控制台「待决」页批准后重放。没有它时 server_exec 直接拒绝（fail-closed）。
         decisions: Any = None,
+        # v0.11.0：成本账本（管理员对话的每一次 LLM 调用都要记账）
+        cost: Any = None,
         max_iterations: int = 20,
         self_status: Callable[[bool], dict] | None = None,
         self_update: Callable[..., dict] | None = None,
@@ -72,6 +74,7 @@ class AdminService:
         self.runs = runs
         self.bus = bus
         self.decisions = decisions
+        self.cost = cost
         self.max_iterations = max_iterations
         self.self_status = self_status
         self.self_update = self_update
@@ -374,7 +377,9 @@ class AdminService:
                           extra={"manual": True, "conversation": sender,
                                  "decisions": self.decisions,
                                  # v0.10.51：工具调用实时回执 → SSE admin.tool
-                                 "on_tool": self._tool_emitter(sender)})
+                                 "on_tool": self._tool_emitter(sender),
+                                 # v0.11.0：成本账本（每次 LLM 调用记一笔）
+                                 "on_usage": self._usage_hook(sender)})
         loop = AgentLoop(
             llm=self.llm_factory(), registry=self.registry, session=session,
             builder=self.builder, tool_names=role_spec.tool_names if role_spec else [],
@@ -393,6 +398,38 @@ class AdminService:
             if on_delta is not None:
                 on_delta.flush()
         return result.content or "(no reply)"
+
+    def _usage_hook(self, sender: str):
+        """成本记账钩子（v0.11.0）：管理员对话每次 LLM 调用记一笔。
+
+        幂等键用"对话 + 轮次"：同一轮被重放（重试/断线重连）时不会重复计费。
+        没有 cost 服务时返回 None（loop 里 `callable()` 会跳过）。
+        """
+        cost = getattr(self, "cost", None)
+        if cost is None:
+            return None
+        cfg = getattr(self, "config", None)
+        provider = str(getattr(getattr(cfg, "llm", None), "provider", "") or "")
+        default_model = str(getattr(getattr(cfg, "llm", None), "model", "") or "")
+        seq = {"n": 0}
+
+        def hook(resp: Any) -> None:
+            seq["n"] += 1
+            usage = getattr(resp, "usage", None) or {}
+            cost.record(
+                window_id=f"admin:{sender}", kind="llm",
+                provider=str(getattr(resp, "provider", "") or provider),
+                model=str(getattr(resp, "model", "") or default_model),
+                in_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+                out_tokens=int(usage.get("completion_tokens")
+                               or usage.get("output_tokens") or 0),
+                cache_hit_tokens=int(usage.get("cache_read_input_tokens")
+                                     or usage.get("prompt_cache_hit_tokens") or 0),
+                idem_key=f"admin:{sender}:{seq['n']}",
+                meta={"phase": "admin_chat"},
+            )
+
+        return hook
 
     def _tool_emitter(self, sender: str):
         """把"刚调用了哪个工具、成功没有"实时推给控制台（v0.10.51）。

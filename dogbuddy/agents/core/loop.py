@@ -230,6 +230,17 @@ class AgentLoop:
             self._note_usage(resp)
             cache = _cache_ints(resp)  # v0.10.43：气泡下的"缓存 x%"
 
+            # v0.11.0：成本账本。挂在**统一记账点**（每次 LLM 响应之后），
+            # 由调用方通过 ctx.extra["on_usage"] 注入 —— 与 on_tool 同构：
+            # 加在这里就不会漏掉子代理/群组步骤，也不必改每个工具。
+            # 钩子失败绝不影响本轮结果（记账是旁路）。
+            usage_hook = ctx.extra.get("on_usage")
+            if callable(usage_hook):
+                try:
+                    usage_hook(resp)
+                except Exception:  # noqa: BLE001
+                    logger.debug("on_usage hook failed", exc_info=True)
+
             if not resp.tool_calls:
                 result.content = resp.content or ""
                 self.session.append("assistant", result.content, tokens=tokens,

@@ -6,7 +6,7 @@
 <title>DogBuddyCn · 控制台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z' fill='%234f8cff'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/assets/css/base.css?v=5632697b6e">
-<link rel="stylesheet" href="/assets/css/views.css?v=171a93e00a">
+<link rel="stylesheet" href="/assets/css/views.css?v=2e64ac8589">
 </head>
 <body>
 
@@ -102,6 +102,7 @@
       <button class="nav-item" data-view="projects"><svg class="ic"><use href="#ic-folder"/></svg><span>项目</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="models"><svg class="ic"><use href="#ic-cpu"/></svg><span>模型</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="ledger"><svg class="ic"><use href="#ic-activity"/></svg><span>账本</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="costs"><svg class="ic"><use href="#ic-cpu"/></svg><span>成本</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="files"><svg class="ic"><use href="#ic-folder"/></svg><span>文件管理器</span><i class="nav-ind"></i></button>
       <div class="nav-group-label">运维</div>
       <button class="nav-item" data-view="logs"><svg class="ic"><use href="#ic-doc"/></svg><span>日志审计</span><i class="nav-ind"></i></button>
@@ -392,6 +393,22 @@
       </section>
 
       <!-- 用量账本 -->
+      <section class="view" id="view-costs">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">成本</h2>
+            <p class="card-sub">每一次 LLM 调用的钱 · 按工位 / 模型 / 天 · 单价可改（历史按当时价）</p>
+          </div>
+          <div class="toolbar-actions">
+            <button class="btn btn-soft btn-sm" id="cost-refresh"><svg class="ic"><use href="#ic-refresh"/></svg>刷新</button>
+            <button class="btn btn-ghost btn-sm" id="cost-seed" title="按模型目录的 cost 档位生成占位单价（不覆盖已有）">按目录生成占位价</button>
+          </div>
+        </div>
+        <div class="grid stat-grid" id="cost-stats"></div>
+        <div class="card"><div class="card-body" id="cost-windows"></div></div>
+        <div class="card" style="margin-top:12px"><div class="card-body" id="cost-models"></div></div>
+        <div class="hint" id="cost-hint" style="margin-top:8px"></div>
+      </section>
       <section class="view" id="view-ledger">
         <div class="toolbar">
           <div>
@@ -489,6 +506,6 @@
 <div id="toast-root" class="toast-root"></div>
 
 <!-- 页面只加载 bundle：源文件顺序见 tools/bundle-order.json，由 tools/rebuild-bundles.py 拼接 -->
-<script src="/assets/js/index.bundle.js?v=a6f257af3d"></script>
+<script src="/assets/js/index.bundle.js?v=6156baa0e3"></script>
 </body>
 </html>
