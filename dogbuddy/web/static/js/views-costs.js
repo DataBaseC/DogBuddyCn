@@ -8,7 +8,8 @@
   var U = global.UI, A = global.API;
   global.DogBuddyViews = global.DogBuddyViews || {};
 
-  var state = { days: 7, summary: {}, prices: [], budgets: [], loaded: false };
+  var state = { days: 7, summary: {}, prices: [], budgets: [], routes: [],
+                routesHealth: {}, loaded: false };
 
   function money(v) {
     var n = Number(v || 0);
@@ -124,6 +125,33 @@
           .catch(function (e) { U.toast('error', e.message); });
       });
     });
+  }
+
+  /* ---------------- v0.12.0 分级路由 ---------------- */
+  function renderRoutes() {
+    var host = U.$('#cost-routes');
+    if (!host) return;
+    var h = state.routesHealth || {};
+    var rows = (state.routes || []).map(function (r) {
+      var pf = Number(r.p_fail || 0);
+      var level = pf > 0.3 ? 'err' : (pf > 0.15 ? 'warn' : 'ok');
+      return '<tr><td class="mono">' + U.esc(r.task_class || 'default') + '</td>' +
+        '<td class="mono">' + U.esc(r.model || '') + '</td>' +
+        '<td>' + (r.attempts || 0) + '</td>' +
+        '<td>' + (r.failed || 0) + '</td>' +
+        '<td class="mono">' + (pf * 100).toFixed(1) + '%</td>' +
+        '<td>' + bar(pf, level) + '</td>' +
+        '<td>' + (r.escalated || 0) + '</td></tr>';
+    });
+    host.innerHTML = '<h3 class="card-title">模型分级路由 ' +
+      '<span class="card-sub">（便宜的先跑；同端点 + 样本 ≥ ' +
+      U.esc(String(h.min_samples || 100)) + ' 才做升级判断）</span></h3>' +
+      (rows.length
+        ? '<table class="table"><thead><tr><th>任务类型</th><th>模型</th><th>尝试</th>' +
+          '<th>失败</th><th>p_fail</th><th></th><th>被升级</th></tr></thead><tbody>' +
+          rows.join('') + '</tbody></table>'
+        : '<p class="muted">还没有路由样本 —— 只有"被路由换过模型"的轮次才会计数' +
+          '（共 ' + (h.attempts || 0) + ' 次）。</p>');
   }
 
   function editBudget(id) {
@@ -251,6 +279,11 @@
       state.budgets = (r && r.budgets) || [];
       renderBudgets();
     }).catch(function () { /* 预算表失败也不拦页面 */ });
+    A.costs.routes().then(function (r) {
+      state.routes = (r && r.stats) || [];
+      state.routesHealth = (r && r.health) || {};
+      renderRoutes();
+    }).catch(function () { /* 路由是增强项，挂了不影响其他 */ });
   }
 
   function seed() {

@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -439,6 +439,34 @@ def _migrate_v16(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v17(conn: sqlite3.Connection) -> None:
+    """模型分级路由的样本台账（2026-10-25，0.12.0）。
+
+    级联决策要回答"**这个模型在这个任务类型上失败过几次**"，而现有数据给不出：
+    `usage_ledger` 只有用量（没有成败），`runs` 有状态但没记"当时用的哪个模型"
+    （窗口的模型会被改）。所以单独记一张小表，按 `任务类型 × 模型` 聚合：
+
+      * `attempts / ok / failed` —— 算成功率，Beta 平滑后当 `p_fail`
+      * `escalated` —— 降档后翻车、被迫升级的次数（判断"省这点钱值不值"）
+
+    刻意**不存逐次明细**（那是账本的事），只存聚合计数——否则又是一张无限长的表。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS model_route_stats(
+      id TEXT PRIMARY KEY,
+      task_class TEXT DEFAULT '',
+      model TEXT DEFAULT '',
+      attempts INTEGER DEFAULT 0,
+      ok INTEGER DEFAULT 0,
+      failed INTEGER DEFAULT 0,
+      escalated INTEGER DEFAULT 0,
+      last_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_route_class ON model_route_stats(task_class);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -459,6 +487,7 @@ _MIGRATIONS: dict[int, Any] = {
     14: _migrate_v14,
     15: _migrate_v15,
     16: _migrate_v16,
+    17: _migrate_v17,
 }
 
 
@@ -1861,6 +1890,35 @@ class Database:
             row = self._conn.execute(q, args).fetchone()
         return dict(row) if row else {"calls": 0, "amount": 0.0,
                                       "in_tokens": 0, "out_tokens": 0}
+
+    def list_route_stats(self) -> list[dict[str, Any]]:
+        """按 `任务类型 × 模型` 聚合的路由样本（0.12.0）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM model_route_stats ORDER BY task_class, model").fetchall()
+        return [dict(r) for r in rows]
+
+    def bump_route_stat(self, task_class: str, model: str, *,
+                        ok: bool = True, escalated: bool = False) -> dict[str, Any]:
+        """记一次路由结果。聚合计数，不存逐次明细。"""
+        rid = f"{task_class or 'default'}|{model or ''}"
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO model_route_stats
+                     (id, task_class, model, attempts, ok, failed, escalated, last_at)
+                   VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     attempts = attempts + 1,
+                     ok = ok + excluded.ok,
+                     failed = failed + excluded.failed,
+                     escalated = escalated + excluded.escalated,
+                     last_at = excluded.last_at""",
+                (rid, task_class or "default", model or "",
+                 1 if ok else 0, 0 if ok else 1,
+                 1 if escalated else 0, now))
+            self._conn.commit()
+        return {"id": rid, "ok": ok, "escalated": escalated}
 
     def list_budgets(self) -> list[dict[str, Any]]:
         with self._lock:

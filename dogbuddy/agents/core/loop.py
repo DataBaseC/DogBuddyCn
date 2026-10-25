@@ -188,6 +188,21 @@ class AgentLoop:
         self._audit_budget(ctx, "cost:paused", decision)
         logger.warning("budget pause: %s", msg)
 
+    @staticmethod
+    def _audit_route(ctx: ToolContext, decision: dict[str, Any]) -> None:
+        """路由切换写审计 —— "为什么这次用了便宜模型"必须可查。"""
+        try:
+            db = getattr(ctx, "db", None)
+            if db is None:
+                return
+            db.audit("system", "cost:route",
+                     f"{decision.get('from') or '?'} -> {decision.get('model')} "
+                     f"action={decision.get('action')} "
+                     f"p_fail={decision.get('p_fail')} samples={decision.get('samples')} "
+                     f"reason={decision.get('reason')}")
+        except Exception:  # noqa: BLE001
+            logger.debug("route audit failed", exc_info=True)
+
     # ------------------------------------------------------------------ run
     async def run(self, user_input: str, ctx: ToolContext,
                   on_delta: Callable[[str], None] | None = None) -> AgentResult:
@@ -204,6 +219,8 @@ class AgentLoop:
 
         #: v0.11.1：本轮是否已经降过档（一个 run 只降一次，避免在便宜档和贵档之间来回跳）
         budget_downgraded = False
+        #: v0.12.0：本轮是否被"分级路由"换过模型（切模型会改缓存前缀，只切一次）
+        route_applied: dict[str, Any] | None = None
 
         for step in range(1, self.max_iterations + 1):
             result.iterations = step
@@ -236,6 +253,33 @@ class AgentLoop:
                 if not (decision.get("action") == "downgrade" and budget_downgraded):
                     self._pause_for_budget(ctx, result, decision)
                     break
+            # ---------------- v0.12.0 模型分级路由 ----------------
+            # 只在**本轮第一次**调模型前决策一次：切模型会重写上下文前缀（缓存全废），
+            # 中途切换纯亏。`router` 由服务层注入（同端点/样本/预算都在它里面判）。
+            if step == 1 and route_applied is None:
+                router = ctx.extra.get("router")
+                if callable(router):
+                    # 当前模型只有客户端自己知道（工位/管理员的 llm 在 runner 里建），
+                    # 所以把 `model_name` 传给 router，而不是让它去猜。
+                    cur = str(getattr(self.llm, "model_name", "") or "")
+                    try:
+                        rd = router(cur) or {}
+                    except Exception:  # noqa: BLE001 — 路由算错不能拦住正常任务
+                        logger.debug("router failed", exc_info=True)
+                        rd = {}
+                    target = str(rd.get("model") or "")
+                    if (rd.get("action") in ("downroute", "uproute") and target
+                            and target != cur and hasattr(self.llm, "set_model")):
+                        try:
+                            self.llm.set_model(target)
+                            route_applied = {**rd, "from": cur}
+                            self.session.append(
+                                "system", f"[模型路由] {cur or '?'} → {target}："
+                                          f"{rd.get('reason') or ''}")
+                            self._audit_route(ctx, route_applied)
+                        except Exception:  # noqa: BLE001
+                            logger.warning("route apply failed", exc_info=True)
+                            route_applied = None
             # v0.10.46（owner："显示的缓存命中率比较低，请排查"）：**运行中也要压缩**。
             # 以前只在 run 结束之后压一次；一次工具密集的运行里消息数会从 48 冲到
             # 60+，而 `ContextBuilder` 只取 `recent(60)` —— 窗口中途滑动 → 请求的
@@ -346,6 +390,15 @@ class AgentLoop:
                 await self.compactor.maybe_compact(self.session)
             except Exception:  # noqa: BLE001
                 logger.warning("compaction failed", exc_info=True)
+        # v0.12.0：把这次的结果记进路由样本（只记"路由过的那一档 + 成败"）。
+        # 成功 = stop_reason==done；暂停/限速不算失败（那是环境，不是模型不行）。
+        recorder = ctx.extra.get("route_record")
+        if callable(recorder) and route_applied is not None:
+            try:
+                ok = result.stop_reason in ("done",)
+                recorder(ok, str(route_applied.get("model") or ""), True)
+            except Exception:  # noqa: BLE001
+                logger.debug("route record failed", exc_info=True)
         return result
 
     # ------------------------------------------------------- C1 瞬态续跑

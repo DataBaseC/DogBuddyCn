@@ -79,6 +79,17 @@ def router(svc, auth_deps) -> APIRouter:
         catalog = models.catalog() if models is not None else []
         return _cost().seed_from_models(catalog)
 
+    @r.get("/costs/routes", dependencies=auth_deps)
+    def list_routes() -> dict:
+        """模型分级路由的样本与健康度（v0.12.0）。
+
+        路由服务没装配（老库/测试）时返回空表而不是 500 —— 成本页要能整体打开。
+        """
+        routing = getattr(svc, "routing", None)
+        if routing is None:
+            return {"stats": [], "health": None}
+        return {"stats": routing.stats(), "health": routing.health()}
+
     @r.get("/costs/budgets", dependencies=auth_deps)
     def list_budgets() -> dict:
         """预算列表 + 实时用量（spent/ratio/level 由账本现算，不另存计数）。"""
