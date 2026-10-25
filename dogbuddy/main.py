@@ -38,6 +38,7 @@ from .services.report_service import ReportService
 from .services.backup_service import BackupService
 from .services.cost_service import CostService
 from .services.pipeline_service import PipelineService
+from .services.qc_service import QcService
 from .services.routing_service import RoutingService
 from .services.decisions import DecisionService
 from .services.group_manager import GroupManager
@@ -155,8 +156,10 @@ class DogBuddyApp:
 
         # v0.12.1：流水线编排（步骤级 checkpoint / 幂等续跑）。
         # `dispatch` 直接用工位的 `dispatch_and_wait` —— 引擎不重复造派活通道。
+        self.qc = QcService(self.db)
         self.pipelines = PipelineService(
             self.db,
+            qc=self.qc,
             dispatch=self.windows.dispatch_and_wait,
             workspace_root=str(getattr(config.paths, "workspaces_dir",
                                        "/var/lib/dogbuddy/workspaces")))
@@ -278,6 +281,8 @@ class DogBuddyApp:
             routing=self.routing,
             # v0.12.1：流水线（/api/pipelines 与 /healthz.pipelines）
             pipelines=self.pipelines,
+            # v0.12.2：抽检（/api/qc/* 与 /healthz.qc）
+            qc=self.qc,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)

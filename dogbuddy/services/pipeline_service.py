@@ -47,10 +47,11 @@ class PipelineError(ValueError):
 
 class PipelineService:
     #: 可用的步骤动作。新增动作要同时改 `_run_step`（否则跑到就报错）。
-    ACTIONS = ("noop", "write_file", "window_run", "cv_detect", "sensor_read")
+    ACTIONS = ("noop", "write_file", "window_run", "cv_detect", "sensor_read",
+               "qc_plan")
 
     def __init__(self, db: Any, *, dispatch: Callable[..., Any] | None = None,
-                 cv: Any = None, sensors: Any = None,
+                 cv: Any = None, sensors: Any = None, qc: Any = None,
                  workspace_root: str = "") -> None:
         self.db = db
         #: async (window_id, prompt) -> str；由 main 注入 WindowManager.dispatch_and_wait
@@ -58,6 +59,8 @@ class PipelineService:
         #: 0.13.0 才装配：本地视觉服务适配器 / 传感器读取器
         self.cv = cv
         self.sensors = sensors
+        #: 0.12.2：抽检策略（qc_plan 步骤用）
+        self.qc = qc
         self.workspace_root = Path(workspace_root or ".").resolve()
 
     # ------------------------------------------------------------- 定义
@@ -306,6 +309,23 @@ class PipelineService:
             if self.sensors is None:
                 raise RuntimeError("sensor_read 未装配传感器（0.13.0 提供）")
             return await self.sensors.read(params, payload)
+        if action == "qc_plan":
+            if self.qc is None:
+                raise RuntimeError("qc_plan 未装配抽检服务（0.12.2 提供）")
+            plan = self.qc.plan(
+                int(params.get("batch_size") or params.get("total") or 1),
+                risk_prior=float(params.get("risk_prior", 0.02)),
+                target_miss=float(params.get("target_miss", 0.05)),
+                cost_per_item=float(params.get("cost_per_item", 0.02)),
+                budget=float(params.get("budget", 0.5)),
+                max_ratio=float(params.get("max_ratio", 0.2)))
+            if params.get("open_batch"):
+                row = self.qc.open_batch(
+                    total=int(plan["batch"]), sampled=int(plan["sample"]),
+                    line=str(params.get("line") or ""), pipeline_run_id=run_id,
+                    policy=plan["policy"], cost_estimate=float(plan["cost"]))
+                plan["batch_id"] = row.get("id")
+            return plan
         raise RuntimeError(f"未知 action：{action}")
 
     def _write_file(self, params: dict[str, Any]) -> dict[str, Any]:

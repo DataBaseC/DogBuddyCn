@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -508,6 +508,40 @@ def _migrate_v18(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v19(conn: sqlite3.Connection) -> None:
+    """抽检与复核（2026-10-25，0.12.2）。
+
+    "检测成本智能调度"的落点：**不是每件都花大钱复判，而是按风险与预算抽样**，
+    再用真实漏检反馈修正下一批。要能算，就得把"批"和"复核结论"记下来。
+
+      * `qc_batches`  一个批次：总量、抽样数、发现缺陷、漏检估计、策略
+      * `qc_reviews`  抽样样本的复核结论（逐条，用于回流与算准确率）
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS qc_batches(
+      id TEXT PRIMARY KEY,
+      pipeline_run_id TEXT DEFAULT '', line TEXT DEFAULT '',
+      total INTEGER DEFAULT 0, sampled INTEGER DEFAULT 0,
+      defects_found INTEGER DEFAULT 0,
+      defect_rate REAL DEFAULT 0, miss_estimate REAL DEFAULT 0,
+      cost_estimate REAL DEFAULT 0, policy_json TEXT DEFAULT '',
+      status TEXT DEFAULT 'open',
+      created_at TEXT DEFAULT '', closed_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_qc_created ON qc_batches(created_at);
+
+    CREATE TABLE IF NOT EXISTS qc_reviews(
+      id TEXT PRIMARY KEY,
+      batch_id TEXT DEFAULT '', item_ref TEXT DEFAULT '',
+      model_label TEXT DEFAULT '', confidence REAL DEFAULT 0,
+      reviewer TEXT DEFAULT '', verdict TEXT DEFAULT '',
+      created_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_qc_rev_batch ON qc_reviews(batch_id);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -530,6 +564,7 @@ _MIGRATIONS: dict[int, Any] = {
     16: _migrate_v16,
     17: _migrate_v17,
     18: _migrate_v18,
+    19: _migrate_v19,
 }
 
 
@@ -1932,6 +1967,76 @@ class Database:
             row = self._conn.execute(q, args).fetchone()
         return dict(row) if row else {"calls": 0, "amount": 0.0,
                                       "in_tokens": 0, "out_tokens": 0}
+
+    # ------------------------------------------------- 抽检（0.12.2）
+    def create_qc_batch(self, row: dict[str, Any]) -> dict[str, Any]:
+        bid = str(row.get("id") or "")
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO qc_batches(id, pipeline_run_id, line, total, sampled,
+                                          defects_found, defect_rate, miss_estimate,
+                                          cost_estimate, policy_json, status,
+                                          created_at, closed_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (bid, row.get("pipeline_run_id") or "", row.get("line") or "",
+                 int(row.get("total") or 0), int(row.get("sampled") or 0),
+                 int(row.get("defects_found") or 0),
+                 float(row.get("defect_rate") or 0), float(row.get("miss_estimate") or 0),
+                 float(row.get("cost_estimate") or 0), row.get("policy_json") or "",
+                 row.get("status") or "open",
+                 row.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                 row.get("closed_at") or ""))
+            self._conn.commit()
+        return self.get_qc_batch(bid) or {}
+
+    def get_qc_batch(self, bid: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM qc_batches WHERE id=?",
+                                     (str(bid),)).fetchone()
+        return dict(row) if row else None
+
+    def list_qc_batches(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM qc_batches ORDER BY created_at DESC LIMIT ?",
+                (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_qc_batch(self, bid: str, **fields: Any) -> None:
+        allowed = ("sampled", "defects_found", "defect_rate", "miss_estimate",
+                   "cost_estimate", "status", "closed_at")
+        sets, args = [], []
+        for k in allowed:
+            if k in fields:
+                sets.append(f"{k}=?")
+                args.append(fields[k])
+        if not sets:
+            return
+        args.append(str(bid))
+        with self._lock:
+            self._conn.execute(f"UPDATE qc_batches SET {', '.join(sets)} WHERE id=?", args)
+            self._conn.commit()
+
+    def add_qc_review(self, row: dict[str, Any]) -> dict[str, Any]:
+        rid = str(row.get("id") or "")
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO qc_reviews(id, batch_id, item_ref, model_label,
+                                          confidence, reviewer, verdict, created_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (rid, row.get("batch_id") or "", row.get("item_ref") or "",
+                 row.get("model_label") or "", float(row.get("confidence") or 0),
+                 row.get("reviewer") or "", row.get("verdict") or "",
+                 row.get("created_at") or datetime.now(timezone.utc).isoformat()))
+            self._conn.commit()
+        return row
+
+    def list_qc_reviews(self, batch_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM qc_reviews WHERE batch_id=? ORDER BY created_at",
+                (str(batch_id),)).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------- 流水线（0.12.1）
     def upsert_pipeline(self, row: dict[str, Any]) -> dict[str, Any]:

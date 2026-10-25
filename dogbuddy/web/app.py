@@ -36,6 +36,7 @@ from .routes import jobs as jobs_routes
 from .routes import logs as logs_routes
 from .routes import models as models_routes
 from .routes import pipelines as pipelines_routes
+from .routes import qc as qc_routes
 from .routes import projects as projects_routes
 from .routes import settings as settings_routes
 from .routes import windows as windows_routes
@@ -85,6 +86,8 @@ class WebServices:
         self.routing = kw.get("routing")
         #: v0.12.1：流水线引擎（`/api/pipelines`、`/healthz.pipelines`）
         self.pipelines = kw.get("pipelines")
+        #: v0.12.2：抽检服务（`/api/qc/*`、`/healthz.qc`）
+        self.qc = kw.get("qc")
         self.models = kw.get("models")
         self.iterations = kw.get("iterations")
         self.iteration_exec = kw.get("iteration_exec")
@@ -141,6 +144,8 @@ def create_app(svc: WebServices) -> FastAPI:
             # v0.12.1：流水线（"有没有卡住/失败"要一眼看到）
             "pipelines": (svc.pipelines.health()
                           if getattr(svc, "pipelines", None) else None),
+            # v0.12.2：抽检（缺陷率/漏检估计是工业线的核心指标）
+            "qc": (svc.qc.health() if getattr(svc, "qc", None) else None),
         }
 
     @app.get("/api/version")
@@ -195,6 +200,8 @@ def create_app(svc: WebServices) -> FastAPI:
     app.include_router(runs_routes.router(svc, auth_deps), prefix="/api")
     # v0.12.1：流水线编排（定义/起跑/状态/续跑）
     app.include_router(pipelines_routes.router(svc, auth_deps), prefix="/api")
+    # v0.12.2：抽检与复核
+    app.include_router(qc_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(settings_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(logs_routes.router(svc, auth_deps), prefix="/api")
 
