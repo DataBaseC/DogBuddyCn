@@ -40,6 +40,11 @@ def svc(tmp_path):
                           "in_price": 0.02, "out_price": 0.08, "enabled": 1})
     db.upsert_cost_model({"id": "p:m-low", "provider": "p", "model": "m-low",
                           "in_price": 0.002, "out_price": 0.004, "enabled": 1})
+    # 目录（降档必须同端点：跨端点 = 换供应商/换 key，调用会 401/404）
+    db.upsert_model({"id": "p_m-high", "provider": "p", "model": "m-high",
+                     "base_url": "https://api.same.example.com/v1", "enabled": 1})
+    db.upsert_model({"id": "p_m-low", "provider": "p", "model": "m-low",
+                     "base_url": "https://api.same.example.com/v1", "enabled": 1})
     yield cost, db
     db.close()
 
@@ -94,6 +99,20 @@ def test_downgrade_picks_cheaper_model(svc):
     st2 = cost.budget_state(current_model="m-low")
     assert st2["suggest_model"] == ""
     assert "暂停" in st2["reason"]
+
+
+def test_downgrade_never_crosses_endpoint(svc):
+    """更便宜但在**别的端点**上的模型不许当降档目标 —— 那等于换供应商。"""
+    cost, db = svc
+    db.upsert_cost_model({"id": "other:cheap", "provider": "other", "model": "cheap-x",
+                          "in_price": 0.0001, "out_price": 0.0002, "enabled": 1})
+    db.upsert_model({"id": "other_cheap-x", "provider": "other", "model": "cheap-x",
+                     "base_url": "https://api.other.example.com/v1", "enabled": 1})
+    assert cost.cheaper_model("m-high") == "m-low", "同端点的便宜档才是合法目标"
+    # 把同端点的便宜档下线 → 只剩跨端点那个 → 必须回空（按暂停处理）
+    db.upsert_cost_model({"id": "p:m-low", "model": "m-low", "enabled": 0,
+                          "in_price": 0.002, "out_price": 0.004})
+    assert cost.cheaper_model("m-high") == ""
 
 
 def test_budget_validation(tmp_path):
