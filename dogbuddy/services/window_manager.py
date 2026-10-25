@@ -417,13 +417,15 @@ class WindowManager:
         default_model = str(model or "")
         seq = {"n": 0}
 
-        def hook(resp: Any) -> None:
+        def hook(resp: Any, llm: Any = None) -> None:
             seq["n"] += 1
             usage = getattr(resp, "usage", None) or {}
+            model = (str(getattr(llm, "model_name", "") or "")
+                     or str(getattr(resp, "model", "") or "") or default_model)
             cost.record(
                 run_id=run_id, window_id=wid, kind="llm",
                 provider=str(getattr(resp, "provider", "") or ""),
-                model=str(getattr(resp, "model", "") or default_model),
+                model=model,
                 in_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
                 out_tokens=int(usage.get("completion_tokens")
                                or usage.get("output_tokens") or 0),

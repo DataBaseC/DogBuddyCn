@@ -111,6 +111,11 @@ def test_loop_and_compactor_have_usage_hooks():
     adm = (REPO / "dogbuddy/services/admin_service.py").read_text(encoding="utf-8")
     wm = (REPO / "dogbuddy/services/window_manager.py").read_text(encoding="utf-8")
     assert 'ctx.extra.get("on_usage")' in loop
+    # 钩子必须拿到 llm（只有客户端知道 model_name；0.11.0 首跑就是这里漏了，
+    # tokens 记上了但金额是 0）
+    assert "usage_hook(resp, self.llm)" in loop
+    assert 'getattr(llm, "model_name", "")' in adm
+    assert 'getattr(llm, "model_name", "")' in wm
     assert "self.cost.record(" in comp
     assert '"on_usage": self._usage_hook(sender)' in adm
     assert '"on_usage": self._usage_hook(w, run_id, model)' in wm

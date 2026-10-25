@@ -237,7 +237,9 @@ class AgentLoop:
             usage_hook = ctx.extra.get("on_usage")
             if callable(usage_hook):
                 try:
-                    usage_hook(resp)
+                    # 把 llm 一并给钩子：只有客户端自己知道跑的是哪个模型
+                    # （`model_name`），调用方（管理员/工位）未必拿得到。
+                    usage_hook(resp, self.llm)
                 except Exception:  # noqa: BLE001
                     logger.debug("on_usage hook failed", exc_info=True)
 

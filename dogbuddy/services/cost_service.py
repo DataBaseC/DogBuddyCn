@@ -167,6 +167,11 @@ class CostService:
         stored = self.db.record_usage(row)
         if stored and amount:
             logger.debug("cost +%.6f %s/%s (%s)", amount, provider, model, kind)
+        # 不静默：记了 token 却算不出钱，说明单价表没覆盖这个模型 —— 必须吵一声，
+        # 否则成本页会一直显示 0，看着像"免费"。
+        if stored and not amount and (in_tokens or out_tokens or images):
+            logger.warning("cost: 未匹配单价，本次金额记 0（model=%r provider=%r）"
+                           "——去「成本」页补这条单价", model, provider)
         return {"stored": stored, "amount": amount, "unit_price": unit_price}
 
     # ------------------------------------------------------------- 查询
