@@ -7,10 +7,22 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+
+class ModelJsonImportIn(BaseModel):
+    """粘贴导入的入参（v0.10.57）。
+
+    `text` 是给人用的：整段 JSON 原样贴进来即可（可以是导出文件本身，也可以只是
+    一个数组）；`models` 是给程序用的。两者都给时以 `models` 为准。
+    """
+    mode: str = "merge"                     # merge（默认，安全）| replace（删清单外条目）
+    text: str | None = None
+    models: list[dict[str, Any]] | None = None
 
 
 class ModelIn(BaseModel):
@@ -68,6 +80,36 @@ def router(svc, auth_deps) -> APIRouter:
         return {"models": m.catalog(enabled_only=enabled_only),
                 "current": m.current(),
                 "summary": m.summary()}
+
+    @r.get("/models/export", dependencies=auth_deps)
+    def export_models() -> dict:
+        """导出模型目录为可粘贴的 JSON。**不含任何明文密钥**（服务层白名单保证）。"""
+        return _m().export_models()
+
+    @r.post("/models/import-json", dependencies=auth_deps)
+    def import_models_json(body: ModelJsonImportIn) -> dict:
+        """粘贴导入（支持 `text` 原样粘 JSON，或直接给 `models` 数组）。
+
+        与已有的 `POST /models/import`（从服务商**拉取**列表）是两件事，路径分开。
+        """
+        models = body.models
+        if not models and body.text:
+            try:
+                parsed = json.loads(body.text)
+            except Exception as e:  # noqa: BLE001 — 粘错格式要给人看得懂的报错
+                raise HTTPException(status_code=400, detail=f"JSON 解析失败：{e}") from e
+            if isinstance(parsed, dict):
+                models = parsed.get("models") or []
+            elif isinstance(parsed, list):
+                models = parsed
+            else:
+                raise HTTPException(status_code=400, detail="JSON 里没有 models 数组")
+        if not models:
+            raise HTTPException(status_code=400, detail="没有可导入的模型（models 为空）")
+        try:
+            return _m().import_models(list(models), mode=body.mode)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     @r.get("/models/options", dependencies=auth_deps)
     def options() -> dict:

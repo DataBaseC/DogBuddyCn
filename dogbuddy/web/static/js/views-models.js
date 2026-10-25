@@ -508,6 +508,85 @@
     }
   }
 
+  /* ---------------- v0.10.57 导出 / 粘贴导入 ----------------
+     owner：换环境不想一条条手填，导出一次、下次粘回去。
+     **导出物里没有明文密钥**：只有 `has_api_key`（配没配）和 `api_key_ref`（若原来是
+     env 引用，给变量名）。所以这份 JSON 可以贴进聊天/工单/笔记，不担心泄露。 */
+  function exportJson() {
+    A.models.exportJson().then(function (data) {
+      var text = JSON.stringify(data, null, 2);
+      var copied = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text);
+          copied = true;
+        }
+      } catch (e) { /* 剪贴板不可用就走下载 */ }
+      try {
+        var blob = new Blob([text], { type: 'application/json' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'dogbuddy-models-' + new Date().toISOString().slice(0, 10) + '.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+      } catch (e2) { /* 下载失败也不影响复制 */ }
+      U.toast('success', '已导出 ' + ((data && data.models) || []).length +
+        ' 个模型（不含密钥）' + (copied ? '，已复制到剪贴板' : '，已下载文件'), 6000);
+    }).catch(function (e) { U.toast('error', e.message); });
+  }
+
+  function importJson() {
+    U.modal({
+      title: '粘贴导入模型',
+      wide: true,
+      body: '<div class="card-sub" style="margin-bottom:10px">' +
+        '把上次导出的 JSON <b>整段粘进来</b>（也接受纯数组）。' +
+        '<b>不含密钥</b>的条目会保留库里已有的密钥；带 <code>api_key_ref: "env:XXX"</code>' +
+        ' 的会从服务器环境变量取值（取不到只告警，不动旧密钥）。</div>' +
+        '<div class="field"><span class="field-label">JSON 文本</span>' +
+        '<textarea class="input mono" id="mdl-j-text" rows="12" ' +
+        'placeholder=\'{"models":[{"provider":"openai_compat","model":"deepseek-chat"}]}\'></textarea></div>' +
+        '<div class="field"><span class="field-label">模式</span>' +
+        '<select class="select" id="mdl-j-mode">' +
+        '<option value="merge">合并（推荐）：只增改，不动清单外的条目</option>' +
+        '<option value="replace">覆盖：删除清单外的所有条目（谨慎）</option>' +
+        '</select></div>' +
+        '<div class="hint">导入会写审计（只记数量，不记密钥）。</div>',
+      buttons: [
+        { label: '取消', cls: 'btn-ghost' },
+        {
+          label: '导入', cls: 'btn-primary',
+          onClick: function (body) {
+            var text = (body.querySelector('#mdl-j-text').value || '').trim();
+            var mode = body.querySelector('#mdl-j-mode').value;
+            if (!text) { U.toast('warn', '先把 JSON 粘进来'); return false; }
+            try { JSON.parse(text); } catch (e) {
+              U.toast('error', 'JSON 格式不对：' + e.message);
+              return false;
+            }
+            if (mode === 'replace' && !window.confirm('覆盖模式会删除清单外的所有模型条目，确定？')) {
+              return false;
+            }
+            A.models.importJson(text, mode).then(function (r) {
+              r = r || {};
+              var msg = '导入完成：新增 ' + (r.created || 0) + '，更新 ' + (r.updated || 0) +
+                (r.skipped ? '，删除 ' + r.skipped : '') +
+                (r.need_key ? '；' + r.need_key + ' 条还没配密钥' : '');
+              U.toast('success', msg, 6000);
+              (r.warnings || []).forEach(function (w) { U.toast('warn', w, 8000); });
+              (r.errors || []).forEach(function (w) { U.toast('error', w, 8000); });
+              load();
+              return true;
+            }).catch(function (e) { U.toast('error', e.message); return false; });
+          }
+        }
+      ]
+    });
+  }
+
   function importModels() {
     /* v0.10.21：拉取**过多**是真的（SiliconFlow 一次回 99 条），而且留空会静默
        拿"当前/全局 key"去拉 —— 于是"顺手把默认 key 那家的模型也拉进来了"。
@@ -644,6 +723,9 @@
     var imp = U.$('#mdl-import'); if (imp) imp.addEventListener('click', importModels);
     var add = U.$('#mdl-add'); if (add) add.addEventListener('click', function () { editModel(null); });
     var rf = U.$('#mdl-refresh'); if (rf) rf.addEventListener('click', load);
+    /* v0.10.57：导出/粘贴导入（给 owner 换机器、换环境用） */
+    var ex = U.$('#mdl-export'); if (ex) ex.addEventListener('click', exportJson);
+    var ij = U.$('#mdl-import-json'); if (ij) ij.addEventListener('click', importJson);
     var kw = U.$('#mdl-search');
     if (kw) kw.addEventListener('input', U.debounce(function () {
       state.keyword = kw.value; render();

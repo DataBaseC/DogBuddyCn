@@ -379,6 +379,9 @@
             </div>
             <label class="mdl-check"><input type="checkbox" id="mdl-only-enabled">只看启用</label>
             <button class="btn btn-soft btn-sm" id="mdl-refresh"><svg class="ic"><use href="#ic-refresh"/></svg>刷新</button>
+            <!-- v0.10.57：导出/粘贴导入（导出不含密钥，只有"配没配"） -->
+            <button class="btn btn-ghost btn-sm" id="mdl-export" title="导出为可粘贴的 JSON（不含密钥）"><svg class="ic"><use href="#ic-download"/></svg>导出 JSON</button>
+            <button class="btn btn-ghost btn-sm" id="mdl-import-json" title="粘贴上次导出的 JSON 导入"><svg class="ic"><use href="#ic-upload"/></svg>粘贴导入</button>
             <button class="btn btn-soft btn-sm" id="mdl-import"><svg class="ic"><use href="#ic-download"/></svg>拉取模型</button>
             <button class="btn btn-primary btn-sm" id="mdl-add"><svg class="ic"><use href="#ic-plus"/></svg>新增模型</button>
           </div>
@@ -486,6 +489,6 @@
 <div id="toast-root" class="toast-root"></div>
 
 <!-- 页面只加载 bundle：源文件顺序见 tools/bundle-order.json，由 tools/rebuild-bundles.py 拼接 -->
-<script src="/assets/js/index.bundle.js?v=84be346ec1"></script>
+<script src="/assets/js/index.bundle.js?v=a6f257af3d"></script>
 </body>
 </html>

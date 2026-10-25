@@ -1998,3 +1998,22 @@ checkpoint/dispatch/schedule）与工具箱零交集，且工具箱**恰好**等
 
 基线：**835 passed / 4 skipped**（新增 5 条纯聊天角色回归）。
 
+---
+
+## 49. 第四十二轮：模型目录导出 / 粘贴导入（2026-10-25，`0.10.57`）
+
+owner：「加一个可以将模型列表导出的功能，这样下次导入可以直接粘贴 json 文本。**注意保护密钥**。」
+
+| 能力 | 接口 | 关键约束 |
+|---|---|---|
+| 导出 | `GET /api/models/export` | 字段**白名单**（provider/model/base_url/display_name/note/capability/context_window/speed/cost/enabled/source）+ `has_api_key`；**绝不出现明文密钥**；若库里存的是 `env:VAR`/`${VAR}` 只导出**变量名** |
+| 导入 | `POST /api/models/import-json {text, mode}` | 直接收整段 JSON（也接受裸数组）；`mode=merge`（默认，安全）/`replace`（删清单外条目，前端二次确认）；密钥三来源：明文 / `api_key_ref: env:VAR`（取不到只告警）/ 掩码（= 不改） |
+| 控制台 | 「导出 JSON」= 复制到剪贴板 + 下载文件；「粘贴导入」= textarea + 预览校验 + 模式选择 | 按钮文案直接写「不含密钥」 |
+
+**踩到一个真坑（值得记）**：`upsert()` 的条目身份 = **模型名 + 端点 + 密钥指纹**（0.10.23 为了支持"同端点两把 key 各存一条"）。而导出的 JSON **不带密钥** → 直接 upsert 会算出"新身份"，凭空多一条重复条目（第一次实现就是这样，测试里 `updated=0, created=1` 抓到了）。
+所以导入前先 `_match_import_target()`：按"模型名 + 端点"放宽匹配，给了密钥就优先指纹相同的那条，只剩一条就用它，多条无法区分就挑唯一"没配 key"的，否则判歧义不写。**这样"导出的 JSON 原样导回去"不会冲掉密钥、也不会产生重复条目。**
+
+密钥掩码口径沿用 `config.mask_secret`（`********3456`）；前端回传掩码 = "不改密钥"。审计只记 `mode/in/upd/del/need_key` 数量，不记密钥。
+
+基线：**846 passed / 4 skipped**（新增 11 条：导出零明文、roundtrip 保留密钥、掩码不改、env 解析与缺失告警、新条目统计、replace 语义、空清单拒绝、审计不泄密、前端两个入口与二次确认）。
+
