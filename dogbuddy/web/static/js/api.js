@@ -221,6 +221,12 @@
       },
       /* GET /api/models/options → {capabilities:[], speeds:[], costs:[]} */
       options: function () { return request('GET', '/api/models/options'); },
+      /* v0.10.57：导出（**不含密钥**，只给 has_api_key / env 引用名） */
+      exportJson: function () { return request('GET', '/api/models/export'); },
+      /* POST /api/models/import-json {text, mode} —— 粘贴导入（merge|replace） */
+      importJson: function (text, mode) {
+        return request('POST', '/api/models/import-json', { text: text, mode: mode || 'merge' });
+      },
       /* POST /api/models {model,provider,base_url,display_name,note,capability,
          context_window,speed,cost} → {model, models:[...]} */
       create: function (body) { return request('POST', '/api/models', body); },

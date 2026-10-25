@@ -17,13 +17,20 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from ..config import SECRET_MASK, is_masked_secret, mask_secret
 
 logger = logging.getLogger("dogbuddy.services.models")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 # 备注里的可选能力标签（前端做成多选 chip）
 CAPABILITY_TAGS = ("工具调用", "推理", "代码", "长上下文", "中文强", "多模态", "快", "便宜")
@@ -377,6 +384,170 @@ class ModelService:
         return cand, (f"同名条目已有别的身份（端点 "
                       f"{endpoint_of(ref.get('base_url') or '') or '—'}，密钥 "
                       f"…{key_signature(ref.get('api_key') or '') or '全局'}）→ 本条另存为 {cand}")
+
+    # ------------------------------------------------- 导出 / 粘贴导入（v0.10.57）
+    #: 导出**只带这些字段**（白名单，不是黑名单）——新增字段默认不外泄。
+    #: 密钥永远不在其中：只给 `has_api_key`；若库里存的是 `env:VAR` / `${VAR}`
+    #: 这种引用形式，额外给 `api_key_ref`（名字，不是值）。
+    _EXPORT_FIELDS = ("provider", "model", "base_url", "display_name", "note",
+                      "capability", "context_window", "speed", "cost",
+                      "enabled", "source")
+    #: 两种引用写法：`env:NAME` 与 `${NAME}` / `$NAME`（导出只给名字，永不给值）
+    _REF_ENV_RX = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
+    _REF_DOLLAR_RX = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
+
+    @classmethod
+    def _ref_name(cls, raw: str) -> str:
+        """`env:FOO` / `${FOO}` / `$FOO` → `FOO`；不是引用 → 空串。"""
+        text = str(raw or "").strip()
+        m = cls._REF_ENV_RX.match(text) or cls._REF_DOLLAR_RX.match(text)
+        return m.group(1) if m else ""
+
+    @classmethod
+    def _env_ref(cls, raw: str) -> str:
+        """库里存的是不是环境变量引用？是就返回 `env:NAME`（**只有名字**）。"""
+        name = cls._ref_name(raw)
+        return f"env:{name}" if name else ""
+
+    def export_models(self) -> dict[str, Any]:
+        """把模型目录导成可粘贴的 JSON —— **绝不包含任何明文密钥**。
+
+        用途（owner）：换机器/换环境时不用一条条手填，导出一次、下次粘回去。
+        因此导出物必须"能公开"：只给 `has_api_key`（有没有配），以及
+        `api_key_ref`（若原来是 env 引用，给变量名）。真要带密钥的场景，
+        请走密码管理器/环境变量，不要走这份 JSON。
+        """
+        items: list[dict[str, Any]] = []
+        for row in self.db.list_models():
+            item = {k: row.get(k) for k in self._EXPORT_FIELDS if k in row}
+            raw = str(row.get("api_key") or "")
+            item["has_api_key"] = bool(raw.strip())
+            ref = self._env_ref(raw)
+            if ref:
+                item["api_key_ref"] = ref
+            items.append(item)
+        return {
+            "kind": "dogbuddy.models", "version": 1,
+            "exported_at": _now_iso(),
+            "count": len(items),
+            "note": "不含密钥；api_key_ref 只是环境变量名。导入后未配置密钥的条目会沿用同名条目已有的密钥。",
+            "models": items,
+        }
+
+    def _resolve_import_key(self, raw: dict[str, Any]) -> tuple[str, str]:
+        """返回 (要写入的密钥, 说明)。空串 = 不改（沿用库里已有的）。
+
+        三种来源，优先级从高到低：
+          1. `api_key_ref`（`env:NAME` / `${NAME}`）→ 从环境变量取（**值不进日志**）
+          2. `api_key` 明文
+          3. 掩码（`sk-***abcd`）或不给 → 返回空 = 保持不变
+        """
+        ref = str(raw.get("api_key_ref") or "").strip()
+        if ref:
+            name = self._ref_name(ref)
+            if not name:
+                return "", f"api_key_ref 格式不对：{ref[:24]}"
+            val = str(os.environ.get(name, "") or "").strip()
+            if not val:
+                return "", f"环境变量 {name} 没设置"
+            return val, f"key←env:{name}"
+        key = str(raw.get("api_key") or "").strip()
+        if not key or is_masked(key):
+            return "", ""
+        return key, "key←明文"
+
+    def _match_import_target(self, fields: dict[str, Any], key: str) -> str:
+        """把一条导入项对到已有条目上（对不到就返回空 = 新建）。
+
+        为什么要自己找：`upsert` 的条目身份 = **模型名 + 端点 + 密钥指纹**（0.10.23
+        为了支持"同端点两把 key 各存一条"）。而导出的 JSON **不带密钥**，所以直接
+        upsert 会算出"新身份"→ 凭空多一条重复条目（还会让旧条目的 key 看起来"丢了"）。
+        这里按"模型名 + 端点"放宽匹配：
+          * 给了密钥 → 优先密钥指纹相同的；
+          * 只剩一条候选 → 就用它（更新语义，key 保留）；
+          * 多条且无法用 key 区分 → 挑唯一"没配 key"的那条，否则判歧义不写。
+        """
+        model = str(fields.get("model") or "").strip()
+        ep = endpoint_of(str(fields.get("base_url") or ""))
+        cands = []
+        for row in self.db.list_models():
+            if str(row.get("model") or "").strip() != model:
+                continue
+            row_ep = endpoint_of(str(row.get("base_url") or ""))
+            if ep and row_ep and row_ep != ep:
+                continue
+            cands.append(row)
+        if not cands:
+            return ""
+        if key:
+            kid = key_identity(key)
+            for row in cands:
+                if key_identity(str(row.get("api_key") or "")) == kid:
+                    return str(row["id"])
+        if len(cands) == 1:
+            return str(cands[0]["id"])
+        empty = [r for r in cands if not str(r.get("api_key") or "").strip()]
+        return str(empty[0]["id"]) if len(empty) == 1 else ""
+
+    def import_models(self, models: list[dict[str, Any]], mode: str = "merge") -> dict[str, Any]:
+        """粘贴导入。`merge` = 按条目身份更新/新增；`replace` = 额外删掉清单外的条目。
+
+        复用 `upsert()` 的既有语义（空/掩码密钥 = 不改动），所以**导入一份导出的
+        JSON 不会把已有密钥冲掉**——这一点是这次改动的核心安全属性。
+        """
+        mode = "replace" if str(mode).lower() == "replace" else "merge"
+        if not isinstance(models, list) or not models:
+            raise ValueError("models 必须是非空数组")
+        result: dict[str, Any] = {"mode": mode, "input": len(models), "created": 0,
+                                 "updated": 0, "skipped": 0, "need_key": 0,
+                                 "errors": [], "warnings": []}
+        touched: set[str] = set()
+        before_ids = {str(r.get("id")) for r in self.db.list_models()}
+        for idx, raw in enumerate(models, 1):
+            if not isinstance(raw, dict):
+                result["errors"].append(f"第 {idx} 条不是对象，已跳过")
+                continue
+            model = str(raw.get("model") or "").strip()
+            if not model:
+                result["errors"].append(f"第 {idx} 条缺 model 字段，已跳过")
+                continue
+            fields = {k: raw.get(k) for k in self._EXPORT_FIELDS
+                      if k in raw and raw.get(k) is not None}
+            key, why = self._resolve_import_key(raw)
+            if key:
+                fields["api_key"] = key
+            elif why:
+                result["warnings"].append(f"{model}：{why}")
+            target = self._match_import_target(fields, key)
+            if target:
+                fields["id"] = target           # 对到已有条目 → 更新（key 不传即保留）
+            try:
+                entry = self.upsert(**fields)
+            except Exception as e:  # noqa: BLE001 — 单条失败不拦整批
+                result["errors"].append(f"{model}：{type(e).__name__}: {e}")
+                continue
+            eid = str(entry.get("id") or "")
+            touched.add(eid)
+            if eid in before_ids:
+                result["updated"] += 1
+            else:
+                result["created"] += 1
+            if not str(entry.get("api_key") or "").strip():
+                result["need_key"] += 1
+        if mode == "replace":
+            for row in self.db.list_models():
+                rid = str(row.get("id") or "")
+                if rid and rid not in touched:
+                    self.db.delete_model(rid)
+                    result["skipped"] += 1
+        try:
+            self.db.audit("system", "models:import",
+                          f"mode={mode} in={result['input']} new={result['created']} "
+                          f"upd={result['updated']} del={result['skipped']} "
+                          f"need_key={result['need_key']}")
+        except Exception:  # noqa: BLE001 — 审计失败不影响导入结果
+            logger.debug("models import audit failed", exc_info=True)
+        return result
 
     def upsert(self, **fields: Any) -> dict[str, Any]:
         model = str(fields.get("model") or "").strip()
