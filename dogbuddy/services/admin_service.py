@@ -364,6 +364,10 @@ class AdminService:
         # （全权），但作用域必须在 ctx 里声明——否则一旦有人把 gate 换成
         # PermissionGate，这条路径上的所有管理工具都会被 fail-closed 拒掉
         # （审查报告 P1-5：作用域只在 window_manager 一条路径注入）。
+        # v0.11.0：先把 LLM 客户端建出来 —— 成本账要拿它的 `model` 名去查单价
+        # （AdminService.config 是 ConfigService，不是 AppConfig，取不到 llm.model；
+        #  0.11.0 首次上线实测就是这里没取到，账记上了 tokens 但金额是 0）
+        llm_client = self.llm_factory()
         ctx = ToolContext(window_id=session.window.id, workspace=".", mode="AUTO",
                           actor=f"admin:{sender}", todo_repo=self.db, db=self.db,
                           # v0.10.30：server_exec 要用它（否则管理员永远拿不到面板能力）
@@ -378,10 +382,11 @@ class AdminService:
                                  "decisions": self.decisions,
                                  # v0.10.51：工具调用实时回执 → SSE admin.tool
                                  "on_tool": self._tool_emitter(sender),
-                                 # v0.11.0：成本账本（每次 LLM 调用记一笔）
+                                 # v0.11.0：成本账本（每次 LLM 调用记一笔；
+                                 # 模型名由 loop 回调时把 llm 传进来，见 _usage_hook）
                                  "on_usage": self._usage_hook(sender)})
         loop = AgentLoop(
-            llm=self.llm_factory(), registry=self.registry, session=session,
+            llm=llm_client, registry=self.registry, session=session,
             builder=self.builder, tool_names=role_spec.tool_names if role_spec else [],
             max_iterations=self.max_iterations)
         # 多对话时不要把发送者前缀塞进提示词（v2 只有一个管理员，前缀只会干扰）
@@ -399,27 +404,31 @@ class AdminService:
                 on_delta.flush()
         return result.content or "(no reply)"
 
-    def _usage_hook(self, sender: str):
+    def _usage_hook(self, sender: str, model: str = "", provider: str = ""):
         """成本记账钩子（v0.11.0）：管理员对话每次 LLM 调用记一笔。
 
+        `model`/`provider` 由调用方从**刚建出来的 LLM 客户端**上取（客户端才知道自己
+        跑的是哪个模型；`self.config` 是 ConfigService，没有 llm 段）。
         幂等键用"对话 + 轮次"：同一轮被重放（重试/断线重连）时不会重复计费。
-        没有 cost 服务时返回 None（loop 里 `callable()` 会跳过）。
         """
         cost = getattr(self, "cost", None)
         if cost is None:
             return None
-        cfg = getattr(self, "config", None)
-        provider = str(getattr(getattr(cfg, "llm", None), "provider", "") or "")
-        default_model = str(getattr(getattr(cfg, "llm", None), "model", "") or "")
+        default_model = str(model or "")
+        provider = str(provider or "")
         seq = {"n": 0}
 
-        def hook(resp: Any) -> None:
+        def hook(resp: Any, llm: Any = None) -> None:
             seq["n"] += 1
             usage = getattr(resp, "usage", None) or {}
+            # 模型名优先问**客户端**（`Provider.model_name`）—— 0.11.0 首跑就是这里
+            # 拿不到模型、金额记成 0（tokens 有、钱是 0），实测抓到后补的。
+            model = (str(getattr(llm, "model_name", "") or "")
+                     or str(getattr(resp, "model", "") or "") or default_model)
             cost.record(
                 window_id=f"admin:{sender}", kind="llm",
                 provider=str(getattr(resp, "provider", "") or provider),
-                model=str(getattr(resp, "model", "") or default_model),
+                model=model,
                 in_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
                 out_tokens=int(usage.get("completion_tokens")
                                or usage.get("output_tokens") or 0),
