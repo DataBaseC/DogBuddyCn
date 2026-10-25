@@ -28,7 +28,7 @@ class PriceIn(BaseModel):
 
 
 class BudgetIn(BaseModel):
-    scope_type: str = "global"          # global | group | job
+    scope_type: str = "global"          # global | group | job | window | run
     scope_id: str = ""
     period: str = "day"                 # day | week
     limit_amount: float = 0.0
@@ -81,32 +81,21 @@ def router(svc, auth_deps) -> APIRouter:
 
     @r.get("/costs/budgets", dependencies=auth_deps)
     def list_budgets() -> dict:
-        return {"budgets": _cost().db.list_budgets()}
+        """预算列表 + 实时用量（spent/ratio/level 由账本现算，不另存计数）。"""
+        cost = _cost()
+        return {"budgets": cost.budget_states()}
 
     @r.put("/costs/budgets/{budget_id}", dependencies=auth_deps)
     def put_budget(budget_id: str, body: BudgetIn) -> dict:
-        if body.scope_type not in ("global", "group", "job"):
-            raise HTTPException(status_code=400, detail="scope_type 只能是 global/group/job")
-        if body.period not in ("day", "week"):
-            raise HTTPException(status_code=400, detail="period 只能是 day/week")
-        if body.strategy not in ("downgrade", "queue", "pause"):
-            raise HTTPException(status_code=400,
-                                detail="strategy 只能是 downgrade/queue/pause")
-        if float(body.limit_amount) < 0:
-            raise HTTPException(status_code=400, detail="limit_amount 不能为负")
         payload = body.model_dump()
         payload["id"] = budget_id
-        saved = _cost().db.upsert_budget(payload)
         try:
-            _cost().db.audit("web", "cost:budget",
-                             f"{budget_id} limit={saved.get('limit_amount')} "
-                             f"period={saved.get('period')} strategy={saved.get('strategy')}")
-        except Exception:  # noqa: BLE001
-            pass
-        return saved
+            return _cost().upsert_budget(payload)      # 校验与审计都在服务层
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     @r.delete("/costs/budgets/{budget_id}", dependencies=auth_deps)
     def delete_budget(budget_id: str) -> dict:
-        return {"deleted": _cost().db.delete_budget(budget_id)}
+        return {"deleted": _cost().delete_budget(budget_id)}
 
     return r

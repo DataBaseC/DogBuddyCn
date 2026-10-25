@@ -403,6 +403,19 @@ class WindowManager:
                 "max_context_tokens": self.max_context_tokens,
                 "compact_threshold": self.threshold}
 
+    def _budget_check(self, window_id: str, run_id: str = ""):
+        """预算闸门（v0.11.1）：工位作用域 = 窗口 + 本次 run。
+
+        返回闭包给 loop 每轮调模型前调用；没有 cost 服务时回 None（loop 会跳过）。
+        """
+        cost = getattr(self, "cost", None)
+        if cost is None:
+            return None
+
+        def check():
+            return cost.budget_state(window_id=window_id, run_id=run_id)
+        return check
+
     def _usage_hook(self, w: Window, run_id: str, model: str | None):
         """v0.11.0：成本账本钩子 —— 员工每轮 LLM 调用记一笔。
 
@@ -973,6 +986,8 @@ class WindowManager:
                    "approval_router": self.approval_router,
                    # v0.11.0：成本账本（每轮 LLM 调用记一笔，幂等键 = run + 轮次）
                    "on_usage": self._usage_hook(w, run_id, model),
+                # v0.11.1：预算闸门（工位作用域 = 窗口 + 本次 run）
+                "budget_check": self._budget_check(w.id, run_id),
                    "supervision_dispatch": self.supervision_dispatch,
                    # P1-6：升级给主管的待决事项要落 queue、主管要用工具裁决它们
                    "decisions": self.decisions,

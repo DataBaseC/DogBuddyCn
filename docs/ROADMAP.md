@@ -2098,3 +2098,27 @@ owner："直接干到底"，按 0.11.0 的计划一次做完。**schema 15 → 1
 基线：**867 passed / 4 skipped**（新增 19 条：账本换算/幂等/改价不回算/占位价分档/路由校验/
 控制台接线/两个记账钩子存在）。回滚锚点：本地 tag `pre-industrial-0.11.0`、服务器 tag `pre-0.11.0`。
 
+---
+
+## 52. 工业自动化第二步：预算闸门（2026-10-25，`0.11.1`）
+
+`0.11.0` 只是"看见钱"，这一版让系统**按钱办事**：超预算不再继续烧。
+
+| 层 | 内容 |
+|---|---|
+| 判定 | `CostService.budget_state()`：作用域 global/job/group/window/run，**取比值最大**的那条（窗口超 120% 不会被宽松的全局预算掩盖）；≥80% 只 `warn`，≥100% 才 `exceeded` |
+| 数据 | 全部来自 `usage_ledger`（`db.spend_since`）——**不另存计数**，两份数一定会对不上 |
+| 动作 | `downgrade`：挑单价表里**输出单价更低**的模型，一轮只降一次（没有更便宜的 → 按暂停处理并说明）；`queue`/`pause`：直接停本轮 |
+| 拦截点 | `AgentLoop.run()` 的**每轮开头、调模型之前**：`pause` 时 `llm.chat` 一次都不调；`stop_reason=budget` / `error_code=budget_exhausted`，写审计 `cost:paused` / `cost:downgrade` |
+| 装配 | `AdminService._budget_check("admin:<对话>")`、`WindowManager._budget_check(window_id, run_id)`；服务缺失 → 返回 None，loop 跳过（老行为） |
+| 可见 | `/healthz.costs.budget`（最紧的那条）、`/api/costs/summary.budgets`、`/api/costs/budgets` 带 `spent/ratio/level`；成本页新增「预算」卡片（进度条 ok/warn/err + 增删改） |
+
+一条测试抓到的真 bug（记下来，别再犯）：`budget_state` 里把"作用域类型→值"的
+`scope_ids` 和"账本列名→值"的 `ids` 混用了，导致**窗口/任务预算永远算成 0 花费**
+（全局预算正常，所以肉眼看不出来）。单测 `test_worst_ratio_wins_over_loose_global`
+直接把它钉住。
+
+基线：**877 passed / 4 skipped**（新增 10 条：无预算=ok / 80% warn / 超 100% exceeded /
+最紧的胜出 / 降档挑便宜模型 / 没有更便宜时按暂停 / 校验 / loop 暂停时零调用 + 审计 /
+降档一次后继续 / 控制台与装配接线）。`audit_ui` exit 0；bundle 已重建。
+

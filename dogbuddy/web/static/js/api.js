@@ -236,6 +236,9 @@
       budgets: function () { return request('GET', '/api/costs/budgets'); },
       putBudget: function (id, body) {
         return request('PUT', '/api/costs/budgets/' + enc(id), body);
+      },
+      deleteBudget: function (id) {
+        return request('DELETE', '/api/costs/budgets/' + enc(id));
       }
     },
     models: {

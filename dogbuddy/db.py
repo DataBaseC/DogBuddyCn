@@ -1840,6 +1840,28 @@ class Database:
     _BUDGET_FIELDS = ("id", "scope_type", "scope_id", "period", "limit_amount",
                       "strategy", "enabled", "updated_at")
 
+    def spend_since(self, ts: str, *, window_id: str = "", run_id: str = "",
+                    job_id: str = "", group_id: str = "") -> dict[str, Any]:
+        """某个时间点之后的花费（可叠加作用域过滤）。
+
+        v0.11.1 预算闸门的唯一数据源：账本已经是逐调用一行，所以"花了多少"不该
+        另存一份计数（两份数一定会对不上）。
+        """
+        q = ("SELECT COUNT(*) AS calls, COALESCE(SUM(amount), 0) AS amount,"
+             " COALESCE(SUM(in_tokens), 0) AS in_tokens,"
+             " COALESCE(SUM(out_tokens), 0) AS out_tokens"
+             " FROM usage_ledger WHERE ts >= ?")
+        args: list[Any] = [ts]
+        for col, val in (("window_id", window_id), ("run_id", run_id),
+                         ("job_id", job_id), ("group_id", group_id)):
+            if val:
+                q += f" AND {col}=?"
+                args.append(val)
+        with self._lock:
+            row = self._conn.execute(q, args).fetchone()
+        return dict(row) if row else {"calls": 0, "amount": 0.0,
+                                      "in_tokens": 0, "out_tokens": 0}
+
     def list_budgets(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
