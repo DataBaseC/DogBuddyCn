@@ -116,6 +116,10 @@ def test_loop_and_compactor_have_usage_hooks():
     assert "usage_hook(resp, self.llm)" in loop
     assert 'getattr(llm, "model_name", "")' in adm
     assert 'getattr(llm, "model_name", "")' in wm
+    # 幂等键必须跨轮次唯一：seq 每轮从 1 开始，只用 seq 会让第 2 轮起全被判重复
+    # （0.11.0 首跑实测：同一对话只有第一笔记上账）
+    assert "int(time.time() * 1000)" in adm
+    assert "int(time.time() * 1000)" in wm
     assert "self.cost.record(" in comp
     assert '"on_usage": self._usage_hook(sender)' in adm
     assert '"on_usage": self._usage_hook(w, run_id, model)' in wm
