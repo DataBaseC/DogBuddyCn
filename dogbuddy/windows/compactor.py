@@ -54,10 +54,13 @@ class Compactor:
     def __init__(self, llm: Any, compaction_repo: Any, memory_service: Any = None,
                  threshold: float = 0.8, max_context_tokens: int = 128000,
                  max_messages: int = 96, summarize_timeout: float = 90.0,
-                 retry_timeout: float = 45.0, min_interval_s: float = 1800.0):
+                 retry_timeout: float = 45.0, min_interval_s: float = 1800.0,
+                 cost: Any = None):
         self.llm = llm
         self.repo = compaction_repo
         self.memory = memory_service
+        #: v0.11.0：压缩摘要也是钱（4 天 94 次调用），进同一本成本账。
+        self.cost = cost
         self.threshold = threshold
         self.max_context_tokens = max_context_tokens
         #: 摘要调用的上限（v0.10.48）。压缩跑在**每轮 LLM 调用之前**，以前没有超时：
@@ -189,9 +192,30 @@ class Compactor:
                 if not text:
                     raise RuntimeError("empty summary")
                 out = self._parse_json(text, conversation)
-                tokens = int((getattr(resp, "usage", None) or {}).get("total_tokens") or 0)
+                usage = getattr(resp, "usage", None) or {}
+                tokens = int(usage.get("total_tokens") or 0)
                 out["_in_chars"] = len(slice_text)
                 out["_tokens"] = tokens
+                # v0.11.0：压缩调用的花费也入账（它曾经是"看不见的开销"）
+                if getattr(self, "cost", None) is not None:
+                    try:
+                        self.cost.record(
+                            kind="llm", window_id=window_id,
+                            provider=str(getattr(resp, "provider", "") or ""),
+                            model=str(getattr(resp, "model", "")
+                                      or getattr(self.llm, "model", "") or ""),
+                            in_tokens=int(usage.get("prompt_tokens")
+                                          or usage.get("input_tokens") or 0),
+                            out_tokens=int(usage.get("completion_tokens")
+                                           or usage.get("output_tokens") or 0),
+                            cache_hit_tokens=int(usage.get("cache_read_input_tokens")
+                                                 or 0),
+                            idem_key=f"compaction:{window_id}:{time.time_ns()}",
+                            meta={"phase": "compaction", "chars": len(slice_text),
+                                  "slice": idx + 1},
+                        )
+                    except Exception:  # noqa: BLE001 — 记账失败不影响压缩结果
+                        logger.debug("compaction cost record failed", exc_info=True)
                 _STATS["ok"] += 1
                 _STATS["last_tokens"] = tokens
                 _STATS["last_chars"] = len(slice_text)

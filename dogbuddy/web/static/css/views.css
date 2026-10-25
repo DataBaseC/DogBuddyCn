@@ -35,6 +35,8 @@
   font-variant-numeric: tabular-nums;
 }
 .stat-value em { font-style: normal; font-size: 13px; color: var(--tx-3); font-weight: 600; margin-left: 3px; }
+/* v0.11.0 成本页：数值下面那行小字（"12 次调用" / "缓存命中 3.1k"） */
+.stat-sub { font-size: 11.5px; color: var(--tx-4); margin-top: 3px; line-height: 1.4; }
 .stat-hint { font-size: 11.5px; color: var(--tx-4); margin-top: 4px; }
 
 /* ---------------- 总览 · 工位卡片 ---------------- */

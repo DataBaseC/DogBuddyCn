@@ -23,6 +23,7 @@ from ..windows.compactor import compaction_stats as _compaction_stats
 from .routes import auth as auth_routes
 from .routes import capabilities as capabilities_routes
 from .routes import chat as chat_routes
+from .routes import costs as costs_routes
 from .routes import decisions as decisions_routes
 from .routes import events as events_routes
 from .routes import files as files_routes
@@ -77,6 +78,8 @@ class WebServices:
         self.backup = kw.get("backup")
         #: v0.10.50：网关状态（`/api/gateway/status`；QQ 只接管理员）
         self.adapter = kw.get("adapter")
+        #: v0.11.0：成本账本（`/api/costs/*` 与 `/healthz.costs`）
+        self.cost = kw.get("cost")
         self.models = kw.get("models")
         self.iterations = kw.get("iterations")
         self.iteration_exec = kw.get("iteration_exec")
@@ -126,6 +129,8 @@ def create_app(svc: WebServices) -> FastAPI:
             # v0.10.55：压缩的健康度（降级率/最近一次 token）——降级=上下文被截断，
             # 会一路推高后续成本，必须能一眼看到
             "compactions": _compaction_stats(),
+            # v0.11.0：今天的钱（没配单价时会明说"金额会是 0"）
+            "costs": (svc.cost.health() if getattr(svc, "cost", None) else None),
         }
 
     @app.get("/api/version")
@@ -163,6 +168,8 @@ def create_app(svc: WebServices) -> FastAPI:
     app.include_router(auth_routes.router(svc), prefix="/api")
     app.include_router(capabilities_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(chat_routes.router(svc, auth_deps), prefix="/api")
+    # v0.11.0：成本账本（工业自动化的第一步：先把钱变成数字）
+    app.include_router(costs_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(decisions_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(events_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(ledger_routes.router(svc, auth_deps), prefix="/api")

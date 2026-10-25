@@ -36,6 +36,7 @@ from .services.job_manager import JobManager
 from .services.model_service import ModelService
 from .services.report_service import ReportService
 from .services.backup_service import BackupService
+from .services.cost_service import CostService
 from .services.decisions import DecisionService
 from .services.group_manager import GroupManager
 from .services.session_manager import SessionManager
@@ -90,6 +91,8 @@ class DogBuddyApp:
             db_path=config.db_path,
             backup_dir=Path(config.paths.data_dir) / "backups",
             keep=7, db=self.db)
+        # v0.11.0：成本账本（工业自动化的第一步：先把钱变成数字）
+        self.cost = CostService(self.db)
         self.memory = MemoryService(config.memory_dir)
         self.bus = EventBus()
         self.panel = self._build_panel()
@@ -137,6 +140,8 @@ class DogBuddyApp:
             model_resolver=config.effective_model,
             param_resolver=config.effective_params,
             decisions=self.decisions,
+            # v0.11.0：员工每轮 LLM 调用都进成本账
+            cost=self.cost,
             approval_config=lambda k, d=None: self.config_svc.get(k, d),
             mcp_bridge=self.mcp)
         self.sessions = SessionManager(self.windows, self.db)
@@ -187,6 +192,8 @@ class DogBuddyApp:
             panel=self.panel, runs=self.runs,
             # v0.10.50（方案B）：server_exec 的人工确认走待决队列
             decisions=self.decisions,
+            # v0.11.0：管理员对话的每次 LLM 调用也进成本账
+            cost=self.cost,
             self_status=self.update_status, self_update=self.start_self_update)
         # v0.10.40（owner）：异常/崩溃/重启导致循环停下后，**管理员必须能唤醒**
         # 未完成的任务。启动清理把僵尸行标成 interrupted，这里主动告诉 owner
@@ -249,6 +256,8 @@ class DogBuddyApp:
             runs=self.runs,
             # v0.10.50：备份状态 + 网关状态（控制台「网关状态」卡片）
             backup=self.backup, adapter=self.adapter,
+            # v0.11.0：成本账本（/api/costs/* 与 /healthz.costs）
+            cost=self.cost,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)

@@ -2072,3 +2072,29 @@ owner 定调：**后期开发偏向工业 AI 流水线自动化**（检测成本
 动工前要 owner 拍板的一件事：**单价表初始值**——按现有 5 个模型条目的 cost 档位生成占位价
 （标注"待校准"，一周后按账单校准），还是先全填 0 只统计用量？
 
+---
+
+## 51. 工业自动化第一步：成本账本（2026-10-25，`0.11.0`）
+
+owner："直接干到底"，按 0.11.0 的计划一次做完。**schema 15 → 16**。
+
+| 交付 | 落点 | 说明 |
+|---|---|---|
+| 三张表 | `db.py::_migrate_v16` | `cost_model`（单价，改价不回算历史）/ `usage_ledger`（一次调用一行，`idem_key` 幂等）/ `budgets`（三级，0.11.x 才执行） |
+| 口径层 | `services/cost_service.py` | 取价回退 `provider:model → model → 任意同名`；金额 = miss×in + hit×(in−cache) + out×out + images×in（**每 1K token**）；`record()` 幂等；`seed_from_models()` 按 `cost` 档位生成占位价 |
+| 记账点 | `loop.py`（`on_usage` 钩子）+ `compactor.py` | 与 `on_tool` 同构：挂在**统一响应点**，群组步骤/子代理/续跑自动覆盖；压缩摘要（4 天 94 次）也入账 |
+| 接口 | `web/routes/costs.py` | `/api/costs/summary · ledger · models(GET/PUT/DELETE) · models/seed · budgets`；非法输入 400，改价留 `cost:price` 审计 |
+| 可见性 | `web/app.py` → `/healthz.costs` | 今日金额/调用/token、已配单价数、零价条数、以及"单价表是空的"提示 |
+| 控制台 | `views-costs.js` + 导航「成本」 | 四个统计卡 + 按工位表 + 单价表（逐条改价，modal 校验负值）+ 「按目录生成占位价」 |
+
+设计上刻意守住的三条：
+1. **改价不回算**：账本行自带 `unit_price`/`amount`，历史永远忠实；
+2. **幂等**：`run_retry`/群组步骤重放不会重复计费（同一 `idem_key` 第二次返回 `stored=False`）；
+3. **不静默**：单价为 0 时页面与 `/healthz` 都明说"金额会是 0"，而不是显示 0 装作没事。
+
+顺带修：`_execute_inner` 里新增的 `run_id` 变量起初漏了定义（`UnboundLocalError`，被
+`test_batch7_projects` 抓到）——记账钩子需要它做幂等键。
+
+基线：**867 passed / 4 skipped**（新增 19 条：账本换算/幂等/改价不回算/占位价分档/路由校验/
+控制台接线/两个记账钩子存在）。回滚锚点：本地 tag `pre-industrial-0.11.0`、服务器 tag `pre-0.11.0`。
+

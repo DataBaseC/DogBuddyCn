@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -388,6 +388,60 @@ def _migrate_v15(conn: sqlite3.Connection) -> None:
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
+def _migrate_v16(conn: sqlite3.Connection) -> None:
+    """成本账本（2026-10-25，0.11.0）：把"钱"变成可查的数字。
+
+    起因为什么不是更好的调度算法：4 天 94 次压缩 / 19% 降级 / 缓存命中一度 11.5%，
+    而系统里**只有 token 求和、没有单价、没有逐任务归集**——成本不可观测时，
+    任何"检测成本智能调度"都是拍脑袋。详见 docs/工业自动化设计.md。
+
+    三张表：
+      * `cost_model`   单价表（可按 provider+model 覆盖；历史行保留当时单价）
+      * `usage_ledger` 账本（一次外部调用一行；`idem_key` 幂等，防重放重复计费）
+      * `budgets`      三级预算（global / group / job）；0.11.0 只读写，0.11.x 才执行
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS cost_model(
+      id TEXT PRIMARY KEY,
+      provider TEXT DEFAULT '', model TEXT NOT NULL,
+      unit TEXT DEFAULT 'token',
+      in_price REAL DEFAULT 0, out_price REAL DEFAULT 0, cache_price REAL DEFAULT 0,
+      currency TEXT DEFAULT 'CNY',
+      effective_from TEXT DEFAULT '', note TEXT DEFAULT '',
+      enabled INTEGER DEFAULT 1, updated_at TEXT DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS usage_ledger(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      kind TEXT DEFAULT 'llm',
+      run_id TEXT DEFAULT '', job_id TEXT DEFAULT '', group_id TEXT DEFAULT '',
+      window_id TEXT DEFAULT '',
+      provider TEXT DEFAULT '', model TEXT DEFAULT '',
+      in_tokens INTEGER DEFAULT 0, out_tokens INTEGER DEFAULT 0,
+      cache_hit_tokens INTEGER DEFAULT 0, images INTEGER DEFAULT 0,
+      unit_price REAL DEFAULT 0, amount REAL DEFAULT 0,
+      idem_key TEXT DEFAULT '', meta_json TEXT DEFAULT ''
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_ledger_idem ON usage_ledger(idem_key)
+      WHERE idem_key <> '';
+    CREATE INDEX IF NOT EXISTS ix_ledger_ts ON usage_ledger(ts);
+    CREATE INDEX IF NOT EXISTS ix_ledger_scope ON usage_ledger(window_id, run_id);
+
+    CREATE TABLE IF NOT EXISTS budgets(
+      id TEXT PRIMARY KEY,
+      scope_type TEXT NOT NULL, scope_id TEXT DEFAULT '',
+      period TEXT DEFAULT 'day', limit_amount REAL DEFAULT 0,
+      strategy TEXT DEFAULT 'downgrade',
+      enabled INTEGER DEFAULT 1, updated_at TEXT DEFAULT ''
+    );
+    """)
+    conn.commit()
+
+
+# version → migration callable. Applied in ascending order for any version
+# greater than what the database reports. Must be idempotent and must not
+# depend on the application layer.
 _MIGRATIONS: dict[int, Any] = {
     1: _ensure_columns,
     2: _migrate_v2,
@@ -404,6 +458,7 @@ _MIGRATIONS: dict[int, Any] = {
     13: _migrate_v13,
     14: _migrate_v14,
     15: _migrate_v15,
+    16: _migrate_v16,
 }
 
 
@@ -1644,6 +1699,185 @@ class Database:
                 "FROM models").fetchone()
         return {"total": int(row["total"] or 0), "enabled": int(row["enabled"] or 0),
                 "defaults": int(row["defaults"] or 0), "noted": int(row["noted"] or 0)}
+
+    # ------------------------------------------------- 成本账本（0.11.0，schema 16）
+    # 只做「存」与「查」；换算规则（单价、缓存折扣、幂等键）在 CostService 里，
+    # 因为那是业务口径，DAO 只负责落库（ARCHITECTURE §3 的分层约定）。
+
+    _COST_MODEL_FIELDS = ("id", "provider", "model", "unit", "in_price", "out_price",
+                          "cache_price", "currency", "effective_from", "note",
+                          "enabled", "updated_at")
+
+    def list_cost_models(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM cost_model ORDER BY provider ASC, model ASC").fetchall()
+        return [dict(r) for r in rows]
+
+    def get_cost_model(self, model_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM cost_model WHERE id=?",
+                                     (str(model_id),)).fetchone()
+        return dict(row) if row else None
+
+    def upsert_cost_model(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """按 id 新增或更新；未提供的字段保持原值（PATCH 语义，与模型目录一致）。"""
+        model_id = str(entry.get("id") or "").strip()
+        if not model_id:
+            raise ValueError("cost_model id 不能为空")
+        data = {k: v for k, v in entry.items() if k in self._COST_MODEL_FIELDS}
+        data["id"] = model_id
+        data["updated_at"] = _now_iso()
+        if "enabled" in data:
+            data["enabled"] = 1 if data["enabled"] else 0
+        cols = [c for c in data if c != "id"]
+        with self._lock:
+            exists = self._conn.execute(
+                "SELECT 1 FROM cost_model WHERE id=?", (model_id,)).fetchone()
+            if exists:
+                self._conn.execute(
+                    f"UPDATE cost_model SET {', '.join(f'{c}=?' for c in cols)} WHERE id=?",
+                    [data[c] for c in cols] + [model_id])
+            else:
+                data.setdefault("model", model_id)
+                all_cols = [c for c in self._COST_MODEL_FIELDS if c in data]
+                self._conn.execute(
+                    f"INSERT INTO cost_model({', '.join(all_cols)}) "
+                    f"VALUES({', '.join('?' for _ in all_cols)})",
+                    [data[c] for c in all_cols])
+            self._conn.commit()
+            row = self._conn.execute("SELECT * FROM cost_model WHERE id=?",
+                                     (model_id,)).fetchone()
+        return dict(row) if row else dict(data)
+
+    def delete_cost_model(self, model_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM cost_model WHERE id=?", (str(model_id),))
+            self._conn.commit()
+        return bool(cur.rowcount)
+
+    def record_usage(self, row: dict[str, Any]) -> bool:
+        """写一条账本。返回 False = `idem_key` 命中（重放/重试），**不重复计费**。
+
+        幂等不是洁癖：`run_retry` 与群组步骤续跑都会重放调用，没有去重就会把同一笔
+        调用记两次账，成本页直接失真。
+        """
+        idem = str(row.get("idem_key") or "").strip()
+        cols = ("ts", "kind", "run_id", "job_id", "group_id", "window_id", "provider",
+                "model", "in_tokens", "out_tokens", "cache_hit_tokens", "images",
+                "unit_price", "amount", "idem_key", "meta_json")
+        data = {c: row.get(c, "" if c in ("ts", "kind", "run_id", "job_id", "group_id",
+                                          "window_id", "provider", "model", "idem_key",
+                                          "meta_json") else 0)
+                for c in cols}
+        data["ts"] = str(data.get("ts") or _now_iso())
+        with self._lock:
+            if idem:
+                hit = self._conn.execute(
+                    "SELECT 1 FROM usage_ledger WHERE idem_key=?", (idem,)).fetchone()
+                if hit:
+                    return False
+            self._conn.execute(
+                f"INSERT INTO usage_ledger({', '.join(cols)}) "
+                f"VALUES({', '.join('?' for _ in cols)})", [data[c] for c in cols])
+            self._conn.commit()
+        return True
+
+    def usage_rows(self, since: str = "", until: str = "",
+                   limit: int = 200) -> list[dict[str, Any]]:
+        q = "SELECT * FROM usage_ledger WHERE 1=1"
+        args: list[Any] = []
+        if since:
+            q += " AND ts >= ?"
+            args.append(since)
+        if until:
+            q += " AND ts < ?"
+            args.append(until)
+        q += " ORDER BY id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 2000)))
+        with self._lock:
+            rows = self._conn.execute(q, args).fetchall()
+        return [dict(r) for r in rows]
+
+    #: 分组维度白名单（列名直接进 SQL，绝不能让外部决定）
+    USAGE_GROUP_COLUMNS = {"day": "substr(ts,1,10)", "window": "window_id",
+                          "model": "model", "run": "run_id", "kind": "kind",
+                          "provider": "provider"}
+
+    def usage_summary(self, since: str = "", until: str = "",
+                      group_by: str = "day") -> list[dict[str, Any]]:
+        col = self.USAGE_GROUP_COLUMNS.get(str(group_by), "substr(ts,1,10)")
+        q = (f"SELECT {col} AS bucket, COUNT(*) AS calls, "
+             "SUM(in_tokens) AS in_tokens, SUM(out_tokens) AS out_tokens, "
+             "SUM(cache_hit_tokens) AS cache_tokens, SUM(images) AS images, "
+             "SUM(amount) AS amount FROM usage_ledger WHERE 1=1")
+        args: list[Any] = []
+        if since:
+            q += " AND ts >= ?"
+            args.append(since)
+        if until:
+            q += " AND ts < ?"
+            args.append(until)
+        q += " GROUP BY bucket ORDER BY bucket DESC"
+        with self._lock:
+            rows = self._conn.execute(q, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def usage_totals(self, since: str = "") -> dict[str, Any]:
+        q = ("SELECT COUNT(*) AS calls, COALESCE(SUM(in_tokens),0) AS in_tokens, "
+             "COALESCE(SUM(out_tokens),0) AS out_tokens, "
+             "COALESCE(SUM(cache_hit_tokens),0) AS cache_tokens, "
+             "COALESCE(SUM(images),0) AS images, COALESCE(SUM(amount),0) AS amount "
+             "FROM usage_ledger WHERE 1=1")
+        args: list[Any] = []
+        if since:
+            q += " AND ts >= ?"
+            args.append(since)
+        with self._lock:
+            row = self._conn.execute(q, args).fetchone()
+        return dict(row) if row else {}
+
+    _BUDGET_FIELDS = ("id", "scope_type", "scope_id", "period", "limit_amount",
+                      "strategy", "enabled", "updated_at")
+
+    def list_budgets(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM budgets ORDER BY scope_type ASC, scope_id ASC").fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_budget(self, entry: dict[str, Any]) -> dict[str, Any]:
+        bid = str(entry.get("id") or "").strip()
+        data = {k: v for k, v in entry.items() if k in self._BUDGET_FIELDS}
+        if not bid:
+            bid = f"{data.get('scope_type', 'global')}:{data.get('scope_id', '') or '*'}"
+        data["id"] = bid
+        data["updated_at"] = _now_iso()
+        if "enabled" in data:
+            data["enabled"] = 1 if data["enabled"] else 0
+        cols = [c for c in data if c != "id"]
+        with self._lock:
+            exists = self._conn.execute("SELECT 1 FROM budgets WHERE id=?", (bid,)).fetchone()
+            if exists:
+                self._conn.execute(
+                    f"UPDATE budgets SET {', '.join(f'{c}=?' for c in cols)} WHERE id=?",
+                    [data[c] for c in cols] + [bid])
+            else:
+                data.setdefault("scope_type", "global")
+                all_cols = [c for c in self._BUDGET_FIELDS if c in data]
+                self._conn.execute(
+                    f"INSERT INTO budgets({', '.join(all_cols)}) "
+                    f"VALUES({', '.join('?' for _ in all_cols)})",
+                    [data[c] for c in all_cols])
+            self._conn.commit()
+            row = self._conn.execute("SELECT * FROM budgets WHERE id=?", (bid,)).fetchone()
+        return dict(row) if row else dict(data)
+
+    def delete_budget(self, bid: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM budgets WHERE id=?", (str(bid),))
+            self._conn.commit()
+        return bool(cur.rowcount)
 
 
 def new_id() -> str:
