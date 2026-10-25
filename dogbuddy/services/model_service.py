@@ -389,7 +389,11 @@ class ModelService:
     #: 导出**只带这些字段**（白名单，不是黑名单）——新增字段默认不外泄。
     #: 密钥永远不在其中：只给 `has_api_key`；若库里存的是 `env:VAR` / `${VAR}`
     #: 这种引用形式，额外给 `api_key_ref`（名字，不是值）。
-    _EXPORT_FIELDS = ("provider", "model", "base_url", "display_name", "note",
+    #: 注意 `id` 也在里面：它是**条目身份**（`provider_model` + 端点/密钥指纹后缀），
+    #: 指纹是 hash 前缀不是密钥原文（见 `key_identity`）。带上它，导入才能精确命中
+    #: "同模型同端点但两把 key" 的那一条 —— 否则导出不带 key，导回来只能靠猜，
+    #: 生产实测会凭空多出重复条目。
+    _EXPORT_FIELDS = ("id", "provider", "model", "base_url", "display_name", "note",
                       "capability", "context_window", "speed", "cost",
                       "enabled", "source")
     #: 两种引用写法：`env:NAME` 与 `${NAME}` / `$NAME`（导出只给名字，永不给值）
@@ -457,6 +461,7 @@ class ModelService:
         return key, "key←明文"
 
     def _match_import_target(self, fields: dict[str, Any], key: str) -> str:
+        """返回 "" = 新建；`"?"` = 有歧义（调用方应跳过并告警）。"""
         """把一条导入项对到已有条目上（对不到就返回空 = 新建）。
 
         为什么要自己找：`upsert` 的条目身份 = **模型名 + 端点 + 密钥指纹**（0.10.23
@@ -467,6 +472,9 @@ class ModelService:
           * 只剩一条候选 → 就用它（更新语义，key 保留）；
           * 多条且无法用 key 区分 → 挑唯一"没配 key"的那条，否则判歧义不写。
         """
+        explicit = str(fields.get("id") or "").strip()
+        if explicit and self.db.get_model(explicit) is not None:
+            return explicit                     # 导出物自带 id → 精确命中
         model = str(fields.get("model") or "").strip()
         ep = endpoint_of(str(fields.get("base_url") or ""))
         cands = []
@@ -487,7 +495,7 @@ class ModelService:
         if len(cands) == 1:
             return str(cands[0]["id"])
         empty = [r for r in cands if not str(r.get("api_key") or "").strip()]
-        return str(empty[0]["id"]) if len(empty) == 1 else ""
+        return str(empty[0]["id"]) if len(empty) == 1 else "?"
 
     def import_models(self, models: list[dict[str, Any]], mode: str = "merge") -> dict[str, Any]:
         """粘贴导入。`merge` = 按条目身份更新/新增；`replace` = 额外删掉清单外的条目。
@@ -519,6 +527,14 @@ class ModelService:
             elif why:
                 result["warnings"].append(f"{model}：{why}")
             target = self._match_import_target(fields, key)
+            if target == "?":
+                # 同名同端点有多条（生产里真有：同模型两把 key 各存一条），
+                # 又没带 id/密钥 → 无法判定更新哪条。**宁可跳过并告警，也不造重复条目。**
+                result["skipped"] += 1
+                result["warnings"].append(
+                    f"{model}：同名同端点有多个条目，无法判定更新哪一条 —— "
+                    f"请在 JSON 里带上该条目的 id（导出物本来就带）")
+                continue
             if target:
                 fields["id"] = target           # 对到已有条目 → 更新（key 不传即保留）
             try:
