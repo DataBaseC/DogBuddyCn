@@ -1974,3 +1974,27 @@ owner："可以，尝试降低成本。" 先把成本花在哪量清楚（生产
 
 基线：**830 passed / 4 skipped**（新增 6 条：30k 切片 + 超时换短切片重试不降级 + 两次都失败才降级且计数 + 同窗口 30 分钟内不重复压且不烧 token + 95% 占用豁免节流 + 新默认值）。
 
+---
+
+## 48. 第四十一轮：纯聊天角色（2026-10-25，`0.10.56`）
+
+owner：「员工加一个纯聊天的预设」，用来跑团 / 角色扮演 / 陪聊。
+
+`worker_chat`（显示名**聊天员**），工具箱只有 5 个：
+
+```
+window_memory_read / window_memory_write / project_memory_read / notify_owner / ask_user
+```
+
+**故意连 `read_file` 和 `web_search` 都不给**：
+* 跑团/陪聊不需要，给了只是白占 schema token；
+* 更要紧的是——一个能改文件、能跑命令的"聊天员"就不是聊天员了，
+  它会去"顺手查/顺手改"，而不是好好说话；
+* 提示词里明确禁止"假装改了文件/跑了命令"（它没有任何工具能做到，
+  这类幻觉在角色扮演里尤其容易破坏沉浸感）。
+
+进测试的不变量：`FORBIDDEN`（read/write/edit/glob/grep/shell/server_exec/web_*/explore/
+checkpoint/dispatch/schedule）与工具箱零交集，且工具箱**恰好**等于上面 5 个。
+
+基线：**835 passed / 4 skipped**（新增 5 条纯聊天角色回归）。
+
