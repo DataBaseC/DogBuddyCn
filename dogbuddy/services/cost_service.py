@@ -222,24 +222,38 @@ class CostService:
         return now.strftime("%Y-%m-%dT00:00:00+00:00")
 
     def cheaper_model(self, current: str = "") -> str:
-        """单价表里比当前更便宜的模型 id（给 `downgrade` 用）。没有就回空。
+        """单价表里比当前更便宜的模型（给 `downgrade` 用）。没有就回空。
 
-        只按**输出单价**排序：输入/输出大体同向，但输出贵得多，是主要成本项。
+        只按**输出单价**排序（输出比输入贵得多，是主要成本项），并且必须满足：
+        * 与当前模型**同端点**（`models` 目录里的 base_url host 相同）——
+          降档不能跨服务商/跨 key，否则换个端点就等于换了一把不存在的钥匙，
+          调用直接 404/401。这条是"降档"与"换供应商"的边界；
+        * 在目录里处于启用状态。
+        任何一条不满足就当作"没有更便宜的档位"，由调用方按暂停处理。
         """
+        from .model_service import endpoint_of
+
+        catalog = {str(m.get("model") or ""): m for m in self.db.list_models(enabled_only=True)}
+        cur_entry = catalog.get(current)
+        cur_ep = endpoint_of(str((cur_entry or {}).get("base_url") or ""))
         rows = [r for r in self.db.list_cost_models()
-                if r.get("enabled") and float(r.get("out_price") or 0) > 0]
+                if int(r.get("enabled") or 0) and float(r.get("out_price") or 0) > 0]
         if not rows:
             return ""
         rows.sort(key=lambda r: (float(r.get("out_price") or 0),
                                  float(r.get("in_price") or 0)))
-        cur_price = None
-        for r in rows:
-            if str(r.get("model") or "") == current:
-                cur_price = float(r.get("out_price") or 0)
+        cur_price = next((float(r.get("out_price") or 0) for r in rows
+                          if str(r.get("model") or "") == current), None)
         for r in rows:
             mid = str(r.get("model") or "")
-            if mid and mid != current and (cur_price is None
-                                           or float(r.get("out_price") or 0) < cur_price):
+            if not mid or mid == current:
+                continue
+            entry = catalog.get(mid)
+            if entry is None:
+                continue                      # 目录里没有 → 不知道它跑哪个端点
+            if cur_ep and endpoint_of(str(entry.get("base_url") or "")) != cur_ep:
+                continue                      # 跨端点 = 换供应商，不许
+            if cur_price is None or float(r.get("out_price") or 0) < cur_price:
                 return mid
         return ""
 
