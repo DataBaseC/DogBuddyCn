@@ -158,7 +158,8 @@ class DogBuddyApp:
 
         # v0.12.1：流水线编排（步骤级 checkpoint / 幂等续跑）。
         # `dispatch` 直接用工位的 `dispatch_and_wait` —— 引擎不重复造派活通道。
-        self.qc = QcService(self.db)
+        # v0.13.1：复核结论回流（驳回 → 难例池 + 路由失败率 + 漂移告警事件）
+        self.qc = QcService(self.db, routing=self.routing, bus=self.bus)
         # v0.13.0：工业信号（边缘推指标）+ 本地视觉服务适配器（图像不出厂）
         self.metrics = SensorHub(self.db)
         self.cv = CvAdapter(cost=self.cost)

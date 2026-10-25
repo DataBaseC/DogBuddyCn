@@ -243,10 +243,14 @@
         return request('DELETE', '/api/costs/budgets/' + enc(id));
       }
     },
-    /* v0.13.0：工业看板（指标 / 抽检批次 / 流水线运行） */
+    /* v0.13.0/1：工业看板（指标 / 抽检 / 难例 / 漂移 / 流水线运行） */
     industry: {
       metrics: function () { return request('GET', '/api/metrics'); },
       qcBatches: function (limit) { return request('GET', '/api/qc/batches?limit=' + (limit || 5)); },
+      hardSamples: function (limit) {
+        return request('GET', '/api/qc/hard-samples?limit=' + (limit || 5));
+      },
+      drift: function () { return request('GET', '/api/qc/drift'); },
       pipelineRuns: function (limit) { return request('GET', '/api/pipelines/runs?limit=' + (limit || 5)); }
     },
 

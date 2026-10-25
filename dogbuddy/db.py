@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -570,6 +570,42 @@ def _migrate_v20(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v21(conn: sqlite3.Connection) -> None:
+    """数据闭环（2026-10-25，0.13.1）：让复核结果**回流**。
+
+    0.12.2 已经有 `qc_reviews`（谁被驳回），但那些样本只是躺在库里：
+    既没有进"难例池"，也没有反馈给抽检比例和模型路由。这一版补三处：
+
+      * `hard_samples`  难例池（复核驳回的样本，可导出成训练清单）
+      * `qc_reviews.model`  这次判定是**哪个模型**做的（路由要按模型算失败率）
+      * 索引：按时间/批次查难例
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS hard_samples(
+      id TEXT PRIMARY KEY,
+      batch_id TEXT DEFAULT '',
+      item_ref TEXT DEFAULT '',
+      model_label TEXT DEFAULT '',
+      model TEXT DEFAULT '',
+      confidence REAL DEFAULT 0,
+      verdict TEXT DEFAULT '',
+      reviewer TEXT DEFAULT '',
+      line TEXT DEFAULT '',
+      task_class TEXT DEFAULT '',
+      ts TEXT NOT NULL,
+      meta_json TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_hard_batch ON hard_samples(batch_id);
+    CREATE INDEX IF NOT EXISTS ix_hard_ts ON hard_samples(ts);
+    """)
+    # 老库里没有 model 列 —— SQLite 不支持 IF NOT EXISTS 的 ADD COLUMN，只能试
+    try:
+        conn.execute("ALTER TABLE qc_reviews ADD COLUMN model TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass                      # 已经有了
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -594,6 +630,7 @@ _MIGRATIONS: dict[int, Any] = {
     18: _migrate_v18,
     19: _migrate_v19,
     20: _migrate_v20,
+    21: _migrate_v21,
 }
 
 
@@ -2093,10 +2130,11 @@ class Database:
         with self._lock:
             self._conn.execute(
                 """INSERT INTO qc_reviews(id, batch_id, item_ref, model_label,
-                                          confidence, reviewer, verdict, created_at)
-                   VALUES(?,?,?,?,?,?,?,?)""",
+                                          model, confidence, reviewer, verdict, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
                 (rid, row.get("batch_id") or "", row.get("item_ref") or "",
-                 row.get("model_label") or "", float(row.get("confidence") or 0),
+                 row.get("model_label") or "", row.get("model") or "",
+                 float(row.get("confidence") or 0),
                  row.get("reviewer") or "", row.get("verdict") or "",
                  row.get("created_at") or datetime.now(timezone.utc).isoformat()))
             self._conn.commit()
@@ -2108,6 +2146,60 @@ class Database:
                 "SELECT * FROM qc_reviews WHERE batch_id=? ORDER BY created_at",
                 (str(batch_id),)).fetchall()
         return [dict(r) for r in rows]
+
+    def recent_qc_reviews(self, limit: int = 200) -> list[dict[str, Any]]:
+        """跨批次取最近 N 条复核（漂移监控用）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM qc_reviews ORDER BY created_at DESC LIMIT ?",
+                (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------- 难例池（0.13.1）
+    def add_hard_sample(self, row: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO hard_samples(id, batch_id, item_ref, model_label, model,
+                                            confidence, verdict, reviewer, line,
+                                            task_class, ts, meta_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (str(row.get("id") or ""), row.get("batch_id") or "",
+                 row.get("item_ref") or "", row.get("model_label") or "",
+                 row.get("model") or "", float(row.get("confidence") or 0),
+                 row.get("verdict") or "", row.get("reviewer") or "",
+                 row.get("line") or "", row.get("task_class") or "",
+                 row.get("ts") or datetime.now(timezone.utc).isoformat(),
+                 row.get("meta_json") or ""))
+            self._conn.commit()
+        return row
+
+    def list_hard_samples(self, limit: int = 100, batch_id: str = "",
+                          line: str = "") -> list[dict[str, Any]]:
+        q = "SELECT * FROM hard_samples"
+        clause, args = [], []
+        if batch_id:
+            clause.append("batch_id=?")
+            args.append(batch_id)
+        if line:
+            clause.append("line=?")
+            args.append(line)
+        if clause:
+            q += " WHERE " + " AND ".join(clause)
+        q += " ORDER BY ts DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(q, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_hard_samples(self, since: str = "") -> int:
+        if since:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM hard_samples WHERE ts >= ?", (since,)).fetchone()
+        else:
+            with self._lock:
+                row = self._conn.execute("SELECT COUNT(*) FROM hard_samples").fetchone()
+        return int(row[0] if row else 0)
 
     # ------------------------------------------------- 流水线（0.12.1）
     def upsert_pipeline(self, row: dict[str, Any]) -> dict[str, Any]:

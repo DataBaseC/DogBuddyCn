@@ -36,6 +36,8 @@ class BatchIn(BaseModel):
 class ReviewIn(BaseModel):
     item_ref: str = ""
     model_label: str = ""
+    #: 做这次判定的模型（本地视觉服务名）；给了才会回灌路由的失败率
+    model: str = ""
     confidence: float = 0.0
     verdict: str = "agree"          # agree | reject | unknown
     reviewer: str = "owner"
@@ -67,6 +69,18 @@ def router(svc, auth_deps) -> APIRouter:
             out["batch_id"] = row.get("id")
         return out
 
+    @r.get("/qc/drift", dependencies=auth_deps)
+    def drift(threshold: float = 0.30, min_samples: int = 10,
+              window: int = 200) -> dict[str, Any]:
+        """按「产线 × 模型」看滚动驳回率（0.13.1 闭环的告警出口）。"""
+        return _qc().drift(threshold=threshold, min_samples=min_samples, window=window)
+
+    @r.get("/qc/hard-samples", dependencies=auth_deps)
+    def hard_samples(limit: int = 100, batch_id: str = "", line: str = "") -> dict[str, Any]:
+        """难例池：复核驳回的样本（可直接导出成训练清单）。"""
+        rows = _qc().hard_samples(limit=limit, batch_id=batch_id, line=line)
+        return {"samples": rows, "count": len(rows)}
+
     @r.get("/qc/batches", dependencies=auth_deps)
     def list_batches(limit: int = 50) -> dict[str, Any]:
         return {"batches": _qc().batches(limit=limit)}
@@ -89,7 +103,7 @@ def router(svc, auth_deps) -> APIRouter:
     def add_review(batch_id: str, body: ReviewIn) -> dict[str, Any]:
         try:
             return _qc().review(batch_id, item_ref=body.item_ref,
-                                model_label=body.model_label,
+                                model_label=body.model_label, model=body.model,
                                 confidence=body.confidence,
                                 reviewer=body.reviewer, verdict=body.verdict)
         except ValueError as e:

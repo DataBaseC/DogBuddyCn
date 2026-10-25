@@ -625,10 +625,14 @@
         return request('DELETE', '/api/costs/budgets/' + enc(id));
       }
     },
-    /* v0.13.0：工业看板（指标 / 抽检批次 / 流水线运行） */
+    /* v0.13.0/1：工业看板（指标 / 抽检 / 难例 / 漂移 / 流水线运行） */
     industry: {
       metrics: function () { return request('GET', '/api/metrics'); },
       qcBatches: function (limit) { return request('GET', '/api/qc/batches?limit=' + (limit || 5)); },
+      hardSamples: function (limit) {
+        return request('GET', '/api/qc/hard-samples?limit=' + (limit || 5));
+      },
+      drift: function () { return request('GET', '/api/qc/drift'); },
       pipelineRuns: function (limit) { return request('GET', '/api/pipelines/runs?limit=' + (limit || 5)); }
     },
 
@@ -8145,7 +8149,7 @@
 
   var state = { days: 7, summary: {}, prices: [], budgets: [], routes: [],
                 routesHealth: {}, metrics: [], qcBatches: [], pipelineRuns: [],
-                loaded: false };
+                hardSamples: [], drift: {}, loaded: false };
 
   function money(v) {
     var n = Number(v || 0);
@@ -8288,6 +8292,18 @@
         '<td class="mono">' + (Number(b.miss_estimate || 0) * 100).toFixed(1) + '%</td>' +
         '<td>' + U.esc(b.status || '') + '</td></tr>';
     });
+    var driftRows = ((state.drift || {}).alerts || []).map(function (a) {
+      return '<span class="badge badge-red" style="margin-right:6px">' +
+        U.esc(a.line) + ' / ' + U.esc(a.model) + '：驳回率 ' +
+        (Number(a.reject_rate || 0) * 100).toFixed(1) + '%（' + a.samples + ' 个样本）</span>';
+    });
+    var hRows = (state.hardSamples || []).map(function (h) {
+      return '<tr><td class="mono">' + U.esc(h.item_ref || '') + '</td>' +
+        '<td>' + U.esc(h.model_label || h.model || 'unknown') + '</td>' +
+        '<td class="mono">' + U.esc(h.model || '') + '</td>' +
+        '<td class="mono">' + (Number(h.confidence || 0) * 100).toFixed(0) + '%</td>' +
+        '<td class="hint">' + U.esc(U.relTime(h.ts)) + '</td></tr>';
+    });
     var pRows = (state.pipelineRuns || []).map(function (r) {
       var cls = r.status === 'done' ? 'badge-green'
         : (r.status === 'failed' ? 'badge-red' : 'badge-amber');
@@ -8308,6 +8324,14 @@
         ? '<table class="table"><thead><tr><th>批次</th><th>总量/抽样</th><th>缺陷率</th>' +
           '<th>漏检估计</th><th>状态</th></tr></thead><tbody>' + qRows.join('') + '</tbody></table>'
         : '<p class="muted">还没有抽检批次。</p>') +
+      '<div class="card-sub" style="margin:12px 0 4px">漂移告警（按产线 × 模型，连续高驳回）</div>' +
+      (driftRows.length ? '<p>' + driftRows.join('') + '</p>'
+        : '<p class="muted">当前没有超阈值告警。</p>') +
+      '<div class="card-sub" style="margin:12px 0 4px">最近难例（复核驳回自动回流，可直接导出训练）</div>' +
+      (hRows.length
+        ? '<table class="table"><thead><tr><th>样本</th><th>原判</th><th>模型</th>' +
+          '<th>置信度</th><th>时间</th></tr></thead><tbody>' + hRows.join('') + '</tbody></table>'
+        : '<p class="muted">还没有难例。</p>') +
       '<div class="card-sub" style="margin:12px 0 4px">最近流水线运行</div>' +
       (pRows.length
         ? '<table class="table"><thead><tr><th>run</th><th>流水线</th><th>状态</th>' +
@@ -8326,6 +8350,14 @@
     }).catch(function () {});
     A.industry.pipelineRuns(5).then(function (r) {
       state.pipelineRuns = (r && r.runs) || [];
+      renderIndustry();
+    }).catch(function () {});
+    A.industry.hardSamples(5).then(function (r) {
+      state.hardSamples = (r && r.samples) || [];
+      renderIndustry();
+    }).catch(function () {});
+    A.industry.drift().then(function (r) {
+      state.drift = r || {};
       renderIndustry();
     }).catch(function () {});
   }

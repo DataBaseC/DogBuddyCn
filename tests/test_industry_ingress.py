@@ -237,6 +237,9 @@ def test_console_industry_card_wired():
     assert "/api/metrics" in api and "/api/qc/batches" in api and "/api/pipelines/runs" in api
     # 过期指标必须显式标红（"数据可能断了"是现场第一故障）
     assert "3600" in js and "数据可能断了" in js
+    # 0.13.1：复核闭环的出口也要能看见（难例 / 按产线×模型的漂移告警）
+    assert "/api/qc/hard-samples" in api and "/api/qc/drift" in api
+    assert "最近难例" in js and "漂移告警" in js
 
 
 def test_ingress_creates_pipeline_run(client):

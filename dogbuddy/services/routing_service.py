@@ -74,6 +74,15 @@ class RoutingService:
         except Exception:  # noqa: BLE001 — 统计算挂了不能影响业务
             logger.debug("route stat bump failed", exc_info=True)
 
+    def record_review(self, task_class: str, model: str, ok: bool) -> None:
+        """复核结论回灌（0.13.1）。
+
+        为什么不让它跟 run 成败混着看：`run` 的"done"只说明**流程跑完了**，
+        不代表判定是对的；而复核是**真值**。两个信号都进同一张统计表，
+        `p_fail` 因此同时反映"跑不完"和"判错了"——这正是路由该优化的目标。
+        """
+        self.record(task_class, model, ok, escalated=not ok)
+
     # ------------------------------------------------------- 候选模型
     def _catalog(self) -> dict[str, dict[str, Any]]:
         return {str(m.get("model") or ""): m

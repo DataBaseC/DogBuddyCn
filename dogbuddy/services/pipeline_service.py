@@ -323,7 +323,8 @@ class PipelineService:
                 row = self.qc.open_batch(
                     total=int(plan["batch"]), sampled=int(plan["sample"]),
                     line=str(params.get("line") or ""), pipeline_run_id=run_id,
-                    policy=plan["policy"], cost_estimate=float(plan["cost"]))
+                    policy=plan["policy"], cost_estimate=float(plan["cost"]),
+                    task_class=str(params.get("task_class") or "qc"))
                 plan["batch_id"] = row.get("id")
             return plan
         raise RuntimeError(f"未知 action：{action}")
