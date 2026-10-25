@@ -158,6 +158,36 @@ class AgentLoop:
         # 调用签名 → 连续失败次数（C2）
         self._fail_streak: dict[str, int] = {}
 
+    # ------------------------------------------------------ v0.11.1 预算助手
+    @staticmethod
+    def _audit_budget(ctx: ToolContext, action: str, decision: dict[str, Any]) -> None:
+        """预算动作写审计（降档 / 暂停都要留痕 —— 静音降级是本项目反复踩的坑）。"""
+        try:
+            db = getattr(ctx, "db", None)
+            if db is None:
+                return
+            db.audit("system", action,
+                     f"{decision.get('scope')}:{decision.get('scope_id') or '*'} "
+                     f"{decision.get('period')} spent={decision.get('spent')} "
+                     f"limit={decision.get('limit')} action={decision.get('action')}")
+        except Exception:  # noqa: BLE001
+            logger.debug("budget audit failed", exc_info=True)
+
+    def _pause_for_budget(self, ctx: ToolContext, result: AgentResult,
+                          decision: dict[str, Any]) -> None:
+        """预算用尽 → 停止本轮（不是失败，stop_reason=budget，便于上层区分）。"""
+        msg = (f"[预算用尽] {decision.get('reason') or '预算已用尽'}；"
+               f"策略 {decision.get('action') or 'pause'} → 本轮暂停，"
+               f"**没有继续调用模型**。到控制台「成本」页调整预算，或等下个周期。")
+        self.session.append("system", msg)
+        result.content = msg
+        result.stop_reason = "budget"
+        result.error_code = "budget_exhausted"
+        result.error_detail = (f"{decision.get('scope')} 预算用尽"
+                               f"（{decision.get('spent')}/{decision.get('limit')}）")
+        self._audit_budget(ctx, "cost:paused", decision)
+        logger.warning("budget pause: %s", msg)
+
     # ------------------------------------------------------------------ run
     async def run(self, user_input: str, ctx: ToolContext,
                   on_delta: Callable[[str], None] | None = None) -> AgentResult:
@@ -172,8 +202,40 @@ class AgentLoop:
                                 meta={"sender": sender} if sender else None)
         schemas = self.registry.schemas(only=self.tool_names)
 
+        #: v0.11.1：本轮是否已经降过档（一个 run 只降一次，避免在便宜档和贵档之间来回跳）
+        budget_downgraded = False
+
         for step in range(1, self.max_iterations + 1):
             result.iterations = step
+            # ---------------- v0.11.1 预算闸门 ----------------
+            # 在**花下一次钱之前**问一句：这一轮还能不能调模型。
+            # `budget_check` 由服务层注入（管理员/工位各自带作用域），返回
+            # CostService.budget_state() 的判定；没注入就不检查（老行为）。
+            decision = None
+            _check = ctx.extra.get("budget_check")
+            if callable(_check):
+                try:
+                    decision = _check()
+                except Exception:  # noqa: BLE001 — 预算算错不能拦死正常任务
+                    logger.debug("budget_check failed", exc_info=True)
+                    decision = None
+            if decision and decision.get("exceeded"):
+                if (decision.get("action") == "downgrade" and not budget_downgraded
+                        and decision.get("suggest_model")):
+                    if hasattr(self.llm, "set_model"):
+                        try:
+                            self.llm.set_model(str(decision["suggest_model"]))
+                            budget_downgraded = True
+                            note = (f"[预算降档] {decision.get('reason', '')}；"
+                                    f"本轮改用更便宜的模型 {decision['suggest_model']}。")
+                            self.session.append("system", note)
+                            self._audit_budget(ctx, "cost:downgrade", decision)
+                        except Exception:  # noqa: BLE001
+                            logger.warning("budget downgrade failed", exc_info=True)
+                            budget_downgraded = False
+                if not (decision.get("action") == "downgrade" and budget_downgraded):
+                    self._pause_for_budget(ctx, result, decision)
+                    break
             # v0.10.46（owner："显示的缓存命中率比较低，请排查"）：**运行中也要压缩**。
             # 以前只在 run 结束之后压一次；一次工具密集的运行里消息数会从 48 冲到
             # 60+，而 `ContextBuilder` 只取 `recent(60)` —— 窗口中途滑动 → 请求的

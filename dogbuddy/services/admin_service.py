@@ -385,7 +385,9 @@ class AdminService:
                                  "on_tool": self._tool_emitter(sender),
                                  # v0.11.0：成本账本（每次 LLM 调用记一笔；
                                  # 模型名由 loop 回调时把 llm 传进来，见 _usage_hook）
-                                 "on_usage": self._usage_hook(sender)})
+                                 "on_usage": self._usage_hook(sender),
+                                 # v0.11.1：每次调模型前问一句"今天还能不能花"
+                                 "budget_check": self._budget_check(f"admin:{sender}")})
         loop = AgentLoop(
             llm=llm_client, registry=self.registry, session=session,
             builder=self.builder, tool_names=role_spec.tool_names if role_spec else [],
@@ -471,6 +473,21 @@ class AdminService:
                 logger.debug("admin tool emit failed", exc_info=True)
 
         return hook
+
+    def _budget_check(self, window_id: str, run_id: str = ""):
+        """预算闸门（v0.11.1）：每次调模型前问一句，超了就停/降档。
+
+        只在服务层做闭包（loop 只管调用），作用域由调用方给：管理员是
+        `admin:<对话>`，工位是窗口 id + run id。没有 cost 服务 → 返回 None，
+        loop 里 `callable()` 会跳过（老行为，不影响启动顺序）。
+        """
+        cost = getattr(self, "cost", None)
+        if cost is None:
+            return None
+
+        def check():
+            return cost.budget_state(window_id=window_id, run_id=run_id)
+        return check
 
     def _confirm_asker(self, sender: str):
         """给 `server_exec` 的人工确认通道（v0.10.50 · 方案B）。

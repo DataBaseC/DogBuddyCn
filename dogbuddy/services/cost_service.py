@@ -175,6 +175,168 @@ class CostService:
         return {"stored": stored, "amount": amount, "unit_price": unit_price}
 
     # ------------------------------------------------------------- 查询
+    # ------------------------------------------------------- 预算（v0.11.1）
+    BUDGET_ACTIONS = ("downgrade", "queue", "pause")
+    BUDGET_PERIODS = ("day", "week")
+    BUDGET_SCOPES = ("global", "job", "group", "window", "run")
+
+    def budgets(self) -> list[dict[str, Any]]:
+        return self.db.list_budgets()
+
+    def upsert_budget(self, entry: dict[str, Any]) -> dict[str, Any]:
+        scope = str(entry.get("scope_type") or "global")
+        period = str(entry.get("period") or "day")
+        action = str(entry.get("strategy") or "downgrade")
+        limit = float(entry.get("limit_amount") or 0)
+        if scope not in self.BUDGET_SCOPES:
+            raise ValueError(f"scope_type 必须是 {self.BUDGET_SCOPES} 之一")
+        if period not in self.BUDGET_PERIODS:
+            raise ValueError(f"period 必须是 {self.BUDGET_PERIODS} 之一")
+        if action not in self.BUDGET_ACTIONS:
+            raise ValueError(f"strategy 必须是 {self.BUDGET_ACTIONS} 之一")
+        if limit < 0:
+            raise ValueError("limit_amount 不能为负")
+        scope_id = str(entry.get("scope_id") or "")
+        if scope != "global" and not scope_id:
+            raise ValueError(f"{scope} 预算必须给 scope_id")
+        bid = str(entry.get("id") or "") or f"{scope}:{scope_id or '*'}"
+        saved = self.db.upsert_budget({"id": bid, "scope_type": scope,
+                                       "scope_id": scope_id, "period": period,
+                                       "limit_amount": limit, "strategy": action,
+                                       "enabled": 1 if entry.get("enabled", True) else 0})
+        self.db.audit("system", "cost:budget",
+                      f"{bid} {period} limit={limit} action={action}")
+        return saved
+
+    def delete_budget(self, bid: str) -> bool:
+        ok = self.db.delete_budget(bid)
+        if ok:
+            self.db.audit("system", "cost:budget:delete", str(bid))
+        return ok
+
+    @staticmethod
+    def _period_start(period: str) -> str:
+        now = datetime.now(timezone.utc)
+        if period == "week":
+            return (now - timedelta(days=7)).isoformat()
+        return now.strftime("%Y-%m-%dT00:00:00+00:00")
+
+    def cheaper_model(self, current: str = "") -> str:
+        """单价表里比当前更便宜的模型 id（给 `downgrade` 用）。没有就回空。
+
+        只按**输出单价**排序：输入/输出大体同向，但输出贵得多，是主要成本项。
+        """
+        rows = [r for r in self.db.list_cost_models()
+                if r.get("enabled") and float(r.get("out_price") or 0) > 0]
+        if not rows:
+            return ""
+        rows.sort(key=lambda r: (float(r.get("out_price") or 0),
+                                 float(r.get("in_price") or 0)))
+        cur_price = None
+        for r in rows:
+            if str(r.get("model") or "") == current:
+                cur_price = float(r.get("out_price") or 0)
+        for r in rows:
+            mid = str(r.get("model") or "")
+            if mid and mid != current and (cur_price is None
+                                           or float(r.get("out_price") or 0) < cur_price):
+                return mid
+        return ""
+
+    _SCOPE_KEYS = {"job": "job_id", "group": "group_id",
+                   "window": "window_id", "run": "run_id"}
+
+    def _scope_spend(self, stype: str, period: str, ids: dict[str, str]) -> float:
+        """某作用域在这个周期内花了多少（账本就是唯一真相）。"""
+        key = self._SCOPE_KEYS.get(stype)
+        since = self._period_start(period)
+        if key is None:
+            return float(self.db.spend_since(since)["amount"])
+        val = ids.get(key) or ""
+        if not val:
+            return 0.0
+        return float(self.db.spend_since(since, **{key: val})["amount"])
+
+    def budget_states(self, *, window_id: str = "", run_id: str = "",
+                      job_id: str = "", group_id: str = "") -> list[dict[str, Any]]:
+        """所有预算的实时用量（控制台画进度条用，不参与判定）。"""
+        ids = {"window_id": window_id, "run_id": run_id,
+               "job_id": job_id, "group_id": group_id}
+        out: list[dict[str, Any]] = []
+        for b in self.db.list_budgets():
+            stype = str(b.get("scope_type") or "global")
+            period = str(b.get("period") or "day")
+            limit = float(b.get("limit_amount") or 0)
+            spent = self._scope_spend(stype, period, ids) if limit > 0 else 0.0
+            ratio = (spent / limit) if limit else 0.0
+            out.append({**b, "spent": round(spent, 6), "ratio": round(ratio, 4),
+                        "level": ("exceeded" if ratio >= 1 else
+                                  "warn" if ratio >= 0.8 else "ok")})
+        return out
+
+    def budget_state(self, *, window_id: str = "", run_id: str = "",
+                     job_id: str = "", group_id: str = "",
+                     current_model: str = "") -> dict[str, Any]:
+        """这一轮还能不能花钱。返回最严重的那个预算判定。
+
+        * 只看 `enabled=1` 且 `limit_amount > 0` 的预算；
+        * 作用域：global 不筛；job/group/window/run 按各自主键筛账本；
+        * **取比值最大的那条**（不是最先命中的）：这样"窗口预算已超 120%"不会被
+          一条宽松的全局预算掩盖；
+        * 到 80% 就 `warn`（前端提示），超过 100% 才 `exceeded`。
+        """
+        budgets = [b for b in self.db.list_budgets() if int(b.get("enabled") or 0)]
+        base = {"level": "ok", "exceeded": False, "action": "", "scope": "",
+                "scope_id": "", "period": "", "limit": 0.0, "spent": 0.0,
+                "ratio": 0.0, "suggest_model": "", "reason": ""}
+        if not budgets:
+            return base
+        # 两个映射别混：`scope_ids` 是"作用域类型 → 值"（判定用），
+        # `ids` 是"账本列名 → 值"（查账用）。混用会让窗口预算永远算成 0（踩过）。
+        scope_ids = {"global": "", "job": job_id, "group": group_id,
+                     "window": window_id, "run": run_id}
+        ids = {"window_id": window_id, "run_id": run_id,
+               "job_id": job_id, "group_id": group_id}
+        best: dict[str, Any] | None = None
+        for b in budgets:
+            stype = str(b.get("scope_type") or "global")
+            if stype not in scope_ids:
+                continue
+            limit = float(b.get("limit_amount") or 0)
+            if limit <= 0:
+                continue
+            sid = str(b.get("scope_id") or "")
+            scoped = scope_ids[stype]
+            if stype != "global":
+                if not scoped:
+                    continue
+                if sid and sid != scoped:
+                    continue
+            period = str(b.get("period") or "day")
+            spent = self._scope_spend(stype, period, ids)
+            ratio = spent / limit if limit else 0.0
+            entry = {**base, "scope": stype, "scope_id": sid, "period": period,
+                     "limit": round(limit, 6), "spent": round(spent, 6),
+                     "ratio": round(ratio, 4),
+                     "action": str(b.get("strategy") or "downgrade")}
+            if ratio >= 1:
+                entry["level"] = "exceeded"
+                entry["exceeded"] = True
+                entry["reason"] = f"{stype} 预算用尽：已用 {spent:.4f} / {limit:.4f}（{period}）"
+                if entry["action"] == "downgrade":
+                    entry["suggest_model"] = self.cheaper_model(current_model)
+                    if not entry["suggest_model"]:
+                        entry["reason"] += "；单价表里没有更便宜的档位，按暂停处理"
+                if best is None or ratio > float(best.get("ratio") or 0):
+                    best = entry
+            elif ratio >= 0.8:
+                entry["level"] = "warn"
+                entry["reason"] = f"{stype} 预算已用 {ratio * 100:.0f}%"
+                if best is None or float(best.get("ratio") or 0) < ratio:
+                    if best is None or not best.get("exceeded"):
+                        best = entry
+        return best or base
+
     def summary(self, days: int = 7, group_by: str = "day") -> dict[str, Any]:
         since = _since(days)
         today = _since(0)
@@ -194,6 +356,8 @@ class CostService:
             "by_model": by_model,
             "priced_models": len([r for r in self.db.list_cost_models()
                                   if int(r.get("enabled") or 0)]),
+            # v0.11.1：预算现状（控制台画进度条、判断"今天还能不能跑"）
+            "budgets": self.budget_states(),
         }
 
     def ledger(self, since: str = "", until: str = "", limit: int = 200) -> list[dict]:
@@ -208,12 +372,18 @@ class CostService:
         prices = self.db.list_cost_models()
         unpriced = [r for r in prices if not float(r.get("in_price") or 0)
                     and not float(r.get("out_price") or 0)]
+        budgets = self.budget_states()
+        worst = max(budgets, key=lambda b: float(b.get("ratio") or 0)) if budgets else None
         return {
             "today_amount": round(float(today.get("amount") or 0), 6),
             "today_calls": int(today.get("calls") or 0),
             "today_tokens": int(today.get("in_tokens") or 0) + int(today.get("out_tokens") or 0),
             "priced_models": len(prices),
             "zero_priced": len(unpriced),
+            # v0.11.1：预算到哪了（"今天还能不能跑"必须能一眼看到）
+            "budget": ({"level": worst.get("level"), "scope": worst.get("scope"),
+                        "limit": worst.get("limit"), "spent": worst.get("spent"),
+                        "ratio": worst.get("ratio")} if worst else None),
             "hint": ("单价表是空的：去「成本」页点「按目录生成占位价」，"
                      "或先只统计用量（金额会是 0）") if not prices else "",
         }

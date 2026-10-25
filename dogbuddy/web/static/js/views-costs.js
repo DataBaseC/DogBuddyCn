@@ -8,7 +8,7 @@
   var U = global.UI, A = global.API;
   global.DogBuddyViews = global.DogBuddyViews || {};
 
-  var state = { days: 7, summary: {}, prices: [], loaded: false };
+  var state = { days: 7, summary: {}, prices: [], budgets: [], loaded: false };
 
   function money(v) {
     var n = Number(v || 0);
@@ -81,6 +81,110 @@
     });
   }
 
+  /* ---------------- v0.11.1 预算 ---------------- */
+  var SCOPE_LABEL = { global: '全局', group: '群组', job: '定时任务',
+                      window: '工位', run: '单次运行' };
+
+  function bar(ratio, level) {
+    var pct = Math.min(100, Math.round((ratio || 0) * 100));
+    var cls = level === 'exceeded' ? 'err' : (level === 'warn' ? 'warn' : 'ok');
+    return '<div class="cost-bar"><div class="cost-bar-fill cost-bar-' + cls +
+      '" style="width:' + pct + '%"></div></div>';
+  }
+
+  function renderBudgets() {
+    var host = U.$('#cost-budgets');
+    if (!host) return;
+    var rows = (state.budgets || []).map(function (b) {
+      return '<tr><td>' + U.esc(SCOPE_LABEL[b.scope_type] || b.scope_type) +
+        (b.scope_id ? ' <span class="mono card-sub">' + U.esc(b.scope_id) + '</span>' : '') +
+        '</td>' +
+        '<td class="mono">' + U.esc(String(b.limit_amount)) + '</td>' +
+        '<td class="mono">' + U.esc(money(b.spent)) + '</td>' +
+        '<td style="min-width:120px">' + bar(b.ratio, b.level) + '</td>' +
+        '<td>' + U.esc(b.strategy) + ' · ' + U.esc(b.period) + '</td>' +
+        '<td><button class="btn btn-soft btn-sm" data-budget="' + U.esc(b.id) + '">改</button> ' +
+        '<button class="btn btn-ghost btn-sm" data-budget-del="' + U.esc(b.id) + '">删</button></td></tr>';
+    });
+    host.innerHTML = '<h3 class="card-title">预算 <span class="card-sub">（超限走 降档→排队→暂停，' +
+      '任何降级都留审计）</span></h3>' +
+      (rows.length
+        ? '<table class="table"><thead><tr><th>作用域</th><th>上限</th><th>已用</th>' +
+          '<th>进度</th><th>策略</th><th></th></tr></thead><tbody>' + rows.join('') +
+          '</tbody></table>'
+        : '<p class="muted">还没设预算 —— 不设就是不限（金额照常记账）。</p>');
+    U.$$('#cost-budgets [data-budget]').forEach(function (btn) {
+      btn.addEventListener('click', function () { editBudget(btn.getAttribute('data-budget')); });
+    });
+    U.$$('#cost-budgets [data-budget-del]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-budget-del');
+        if (!window.confirm('删除预算 ' + id + '？')) return;
+        A.costs.deleteBudget(id).then(function () { U.toast('success', '已删除'); load(); })
+          .catch(function (e) { U.toast('error', e.message); });
+      });
+    });
+  }
+
+  function editBudget(id) {
+    var b = (state.budgets || []).filter(function (x) { return String(x.id) === String(id); })[0] || {};
+    var scopes = Object.keys(SCOPE_LABEL);
+    U.modal({
+      title: '预算 · ' + (id || '新增'),
+      body: '<div class="card-sub" style="margin-bottom:8px">' +
+        '超限后：<b>downgrade</b> 换更便宜的模型（单价表里挑）→ 没有更便宜的就停；' +
+        '<b>queue</b> 排队到下个周期；<b>pause</b> 直接暂停本轮。' +
+        '只有 <b>用完</b> 才拦，到 80% 只在成本页提示。</div>' +
+        '<div class="field"><span class="field-label">作用域</span>' +
+        '<select class="select" id="bg-scope">' + scopes.map(function (s) {
+          return '<option value="' + s + '"' + (b.scope_type === s ? ' selected' : '') +
+            '>' + SCOPE_LABEL[s] + '（' + s + '）</option>';
+        }).join('') + '</select></div>' +
+        '<div class="field"><span class="field-label">scope_id（global 留空）</span>' +
+        '<input class="input mono" id="bg-sid" value="' + U.esc(b.scope_id || '') + '"></div>' +
+        '<div class="field"><span class="field-label">周期</span>' +
+        '<select class="select" id="bg-period">' +
+        '<option value="day"' + (b.period === 'day' ? ' selected' : '') + '>每天</option>' +
+        '<option value="week"' + (b.period === 'week' ? ' selected' : '') + '>每周</option>' +
+        '</select></div>' +
+        '<div class="field"><span class="field-label">上限（金额）</span>' +
+        '<input class="input mono" id="bg-limit" value="' + U.esc(String(b.limit_amount || 1)) + '"></div>' +
+        '<div class="field"><span class="field-label">超限策略</span>' +
+        '<select class="select" id="bg-strategy">' +
+        ['downgrade', 'queue', 'pause'].map(function (s) {
+          return '<option value="' + s + '"' + (b.strategy === s ? ' selected' : '') + '>' + s + '</option>';
+        }).join('') + '</select></div>',
+      buttons: [
+        { label: '取消', cls: 'btn-ghost' },
+        {
+          label: '保存', cls: 'btn-primary',
+          onClick: function (body) {
+            var scope = body.querySelector('#bg-scope').value;
+            var sid = body.querySelector('#bg-sid').value.trim();
+            var payload = {
+              scope_type: scope, scope_id: scope === 'global' ? '' : sid,
+              period: body.querySelector('#bg-period').value,
+              limit_amount: Number(body.querySelector('#bg-limit').value || 0),
+              strategy: body.querySelector('#bg-strategy').value,
+              enabled: true
+            };
+            if (scope !== 'global' && !payload.scope_id) {
+              U.toast('error', '这个作用域必须填 scope_id');
+              return false;
+            }
+            if (!(payload.limit_amount > 0)) { U.toast('error', '上限要大于 0'); return false; }
+            var bid = id || (scope + ':' + (payload.scope_id || '*'));
+            A.costs.putBudget(bid, payload).then(function () {
+              U.toast('success', '已保存（预算变更已留审计）');
+              return load();
+            }).catch(function (e) { U.toast('error', e.message); return false; });
+            return true;
+          }
+        }
+      ]
+    });
+  }
+
   function editPrice(id) {
     var p = (state.prices || []).filter(function (x) { return String(x.id) === String(id); })[0] || {};
     U.modal({
@@ -143,6 +247,10 @@
       state.prices = (r && r.prices) || [];
       renderPrices();
     }).catch(function () { /* 成本页不因为单价表失败而整页白 */ });
+    A.costs.budgets().then(function (r) {
+      state.budgets = (r && r.budgets) || [];
+      renderBudgets();
+    }).catch(function () { /* 预算表失败也不拦页面 */ });
   }
 
   function seed() {
