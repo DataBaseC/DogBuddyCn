@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -467,6 +467,47 @@ def _migrate_v17(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v18(conn: sqlite3.Connection) -> None:
+    """流水线编排（2026-10-25，0.12.1）：把"多步、有依赖、可续跑"变成一等公民。
+
+    现在的 `runs` 是"一次员工回合"，没有步骤概念：中途挂掉只能整轮重跑，
+    重跑又会重复花钱、重复改文件。工业场景里（取图→判定→复核→报告）
+    必须是**步骤级**的：哪步成了、产物在哪、下次从哪继续。
+
+    三张表：
+      * `pipelines`      定义（steps 的 DAG，JSON 存 spec）
+      * `pipeline_runs`  一次执行（输入/输出/状态）
+      * `pipeline_steps` 步骤实例（**主键 = run_id|step_id**，带 `idem_key` 与 `attempt`）
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS pipelines(
+      id TEXT PRIMARY KEY,
+      name TEXT DEFAULT '', description TEXT DEFAULT '',
+      spec_json TEXT DEFAULT '', enabled INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT '', updated_at TEXT DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS pipeline_runs(
+      id TEXT PRIMARY KEY,
+      pipeline_id TEXT DEFAULT '', status TEXT DEFAULT 'running',
+      input_json TEXT DEFAULT '', output_json TEXT DEFAULT '',
+      started_at TEXT DEFAULT '', finished_at TEXT DEFAULT '', error TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_pruns_pipe ON pipeline_runs(pipeline_id, started_at);
+
+    CREATE TABLE IF NOT EXISTS pipeline_steps(
+      id TEXT PRIMARY KEY,
+      run_id TEXT DEFAULT '', step_id TEXT DEFAULT '', action TEXT DEFAULT '',
+      status TEXT DEFAULT 'pending',
+      attempt INTEGER DEFAULT 0, idem_key TEXT DEFAULT '',
+      params_json TEXT DEFAULT '', output_json TEXT DEFAULT '', error TEXT DEFAULT '',
+      started_at TEXT DEFAULT '', finished_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_psteps_run ON pipeline_steps(run_id);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -488,6 +529,7 @@ _MIGRATIONS: dict[int, Any] = {
     15: _migrate_v15,
     16: _migrate_v16,
     17: _migrate_v17,
+    18: _migrate_v18,
 }
 
 
@@ -1890,6 +1932,141 @@ class Database:
             row = self._conn.execute(q, args).fetchone()
         return dict(row) if row else {"calls": 0, "amount": 0.0,
                                       "in_tokens": 0, "out_tokens": 0}
+
+    # ------------------------------------------------- 流水线（0.12.1）
+    def upsert_pipeline(self, row: dict[str, Any]) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        pid = str(row.get("id") or "")
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO pipelines(id, name, description, spec_json, enabled,
+                                         created_at, updated_at)
+                   VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     name=excluded.name, description=excluded.description,
+                     spec_json=excluded.spec_json, enabled=excluded.enabled,
+                     updated_at=excluded.updated_at""",
+                (pid, row.get("name") or "", row.get("description") or "",
+                 row.get("spec_json") or "", int(row.get("enabled", 1) or 0),
+                 row.get("created_at") or now, now))
+            self._conn.commit()
+        return self.get_pipeline(pid) or {}
+
+    def list_pipelines(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        q = "SELECT * FROM pipelines"
+        if enabled_only:
+            q += " WHERE enabled=1"
+        q += " ORDER BY updated_at DESC"
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(q).fetchall()]
+
+    def get_pipeline(self, pid: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM pipelines WHERE id=?",
+                                     (str(pid),)).fetchone()
+        return dict(row) if row else None
+
+    def delete_pipeline(self, pid: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM pipelines WHERE id=?", (str(pid),))
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def create_pipeline_run(self, row: dict[str, Any]) -> dict[str, Any]:
+        rid = str(row.get("id") or "")
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO pipeline_runs(id, pipeline_id, status, input_json,
+                                             output_json, started_at, finished_at, error)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (rid, row.get("pipeline_id") or "", row.get("status") or "running",
+                 row.get("input_json") or "", row.get("output_json") or "",
+                 row.get("started_at") or datetime.now(timezone.utc).isoformat(),
+                 row.get("finished_at") or "", row.get("error") or ""))
+            self._conn.commit()
+        return self.get_pipeline_run(rid) or {}
+
+    def get_pipeline_run(self, rid: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM pipeline_runs WHERE id=?",
+                                     (str(rid),)).fetchone()
+        return dict(row) if row else None
+
+    def list_pipeline_runs(self, limit: int = 50, pipeline_id: str = "",
+                           status: str = "") -> list[dict[str, Any]]:
+        q = "SELECT * FROM pipeline_runs"
+        clause, args = [], []
+        if pipeline_id:
+            clause.append("pipeline_id=?")
+            args.append(pipeline_id)
+        if status:
+            clause.append("status=?")
+            args.append(status)
+        if clause:
+            q += " WHERE " + " AND ".join(clause)
+        q += " ORDER BY started_at DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(q, args).fetchall()]
+
+    def update_pipeline_run(self, rid: str, **fields: Any) -> None:
+        allowed = ("status", "output_json", "finished_at", "error")
+        sets, args = [], []
+        for k in allowed:
+            if k in fields:
+                sets.append(f"{k}=?")
+                args.append(fields[k])
+        if not sets:
+            return
+        args.append(str(rid))
+        with self._lock:
+            self._conn.execute(f"UPDATE pipeline_runs SET {', '.join(sets)} WHERE id=?", args)
+            self._conn.commit()
+
+    def upsert_pipeline_step(self, row: dict[str, Any]) -> dict[str, Any]:
+        """步骤实例。主键 `run_id|step_id`；`attempt` 由调用方递增。"""
+        pk = str(row.get("id") or "")
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO pipeline_steps(id, run_id, step_id, action, status,
+                                              attempt, idem_key, params_json,
+                                              output_json, error, started_at, finished_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     status=excluded.status, attempt=excluded.attempt,
+                     idem_key=excluded.idem_key, output_json=excluded.output_json,
+                     error=excluded.error, started_at=excluded.started_at,
+                     finished_at=excluded.finished_at""",
+                (pk, row.get("run_id") or "", row.get("step_id") or "",
+                 row.get("action") or "", row.get("status") or "pending",
+                 int(row.get("attempt") or 0), row.get("idem_key") or "",
+                 row.get("params_json") or "", row.get("output_json") or "",
+                 row.get("error") or "", row.get("started_at") or "",
+                 row.get("finished_at") or ""))
+            self._conn.commit()
+        return self.get_pipeline_step(pk) or {}
+
+    def get_pipeline_step(self, pk: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM pipeline_steps WHERE id=?",
+                                     (str(pk),)).fetchone()
+        return dict(row) if row else None
+
+    def reset_pipeline_steps(self, run_id: str) -> int:
+        """续跑前把失败/中断的步骤拉回 pending（已 done 的不动 —— 幂等跳过）。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE pipeline_steps SET status='pending', error='', finished_at='' "
+                "WHERE run_id=? AND status IN ('failed','running')", (str(run_id),))
+            self._conn.commit()
+        return cur.rowcount
+
+    def list_pipeline_steps(self, run_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM pipeline_steps WHERE run_id=? ORDER BY started_at, id",
+                (str(run_id),)).fetchall()
+        return [dict(r) for r in rows]
 
     def list_route_stats(self) -> list[dict[str, Any]]:
         """按 `任务类型 × 模型` 聚合的路由样本（0.12.0）。"""

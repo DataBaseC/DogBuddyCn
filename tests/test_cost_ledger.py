@@ -37,8 +37,9 @@ def svc(tmp_path):
 def test_schema_is_16_with_cost_tables(svc):
     _, db = svc
     # 16 = 成本账本（0.11.0）；17 = 路由样本（0.12.0）。加表就要一起挪这个断言。
-    assert SCHEMA_VERSION == 17
-    for table in ("cost_model", "usage_ledger", "budgets", "model_route_stats"):
+    assert SCHEMA_VERSION == 18
+    for table in ("cost_model", "usage_ledger", "budgets", "model_route_stats",
+                  "pipelines", "pipeline_runs", "pipeline_steps"):
         row = db._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
         assert row is not None, f"缺表 {table}"

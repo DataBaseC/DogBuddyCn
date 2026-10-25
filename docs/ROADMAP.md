@@ -2146,3 +2146,34 @@ owner："直接干到底"，按 0.11.0 的计划一次做完。**schema 15 → 1
 样本足够才降 / 便宜档失败率高则不降 / 跨端点从不选 / 失败率高才升级 / loop 只切一次 +
 审计 + 记样本 / 路由抛错不影响任务 / 无 router 走老路 / 接口与控制台接线）。
 
+---
+
+## 54. 工业自动化第四步：流水线编排（2026-10-25，`0.12.1`）
+
+`0.11/0.12.0` 解决了"花多少、用哪档"，这一版解决"**多步、有依赖、可续跑**"。
+**schema 17 → 18**。
+
+问题很具体：`runs` 是"一次员工回合"，没有步骤概念 —— 中途挂掉只能**整轮重跑**，
+重跑会重复花钱、重复改文件。工业场景（取图 → 判定 → 复核 → 报告）必须能回答：
+**哪步成了、产物在哪、下次从哪继续**。
+
+| 层 | 实现 |
+|---|---|
+| 三张表 | `pipelines`（定义，spec 存 JSON）/ `pipeline_runs`（一次执行）/ `pipeline_steps`（**主键 `run_id|step_id`**，带 `idem_key`、`attempt`、`error`） |
+| 校验（存前拦） | 重复 id / 未知 action / 缺依赖 / 自依赖 / **环**（Kahn 拓扑检测）一律 `PipelineError` → 400；**坏图不落库** |
+| 动作 | `noop` / `write_file`（限工作区内，越界判失败）/ `window_run`（派给工位，用 `dispatch_and_wait`）/ `cv_detect`、`sensor_read`（0.13.0 装配） |
+| 幂等 | 步骤 `idem_key = hash(run_id, step_id, params)`；`done` 且 idem 相同 → **跳过**，这是"续跑不重复花钱/不重复写文件"的唯一保证 |
+| 续跑 | `resume`：把 `failed/running` 步骤拉回 `pending` 再 tick；**已 done 的不动**（靠 idem 跳过） |
+| 失败语义 | 失败步骤记 `error` + 审计 `pipeline:step_failed`；依赖它的下游不跑，run 置 `failed`；标了 `continue_on_error` 的失败**不拦下游**（"抽检失败不该拦住报告"） |
+| 接口 | `GET/PUT/DELETE /api/pipelines[/{id}]`、`POST /api/pipelines/{id}/run`（**立刻返回 run_id**，执行丢后台）、`GET /api/pipelines/runs[/{run_id}]`、`POST .../resume`；`/healthz.pipelines` |
+
+两个测试抓到的逻辑漏洞（都写进了注释，防止回退）：
+1. `ready` 里只排除 `satisfied` 没排除 `failed` → 失败步骤在**同一个 tick 里被重试 30 次**，
+   run 永远停在 running。"重试"语义应属下一次 `resume`，不是立刻再来一遍。
+2. `resume` 只把 run 置回 running 而不重置步骤 → 失败步骤仍是 `failed`，
+   ready 永远为空，"续跑"变成"再判一次失败"。
+
+基线：**912 passed / 4 skipped**（新增 19 条：6 类坏图 / 线性执行 / 依赖顺序 / 幂等不重跑 /
+失败拦下游 + 审计 / continue_on_error 放行 / resume 只补失败步 / 写文件与越界 / 未装配报错 /
+接口 400·404·200 / health）。
+

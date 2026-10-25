@@ -35,6 +35,7 @@ from .routes import ledger as ledger_routes
 from .routes import jobs as jobs_routes
 from .routes import logs as logs_routes
 from .routes import models as models_routes
+from .routes import pipelines as pipelines_routes
 from .routes import projects as projects_routes
 from .routes import settings as settings_routes
 from .routes import windows as windows_routes
@@ -82,6 +83,8 @@ class WebServices:
         self.cost = kw.get("cost")
         #: v0.12.0：模型分级路由的样本台账（`/api/costs/routes`、`/healthz.routing`）
         self.routing = kw.get("routing")
+        #: v0.12.1：流水线引擎（`/api/pipelines`、`/healthz.pipelines`）
+        self.pipelines = kw.get("pipelines")
         self.models = kw.get("models")
         self.iterations = kw.get("iterations")
         self.iteration_exec = kw.get("iteration_exec")
@@ -135,6 +138,9 @@ def create_app(svc: WebServices) -> FastAPI:
             "costs": (svc.cost.health() if getattr(svc, "cost", None) else None),
             # v0.12.0：分级路由有多少样本（冷启动期只降不升，样本数是判断依据）
             "routing": (svc.routing.health() if getattr(svc, "routing", None) else None),
+            # v0.12.1：流水线（"有没有卡住/失败"要一眼看到）
+            "pipelines": (svc.pipelines.health()
+                          if getattr(svc, "pipelines", None) else None),
         }
 
     @app.get("/api/version")
@@ -187,6 +193,8 @@ def create_app(svc: WebServices) -> FastAPI:
     app.include_router(projects_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(iterations_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(runs_routes.router(svc, auth_deps), prefix="/api")
+    # v0.12.1：流水线编排（定义/起跑/状态/续跑）
+    app.include_router(pipelines_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(settings_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(logs_routes.router(svc, auth_deps), prefix="/api")
 
