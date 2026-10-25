@@ -234,6 +234,8 @@
       seed: function () { return request('POST', '/api/costs/models/seed', {}); },
       /* 三级预算（0.11.x 才执行，这里先能读写） */
       budgets: function () { return request('GET', '/api/costs/budgets'); },
+      /* v0.12.0：分级路由样本（任务类型 × 模型的成败与 p_fail） */
+      routes: function () { return request('GET', '/api/costs/routes'); },
       putBudget: function (id, body) {
         return request('PUT', '/api/costs/budgets/' + enc(id), body);
       },

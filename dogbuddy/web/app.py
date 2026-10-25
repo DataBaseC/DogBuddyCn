@@ -80,6 +80,8 @@ class WebServices:
         self.adapter = kw.get("adapter")
         #: v0.11.0：成本账本（`/api/costs/*` 与 `/healthz.costs`）
         self.cost = kw.get("cost")
+        #: v0.12.0：模型分级路由的样本台账（`/api/costs/routes`、`/healthz.routing`）
+        self.routing = kw.get("routing")
         self.models = kw.get("models")
         self.iterations = kw.get("iterations")
         self.iteration_exec = kw.get("iteration_exec")
@@ -131,6 +133,8 @@ def create_app(svc: WebServices) -> FastAPI:
             "compactions": _compaction_stats(),
             # v0.11.0：今天的钱（没配单价时会明说"金额会是 0"）
             "costs": (svc.cost.health() if getattr(svc, "cost", None) else None),
+            # v0.12.0：分级路由有多少样本（冷启动期只降不升，样本数是判断依据）
+            "routing": (svc.routing.health() if getattr(svc, "routing", None) else None),
         }
 
     @app.get("/api/version")

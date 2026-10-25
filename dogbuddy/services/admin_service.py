@@ -57,6 +57,8 @@ class AdminService:
         decisions: Any = None,
         # v0.11.0：成本账本（管理员对话的每一次 LLM 调用都要记账）
         cost: Any = None,
+        # v0.12.0：模型分级路由（None = 不路由，保持旧行为）
+        routing: Any = None,
         max_iterations: int = 20,
         self_status: Callable[[bool], dict] | None = None,
         self_update: Callable[..., dict] | None = None,
@@ -76,6 +78,7 @@ class AdminService:
         self.bus = bus
         self.decisions = decisions
         self.cost = cost
+        self.routing = routing
         self.max_iterations = max_iterations
         self.self_status = self_status
         self.self_update = self_update
@@ -387,7 +390,11 @@ class AdminService:
                                  # 模型名由 loop 回调时把 llm 传进来，见 _usage_hook）
                                  "on_usage": self._usage_hook(sender),
                                  # v0.11.1：每次调模型前问一句"今天还能不能花"
-                                 "budget_check": self._budget_check(f"admin:{sender}")})
+                                 "budget_check": self._budget_check(f"admin:{sender}"),
+                                 # v0.12.0：分级路由（便宜的先跑，翻车再升）
+                                 "router": self._router(f"admin:{sender}",
+                                                        task_class="admin_chat"),
+                                 "route_record": self._route_record("admin_chat")})
         loop = AgentLoop(
             llm=llm_client, registry=self.registry, session=session,
             builder=self.builder, tool_names=role_spec.tool_names if role_spec else [],
@@ -473,6 +480,33 @@ class AdminService:
                 logger.debug("admin tool emit failed", exc_info=True)
 
         return hook
+
+    def _router(self, window_id: str, run_id: str = "", task_class: str = "admin_chat"):
+        """模型分级路由（0.12.0）：每轮第一次调模型前问一句"该用哪档"。
+
+        预算状态在这里一起算（`budget_state`），所以 `warn` 就能提前降档，
+        不用等花爆了再被闸门拦。`current_model` 由 loop 传进来（只有客户端知道）。
+        """
+        routing = getattr(self, "routing", None)
+        cost = getattr(self, "cost", None)
+        if routing is None or cost is None:
+            return None
+
+        def decide(current_model: str = ""):
+            budget = cost.budget_state(window_id=window_id, run_id=run_id,
+                                       current_model=current_model)
+            return routing.decide(current_model, task_class=task_class, budget=budget)
+        return decide
+
+    def _route_record(self, task_class: str):
+        """把"路由过的那一档 + 成败"记进路由样本（只记被换过模型的轮次）。"""
+        routing = getattr(self, "routing", None)
+        if routing is None:
+            return None
+
+        def record(ok: bool, model: str, escalated: bool = False) -> None:
+            routing.record(task_class, model, bool(ok), bool(escalated))
+        return record
 
     def _budget_check(self, window_id: str, run_id: str = ""):
         """预算闸门（v0.11.1）：每次调模型前问一句，超了就停/降档。

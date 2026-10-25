@@ -130,6 +130,8 @@ class WindowManager:
         decisions: Any = None,
         #: v0.11.0：成本账本（每一位员工的每次 LLM 调用都要记账）
         cost: Any = None,
+        # v0.12.0：模型分级路由（None = 不路由）
+        routing: Any = None,
         approval_config: Callable[..., Any] | None = None,
         mcp_bridge: Any = None,
     ):
@@ -141,6 +143,7 @@ class WindowManager:
         self.memory = memory
         self.decisions = decisions
         self.cost = cost
+        self.routing = routing
         # T4.2/T4.3: approval knobs (allowlist / 托管代审) read through here
         self.approval_config = approval_config
         # T5.1: bridged MCP tools are registered into every window registry
@@ -402,6 +405,32 @@ class WindowManager:
         return {"max_iterations": self.max_iterations,
                 "max_context_tokens": self.max_context_tokens,
                 "compact_threshold": self.threshold}
+
+    def _router(self, window_id: str, run_id: str = "", task_class: str = "worker"):
+        """模型分级路由（0.12.0）：工位作用域 + 按角色区分任务类型。
+
+        任务类型用角色名（`worker_programmer` / `worker_chat` …）：同一档模型
+        在"写代码"和"闲聊"上的失败率完全不是一回事，混在一起统计会互相污染。
+        """
+        routing = getattr(self, "routing", None)
+        cost = getattr(self, "cost", None)
+        if routing is None or cost is None:
+            return None
+
+        def decide(current_model: str = ""):
+            budget = cost.budget_state(window_id=window_id, run_id=run_id,
+                                       current_model=current_model)
+            return routing.decide(current_model, task_class=task_class, budget=budget)
+        return decide
+
+    def _route_record(self, task_class: str):
+        routing = getattr(self, "routing", None)
+        if routing is None:
+            return None
+
+        def record(ok: bool, model: str, escalated: bool = False) -> None:
+            routing.record(task_class, model, bool(ok), bool(escalated))
+        return record
 
     def _budget_check(self, window_id: str, run_id: str = ""):
         """预算闸门（v0.11.1）：工位作用域 = 窗口 + 本次 run。
@@ -988,6 +1017,10 @@ class WindowManager:
                    "on_usage": self._usage_hook(w, run_id, model),
                 # v0.11.1：预算闸门（工位作用域 = 窗口 + 本次 run）
                 "budget_check": self._budget_check(w.id, run_id),
+                   # v0.12.0：分级路由（任务类型 = 角色名，避免不同活儿混统计）
+                   "router": self._router(w.id, run_id,
+                                          getattr(role, "name", "") or "worker"),
+                   "route_record": self._route_record(getattr(role, "name", "") or "worker"),
                    "supervision_dispatch": self.supervision_dispatch,
                    # P1-6：升级给主管的待决事项要落 queue、主管要用工具裁决它们
                    "decisions": self.decisions,
