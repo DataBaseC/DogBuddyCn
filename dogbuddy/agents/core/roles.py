@@ -229,6 +229,22 @@ SUPERVISOR_TOOLS = sorted(set(WORKER_PROGRAMMER_TOOLS) | set(PROJECT_TOOLS) | {"
 #   * 测试员多一个 `page_check`：静态页面体检（见 tools/page_check.py 里为什么
 #     不是真浏览器——盒子上 firefox 只是 snap 空壳，没有 chromium/playwright）。
 
+CHAT_SYSTEM_PROMPT = """You are a conversation-only employee in a persistent workstation (window).
+
+You have NO file, shell, network or code tools — by design. You exist to talk: role-play,
+brainstorm, discuss, teach, keep a character consistent across sessions. Remember what matters
+in your window memory, ask the owner when a decision is needed, and stay in character when the
+group brief assigns you one.
+
+How to work:
+- Keep replies channel-sized: 2–5 sentences unless the brief asks for more.
+- When role-playing: stay strictly in your assigned role; react to the *last* line spoken in
+  the channel (the brief and the earlier lines are context, not a script to restate).
+- Never claim you edited a file or ran a command — you cannot.
+- If you genuinely need a fact you don't have, say so in character, or ask_user.
+
+Style: natural, in the language the brief uses."""
+
 TESTER_SYSTEM_PROMPT = """You are a QA / test engineer employee in a persistent workstation (window).
 
 Your job is to VERIFY, not to fix. You read code, run tests and commands, and check pages;
@@ -338,6 +354,11 @@ REVIEWER_TOOLS = [
     "window_memory_read", "window_memory_write", "project_memory_read",
     "ask_user", "notify_owner",
 ]
+#: 纯聊天：没有任何文件/命令/网络工具（连读文件都不给）
+WORKER_CHAT_TOOLS = [
+    "window_memory_read", "window_memory_write", "project_memory_read",
+    "notify_owner", "ask_user",
+]
 #: 架构师：只读 + 研究（无 shell，避免"顺手改一下"）
 ARCHITECT_TOOLS = [
     "read_file", "glob", "grep", "web_search", "web_fetch", "explore_subagent",
@@ -410,6 +431,14 @@ def register_builtin_roles() -> None:
         needs_approval=False, iteration_speed="slow",
         note="审查员工位：**只读**，只能给 PASS / FAIL + 问题清单，改代码一律打回给"
              "程序员。用它替代「让程序员自己审自己」。"))
+    register_role(RoleSpec(
+        name="worker_chat", display_name="聊天员",
+        system_prompt=CHAT_SYSTEM_PROMPT, tool_names=WORKER_CHAT_TOOLS,
+        default_mode="BUILD",
+        domains=["闲聊", "角色扮演", "头脑风暴"],
+        can_deliver_alone=True, needs_approval=False, iteration_speed="standard",
+        note="纯聊天工位：**没有任何文件/命令/网络工具**（不会误改东西），只有工位记忆、"
+             "项目记忆（只读）、通知与提问。适合跑团、陪聊、扮演角色、头脑风暴。"))
     register_role(RoleSpec(
         name="worker_architect", display_name="架构师",
         system_prompt=ARCHITECT_SYSTEM_PROMPT, tool_names=ARCHITECT_TOOLS,
