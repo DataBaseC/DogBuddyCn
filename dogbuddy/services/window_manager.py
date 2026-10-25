@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -431,7 +432,8 @@ class WindowManager:
                                or usage.get("output_tokens") or 0),
                 cache_hit_tokens=int(usage.get("cache_read_input_tokens")
                                      or usage.get("prompt_cache_hit_tokens") or 0),
-                idem_key=f"{run_id or wid}:{seq['n']}",
+                # 幂等键跨轮次唯一（seq 每轮重置，只用 seq 会把第 2 轮起全判成重复）
+                idem_key=f"{run_id or wid}:{int(time.time() * 1000)}:{seq['n']}",
                 meta={"phase": "window", "window_name": wname},
             )
 

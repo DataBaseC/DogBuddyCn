@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -434,7 +435,9 @@ class AdminService:
                                or usage.get("output_tokens") or 0),
                 cache_hit_tokens=int(usage.get("cache_read_input_tokens")
                                      or usage.get("prompt_cache_hit_tokens") or 0),
-                idem_key=f"admin:{sender}:{seq['n']}",
+                # 幂等键必须**跨轮次唯一**：seq 每轮从 1 开始，只用 seq 会让
+                # 同一对话第 2 轮起全部被判重复（实测：只有第一轮记上账）。
+                idem_key=f"admin:{sender}:{int(time.time() * 1000)}:{seq['n']}",
                 meta={"phase": "admin_chat"},
             )
 
