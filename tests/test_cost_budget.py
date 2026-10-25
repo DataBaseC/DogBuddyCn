@@ -255,6 +255,20 @@ def test_budget_routes(client):
     assert "budget" in cost.health()
 
 
+def test_health_budget_uses_real_column_names(svc):
+    """`budget_states()` 给的是库列名（scope_type/limit_amount），health 里必须映射对。
+
+    生产实测踩过：直接取 `scope`/`limit` → healthz 显示 `scope: None, limit: None`。
+    """
+    cost, db = svc
+    cost.upsert_budget({"scope_type": "global", "limit_amount": 5, "strategy": "pause"})
+    _spend_row(db, 6)
+    b = cost.health()["budget"]
+    assert b["level"] == "exceeded"
+    assert b["scope"] == "global" and b["limit"] == 5, b
+    assert b["ratio"] > 1 and b["spent"] == 6
+
+
 def test_console_wiring_for_budgets():
     idx = (REPO / "dogbuddy/web/static/index.html").read_text(encoding="utf-8")
     js = (REPO / "dogbuddy/web/static/js/views-costs.js").read_text(encoding="utf-8")

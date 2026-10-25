@@ -395,8 +395,14 @@ class CostService:
             "priced_models": len(prices),
             "zero_priced": len(unpriced),
             # v0.11.1：预算到哪了（"今天还能不能跑"必须能一眼看到）
-            "budget": ({"level": worst.get("level"), "scope": worst.get("scope"),
-                        "limit": worst.get("limit"), "spent": worst.get("spent"),
+            # 注意字段名：`budget_states()` 返回的是库里的列名（scope_type/limit_amount），
+            # 别直接拿 `scope`/`limit` —— 生产实测这里一度是 None（键名对不上）。
+            "budget": ({"level": worst.get("level"),
+                        "scope": worst.get("scope_type"),
+                        "scope_id": worst.get("scope_id") or "",
+                        "period": worst.get("period"),
+                        "limit": worst.get("limit_amount"),
+                        "spent": worst.get("spent"),
                         "ratio": worst.get("ratio")} if worst else None),
             "hint": ("单价表是空的：去「成本」页点「按目录生成占位价」，"
                      "或先只统计用量（金额会是 0）") if not prices else "",
