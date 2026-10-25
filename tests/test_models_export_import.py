@@ -139,6 +139,40 @@ def test_empty_payload_is_rejected(tmp_path):
 
 
 # ------------------------------------------------------------- ⑥ 审计不泄密
+def test_export_carries_id_for_exact_roundtrip(tmp_path):
+    """生产实测补的坑：同模型同端点、两把 key 各一条 → 导出不带 key 时无法判定，
+    原样导回去会凭空多一条（第一次实现就是这样，created=4）。导出必须带 `id`。"""
+    svc, db = _svc(tmp_path)
+    a = svc.upsert(provider="openai_compat", model="dup-model",
+                   base_url="https://same.example.com/v1", api_key="sk-aaaaaaaaaaaa1")
+    b = svc.upsert(provider="openai_compat", model="dup-model",
+                   base_url="https://same.example.com/v1", api_key="sk-bbbbbbbbbbbb2")
+    assert a["id"] != b["id"], "两把 key 应该是两条"
+    payload = svc.export_models()
+    assert all(item.get("id") for item in payload["models"]), "导出的每条都要有 id"
+    res = svc.import_models(payload["models"], mode="merge")
+    assert res["created"] == 0, f"带 id 的原样导入不该新建，实际 {res}"
+    assert len(db.list_models()) == 2
+    # 两把 key 都还在
+    keys = sorted(r["api_key"] for r in db.list_models())
+    assert keys == ["sk-aaaaaaaaaaaa1", "sk-bbbbbbbbbbbb2"]
+    db.close()
+
+
+def test_ambiguous_entry_without_id_is_skipped_not_duplicated(tmp_path):
+    svc, db = _svc(tmp_path)
+    svc.upsert(provider="openai_compat", model="dup2",
+               base_url="https://same.example.com/v1", api_key="sk-aaaaaaaaaaaa1")
+    svc.upsert(provider="openai_compat", model="dup2",
+               base_url="https://same.example.com/v1", api_key="sk-bbbbbbbbbbbb2")
+    res = svc.import_models([{"provider": "openai_compat", "model": "dup2",
+                              "base_url": "https://same.example.com/v1"}], mode="merge")
+    assert res["created"] == 0 and res["skipped"] == 1
+    assert any("无法判定" in w for w in res["warnings"])
+    assert len(db.list_models()) == 2, "歧义时不许造重复条目"
+    db.close()
+
+
 def test_frontend_has_export_and_paste_import():
     """控制台：两个入口都在，且导出按钮的文案明确"不含密钥"。"""
     html = (Path(__file__).resolve().parents[1]
