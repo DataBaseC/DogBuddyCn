@@ -2245,3 +2245,35 @@ healthz 调 `drift(write_alert=False)`，杜绝"监控自己制造告警噪声"�
 真实漏检与默认先验 / 漂移分组·去重·小样本 / 收批触发 / health 不写 / 看板接线）。
 `audit_ui` exit 0，bundle 已重建。
 
+---
+
+## 58. 运营回合（2026-10-26，`0.14.0`）
+
+工业线的闭环是「批次 → 复核 → 策略」；运营线是「目标 → 回合 → 日志 → 实验」。
+两者共用底座：执行走 `pipelines`、花钱走 `cost.budget_state`、度量走 `metrics`。
+**schema 21 → 22**。
+
+| 概念 | 表 | 关键约束 |
+|---|---|---|
+| 目标 | `ops_goals` | KPI 名/方向（up/down）/目标值/节奏/执行流水线；节奏只是标记，**不会自动开跑** |
+| 实验 | `ops_experiments` | 一个变体一次实验；`keep` 放大同一变体，`adjust/stop` 判负并换新变体；达标才置 `won` |
+| 回合 | `ops_journal` | 假设/动作/预期/实测/判定 + `metric_before/after/delta`；读不到指标记 `unknown`，**不拿 0 冒充** |
+
+| 机制 | 做法 |
+|---|---|
+| 计划 | `plan_round()`：无指标→先补指标；有历史 keep→扩大样本；上次失败→换一个变体；给出验收口径（相对变化 >1%） |
+| 执行 | `start_round()`：先过预算闸门 → 建实验/回合 → `pipelines.start(payload)`；跑完 `_execute_and_close` 立即结算 |
+| 判分 | 相对变化小于 1% 视为噪声（`adjust`）；方向正确才 `keep`；达标把实验置 `won` |
+| 参数注入 | 流水线步骤参数支持 `{goal_name}` / `{round_no}` / `{action}` 等简单占位；**不用 `str.format`**（提示词里的 JSON 花括号会炸） |
+| 接口 | `/api/ops/goals`（CRUD/plan/rounds/journal）、`/api/ops/journal`、`/api/ops/experiments`、`/api/ops/tick`、`/healthz.ops` |
+| 控制台 | 新「运营」页：目标表（计划/跑一轮/改/删）、回合日志、实验列表；读不到指标时明确显示 unknown |
+
+三条克制（代码注释里也写了）：
+1. **不自动开跑**：后台只收尾在跑的回合，绝不自己发起；开跑必须显式调用或人排定时任务。
+2. **不猜指标**：没有指标就 `unknown` 并说明，绝不把 0 当数据喂给"优化"。
+3. **不静默失败**：预算拦下 → `blocked`；没绑流水线 → `planned`；启动失败 → `failed`，都写 `notes`。
+
+基线：**968 passed / 4 skipped**（新增 16 条：目标校验/CRUD、无指标诚实计划、变体切换、
+噪声判负、keep 与达标、unknown、预算 blocked、无流水线 planned、参数注入、
+手工收尾校验、失败回合、health、接口与控制台接线）。
+

@@ -9,7 +9,7 @@
 
   var TITLES = {
     overview: '总览', chat: '对话', decisions: '待决', windows: '工位', jobs: '任务',
-    groups: '群组', capabilities: '能力', projects: '项目', models: '模型', ledger: '账本', costs: '成本', files: '文件管理器',
+    groups: '群组', capabilities: '能力', projects: '项目', models: '模型', ledger: '账本', costs: '成本', operations: '运营', files: '文件管理器',
     logs: '日志审计', settings: '设置'
   };
 
@@ -146,6 +146,9 @@
           break;
         case 'costs':
           if (V.Costs) V.Costs.load();
+          break;
+        case 'operations':
+          if (V.Operations) V.Operations.load();
           break;
         case 'projects':
 

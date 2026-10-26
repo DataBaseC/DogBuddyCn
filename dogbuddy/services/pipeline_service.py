@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,11 @@ def _dumps(obj: Any) -> str:
         return json.dumps(obj, ensure_ascii=False)
     except Exception:  # noqa: BLE001
         return json.dumps(str(obj), ensure_ascii=False)
+
+
+#: 只替换 `{简单名字}`，**不用 str.format** —— 提示词里常有 JSON 花括号，
+#: format 会直接抛 ValueError（KeyError 之外的另一半坑）。
+_PARAM_RE = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
 
 
 class PipelineError(ValueError):
@@ -160,6 +166,26 @@ class PipelineService:
         steps = blob.get("steps") or []
         return [s for s in steps if isinstance(s, dict)]
 
+    # ------------------------------------------------------------- 渲染
+    @classmethod
+    def _render(cls, value: Any, payload: dict[str, Any]) -> Any:
+        """把步骤参数里的 `{goal_name}` / `{action}` 换成 run 的 payload。
+
+        运营回合靠它把"这一轮的动作"塞进共享流水线，不必为每个目标建一条线。
+        只认简单变量名、未知变量原样保留（宁可留占位符，也不要吞掉用户文本）。
+        """
+        if isinstance(value, str):
+            def sub(m: re.Match) -> str:
+                key = m.group(1)
+                return str(payload[key]) if key in payload and payload[key] is not None \
+                    else m.group(0)
+            return _PARAM_RE.sub(sub, value)
+        if isinstance(value, dict):
+            return {k: cls._render(v, payload) for k, v in value.items()}
+        if isinstance(value, list):
+            return [cls._render(v, payload) for v in value]
+        return value
+
     # ------------------------------------------------------------- 执行
     def start(self, pipeline_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """建一次 run（不在这里跑；调用方决定同步 tick 还是后台跑）。"""
@@ -267,8 +293,9 @@ class PipelineService:
                 "started_at": _now()}
         self.db.upsert_pipeline_step({**base, "status": "running"})
         try:
+            rendered = {**step, "params": self._render(step.get("params") or {}, payload)}
             out = await asyncio.wait_for(
-                self._run_step(step, payload, run_id),
+                self._run_step(rendered, payload, run_id),
                 timeout=float(step.get("timeout") or 600))
             self.db.upsert_pipeline_step({
                 **base, "status": "done", "finished_at": _now(),

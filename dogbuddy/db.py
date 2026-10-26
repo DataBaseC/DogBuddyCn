@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -606,6 +606,66 @@ def _migrate_v21(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v22(conn: sqlite3.Connection) -> None:
+    """运营回合（2026-10-26，0.14.0）：把"持续改进"变成可追溯的回合。
+
+    工业线的闭环是"批次 → 复核 → 策略"，运营线是"目标 → 回合 → 日志 → 实验"。
+    两套都复用同一底座（流水线执行、成本账本、指标）。
+
+    三张表：
+      * `ops_goals`      目标（KPI 名/方向/目标值/节奏/执行流水线）
+      * `ops_experiments` 变体（一个假设一次实验；赢/输决定下一轮换不换动作）
+      * `ops_journal`    回合日志（假设/动作/预期/实测/判定 + 耗时与产物）
+
+    `metric_before/after` 允许为 NULL：没有指标时必须老实记"无法判定"，
+    而不是拿 0 冒充数据。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS ops_goals(
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      metric_name TEXT DEFAULT '',
+      metric_unit TEXT DEFAULT '',
+      direction TEXT DEFAULT 'up',
+      baseline REAL,
+      target REAL,
+      cadence TEXT DEFAULT 'manual',
+      pipeline_id TEXT DEFAULT '',
+      enabled INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT '', updated_at TEXT DEFAULT '',
+      last_round_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_goals_updated ON ops_goals(updated_at);
+
+    CREATE TABLE IF NOT EXISTS ops_experiments(
+      id TEXT PRIMARY KEY,
+      goal_id TEXT DEFAULT '',
+      name TEXT DEFAULT '', hypothesis TEXT DEFAULT '', action TEXT DEFAULT '',
+      variant INTEGER DEFAULT 1,
+      status TEXT DEFAULT 'running',
+      metric_before REAL, metric_after REAL,
+      created_at TEXT DEFAULT '', closed_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_exp_goal ON ops_experiments(goal_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS ops_journal(
+      id TEXT PRIMARY KEY,
+      goal_id TEXT DEFAULT '', experiment_id TEXT DEFAULT '',
+      round_no INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'running',
+      hypothesis TEXT DEFAULT '', action TEXT DEFAULT '', expected TEXT DEFAULT '',
+      observed TEXT DEFAULT '', verdict TEXT DEFAULT '',
+      pipeline_run_id TEXT DEFAULT '',
+      metric_before REAL, metric_after REAL, delta REAL,
+      started_at TEXT DEFAULT '', finished_at TEXT DEFAULT '', notes TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_journal_goal ON ops_journal(goal_id, started_at);
+    CREATE INDEX IF NOT EXISTS ix_journal_status ON ops_journal(status);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -631,6 +691,7 @@ _MIGRATIONS: dict[int, Any] = {
     19: _migrate_v19,
     20: _migrate_v20,
     21: _migrate_v21,
+    22: _migrate_v22,
 }
 
 
@@ -2075,6 +2136,178 @@ class Database:
             rows = self._conn.execute(
                 "SELECT DISTINCT name FROM metrics ORDER BY name").fetchall()
         return [r["name"] for r in rows]
+
+    # ------------------------------------------------- 运营（0.14.0）
+    _GOAL_FIELDS = ("id", "name", "description", "metric_name", "metric_unit",
+                    "direction", "baseline", "target", "cadence", "pipeline_id",
+                    "enabled", "created_at", "updated_at", "last_round_at")
+
+    def upsert_goal(self, row: dict[str, Any]) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        gid = str(row.get("id") or "")
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO ops_goals(id, name, description, metric_name, metric_unit,
+                                         direction, baseline, target, cadence, pipeline_id,
+                                         enabled, created_at, updated_at, last_round_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     name=excluded.name, description=excluded.description,
+                     metric_name=excluded.metric_name, metric_unit=excluded.metric_unit,
+                     direction=excluded.direction, baseline=excluded.baseline,
+                     target=excluded.target, cadence=excluded.cadence,
+                     pipeline_id=excluded.pipeline_id, enabled=excluded.enabled,
+                     updated_at=excluded.updated_at""",
+                (gid, row.get("name") or "", row.get("description") or "",
+                 row.get("metric_name") or "", row.get("metric_unit") or "",
+                 row.get("direction") or "up", row.get("baseline"), row.get("target"),
+                 row.get("cadence") or "manual", row.get("pipeline_id") or "",
+                 int(row.get("enabled", 1) or 0),
+                 row.get("created_at") or now, now,
+                 row.get("last_round_at") or ""))
+            self._conn.commit()
+        return self.get_goal(gid) or {}
+
+    def list_goals(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        q = "SELECT * FROM ops_goals"
+        if enabled_only:
+            q += " WHERE enabled=1"
+        q += " ORDER BY updated_at DESC"
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(q).fetchall()]
+
+    def get_goal(self, gid: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM ops_goals WHERE id=?",
+                                     (str(gid),)).fetchone()
+        return dict(row) if row else None
+
+    def delete_goal(self, gid: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM ops_goals WHERE id=?", (str(gid),))
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def touch_goal(self, gid: str, when: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE ops_goals SET last_round_at=?, updated_at=? WHERE id=?",
+                (when, when, str(gid)))
+            self._conn.commit()
+
+    def create_experiment(self, row: dict[str, Any]) -> dict[str, Any]:
+        eid = str(row.get("id") or "")
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO ops_experiments(id, goal_id, name, hypothesis, action,
+                                               variant, status, metric_before,
+                                               metric_after, created_at, closed_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (eid, row.get("goal_id") or "", row.get("name") or "",
+                 row.get("hypothesis") or "", row.get("action") or "",
+                 int(row.get("variant") or 1), row.get("status") or "running",
+                 row.get("metric_before"), row.get("metric_after"),
+                 row.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                 row.get("closed_at") or ""))
+            self._conn.commit()
+        return self.get_experiment(eid) or {}
+
+    def get_experiment(self, eid: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM ops_experiments WHERE id=?",
+                                     (str(eid),)).fetchone()
+        return dict(row) if row else None
+
+    def update_experiment(self, eid: str, **fields: Any) -> None:
+        allowed = ("status", "metric_after", "closed_at", "hypothesis", "action")
+        sets, args = [], []
+        for k in allowed:
+            if k in fields:
+                sets.append(f"{k}=?")
+                args.append(fields[k])
+        if not sets:
+            return
+        args.append(str(eid))
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE ops_experiments SET {', '.join(sets)} WHERE id=?", args)
+            self._conn.commit()
+
+    def list_experiments(self, goal_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        q = "SELECT * FROM ops_experiments"
+        args: list[Any] = []
+        if goal_id:
+            q += " WHERE goal_id=?"
+            args.append(goal_id)
+        q += " ORDER BY created_at DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(q, args).fetchall()]
+
+    def create_journal(self, row: dict[str, Any]) -> dict[str, Any]:
+        jid = str(row.get("id") or "")
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO ops_journal(id, goal_id, experiment_id, round_no,
+                                           status, hypothesis, action, expected,
+                                           observed, verdict, pipeline_run_id,
+                                           metric_before, metric_after, delta,
+                                           started_at, finished_at, notes)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (jid, row.get("goal_id") or "", row.get("experiment_id") or "",
+                 int(row.get("round_no") or 0), row.get("status") or "running",
+                 row.get("hypothesis") or "", row.get("action") or "",
+                 row.get("expected") or "", row.get("observed") or "",
+                 row.get("verdict") or "", row.get("pipeline_run_id") or "",
+                 row.get("metric_before"), row.get("metric_after"),
+                 row.get("delta"), row.get("started_at") or datetime.now(timezone.utc).isoformat(),
+                 row.get("finished_at") or "", row.get("notes") or ""))
+            self._conn.commit()
+        return self.get_journal(jid) or {}
+
+    def update_journal(self, jid: str, **fields: Any) -> None:
+        allowed = ("status", "observed", "verdict", "pipeline_run_id",
+                   "metric_after", "delta", "finished_at", "notes")
+        sets, args = [], []
+        for k in allowed:
+            if k in fields:
+                sets.append(f"{k}=?")
+                args.append(fields[k])
+        if not sets:
+            return
+        args.append(str(jid))
+        with self._lock:
+            self._conn.execute(f"UPDATE ops_journal SET {', '.join(sets)} WHERE id=?", args)
+            self._conn.commit()
+
+    def get_journal(self, jid: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM ops_journal WHERE id=?",
+                                     (str(jid),)).fetchone()
+        return dict(row) if row else None
+
+    def list_journal(self, goal_id: str = "", limit: int = 50,
+                     status: str = "") -> list[dict[str, Any]]:
+        q = "SELECT * FROM ops_journal"
+        clause, args = [], []
+        if goal_id:
+            clause.append("goal_id=?")
+            args.append(goal_id)
+        if status:
+            clause.append("status=?")
+            args.append(status)
+        if clause:
+            q += " WHERE " + " AND ".join(clause)
+        q += " ORDER BY started_at DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(q, args).fetchall()]
+
+    def count_journal(self, goal_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM ops_journal WHERE goal_id=?", (str(goal_id),)).fetchone()
+        return int(row[0] if row else 0)
 
     # ------------------------------------------------- 抽检（0.12.2）
     def create_qc_batch(self, row: dict[str, Any]) -> dict[str, Any]:

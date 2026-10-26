@@ -254,6 +254,29 @@
       pipelineRuns: function (limit) { return request('GET', '/api/pipelines/runs?limit=' + (limit || 5)); }
     },
 
+    /* v0.14.0：运营回合（目标 / 回合 / 日志 / 实验） */
+    ops: {
+      goals: function (enabledOnly) {
+        return request('GET', '/api/ops/goals' + qs({ enabled_only: enabledOnly ? true : undefined }));
+      },
+      putGoal: function (id, body) { return request('PUT', '/api/ops/goals/' + enc(id), body); },
+      deleteGoal: function (id) { return request('DELETE', '/api/ops/goals/' + enc(id)); },
+      plan: function (id) { return request('POST', '/api/ops/goals/' + enc(id) + '/plan'); },
+      startRound: function (id, execute) {
+        return request('POST', '/api/ops/goals/' + enc(id) + '/rounds',
+                       { execute: execute !== false });
+      },
+      journal: function (limit) {
+        return request('GET', '/api/ops/journal?limit=' + (limit || 40));
+      },
+      experiments: function (limit) {
+        return request('GET', '/api/ops/experiments?limit=' + (limit || 40));
+      },
+      closeRound: function (jid, body) {
+        return request('POST', '/api/ops/journal/' + enc(jid) + '/close', body || {});
+      }
+    },
+
     models: {
       /* GET /api/models?enabled_only= → {models:[...], current:{...}, summary:{...}} */
       list: function (enabledOnly) {

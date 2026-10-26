@@ -103,6 +103,7 @@
       <button class="nav-item" data-view="models"><svg class="ic"><use href="#ic-cpu"/></svg><span>模型</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="ledger"><svg class="ic"><use href="#ic-activity"/></svg><span>账本</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="costs"><svg class="ic"><use href="#ic-cpu"/></svg><span>成本</span><i class="nav-ind"></i></button>
+      <button class="nav-item" data-view="operations"><svg class="ic"><use href="#ic-activity"/></svg><span>运营</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="files"><svg class="ic"><use href="#ic-folder"/></svg><span>文件管理器</span><i class="nav-ind"></i></button>
       <div class="nav-group-label">运维</div>
       <button class="nav-item" data-view="logs"><svg class="ic"><use href="#ic-doc"/></svg><span>日志审计</span><i class="nav-ind"></i></button>
@@ -412,6 +413,23 @@
         <div class="card" style="margin-top:12px"><div class="card-body" id="cost-models"></div></div>
         <div class="hint" id="cost-hint" style="margin-top:8px"></div>
       </section>
+      <section class="view" id="view-operations">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">运营</h2>
+            <p class="card-sub">目标 → 回合 → 日志 → 实验 · 每轮都回答"假设是什么、做了什么、效果如何"</p>
+          </div>
+          <div class="toolbar-actions">
+            <button class="btn btn-soft btn-sm" id="ops-refresh"><svg class="ic"><use href="#ic-refresh"/></svg>刷新</button>
+            <button class="btn btn-ghost btn-sm" id="ops-new-goal">新建目标</button>
+          </div>
+        </div>
+        <div class="grid stat-grid" id="ops-stats"></div>
+        <div class="card"><div class="card-body" id="ops-goals"></div></div>
+        <div class="card" style="margin-top:12px"><div class="card-body" id="ops-journal"></div></div>
+        <div class="card" style="margin-top:12px"><div class="card-body" id="ops-experiments"></div></div>
+        <div class="hint" style="margin-top:8px">节奏只是标记，不会自动开跑；开跑会走预算闸门，超预算直接记 blocked。</div>
+      </section>
       <section class="view" id="view-ledger">
         <div class="toolbar">
           <div>
@@ -509,6 +527,6 @@
 <div id="toast-root" class="toast-root"></div>
 
 <!-- 页面只加载 bundle：源文件顺序见 tools/bundle-order.json，由 tools/rebuild-bundles.py 拼接 -->
-<script src="/assets/js/index.bundle.js?v=1abee59a05"></script>
+<script src="/assets/js/index.bundle.js?v=ea6f2fec81"></script>
 </body>
 </html>

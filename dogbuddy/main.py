@@ -37,6 +37,7 @@ from .services.model_service import ModelService
 from .services.report_service import ReportService
 from .services.backup_service import BackupService
 from .services.cost_service import CostService
+from .services.operations_service import OperationsService
 from .services.pipeline_service import PipelineService
 from .services.cv_adapter import CvAdapter
 from .services.qc_service import QcService
@@ -171,6 +172,11 @@ class DogBuddyApp:
             dispatch=self.windows.dispatch_and_wait,
             workspace_root=str(getattr(config.paths, "workspaces_dir",
                                        "/var/lib/dogbuddy/workspaces")))
+        # v0.14.0：运营回合（目标 → 回合 → 日志 → 实验）
+        # 执行复用 pipelines、花钱复用 cost.budget_state、度量复用 metrics。
+        self.ops = OperationsService(self.db, pipelines=self.pipelines,
+                                     cost=self.cost, metrics=self.metrics,
+                                     bus=self.bus)
         # P0（v0.10.37）：运行台账 —— "此刻谁在跑什么"的唯一真相
         from .services.run_registry import RunRegistry
         self.runs = RunRegistry(self.db, self.bus)
@@ -294,6 +300,8 @@ class DogBuddyApp:
             # v0.13.0：指标与视觉服务（/api/metrics/*、/api/ingress/*）
             metrics=self.metrics,
             cv=self.cv,
+            # v0.14.0：运营回合（/api/ops/* 与 /healthz.ops）
+            ops=self.ops,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)
@@ -685,6 +693,8 @@ class DogBuddyApp:
         self._tasks.append(asyncio.get_event_loop().create_task(self.bus.start()))
         self._tasks.append(asyncio.get_event_loop().create_task(self.scheduler.run_loop()))
         self._tasks.append(asyncio.get_event_loop().create_task(self.iteration_exec.run_loop()))
+        # v0.14.0：只收尾"在跑"的运营回合，不会自己发起新回合（不偷花钱）
+        self._tasks.append(asyncio.get_event_loop().create_task(self.ops.run_loop()))
         self._tasks.append(self.decisions.start_sweeper())
         # v0.10.50：每日备份（启动 60s 后按需补一次，之后每 24h）
         await self.backup.start()
