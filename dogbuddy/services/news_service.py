@@ -23,6 +23,7 @@ import logging
 import os
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -86,44 +87,59 @@ class NewsService:
             logger.warning("news cache unreadable, rebuilding", exc_info=True)
         return {"articles": [], "updated_at": ""}
 
+    def _item_to_article(self, sid: int, item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict) or item.get("deleted") or item.get("dead"):
+            return None
+        if str(item.get("type") or "") != "story":
+            return None
+        url = str(item.get("url") or "")
+        if not url.startswith("http"):
+            url = f"https://news.ycombinator.com/item?id={sid}"
+        return {"id": sid, "title": str(item.get("title") or "").strip(),
+                "url": url, "score": int(item.get("score") or 0),
+                "by": str(item.get("by") or ""),
+                "comments": int(item.get("descendants") or 0),
+                "hn_time": int(item.get("time") or 0),
+                "source": "Hacker News",
+                "first_seen": time.time()}
+
     def _fetch_new(self, limit: int, min_score: int,
                    known: set[int]) -> list[dict[str, Any]]:
-        """从 HN 榜单往下取，跳过已发布的，直到凑够 limit 条。"""
-        ids = self._http(HN_TOP)
+        """从 HN 榜单往下取，跳过已发布的，凑够 limit 条。
+
+        为什么要并发：HN 的 item 接口是**一条一个请求**，串行时遇到慢连接
+        （单条 8–15s）能把一轮拖到十几分钟。这里按 6 条一批并发，并且**最多
+        扫描 40 条**——宁可这一轮少发两条，也不能把运营回合卡死。
+        """
+        ids = self._http(HN_TOP, 12)
         if not isinstance(ids, list):
             raise RuntimeError("HN 榜单返回异常")
-        out: list[dict[str, Any]] = []
-        for sid in ids:
+        candidates: list[int] = []
+        for raw in ids[:40]:
             try:
-                sid = int(sid)
+                sid = int(raw)
             except (TypeError, ValueError):
                 continue
-            if sid in known:
-                continue
+            if sid not in known:
+                candidates.append(sid)
+        out: list[dict[str, Any]] = []
+
+        def _one(sid: int) -> Any:
             try:
-                item = self._http(HN_ITEM.format(sid))
+                return self._http(HN_ITEM.format(sid), 8)
             except Exception:  # noqa: BLE001 — 单条失败跳过，不拖垮整轮
                 logger.debug("hn item fetch failed: %s", sid, exc_info=True)
-                continue
-            if not isinstance(item, dict) or item.get("deleted") or item.get("dead"):
-                continue
-            if str(item.get("type") or "") != "story":
-                continue
-            url = str(item.get("url") or "")
-            if not url.startswith("http"):
-                url = f"https://news.ycombinator.com/item?id={sid}"
-            score = int(item.get("score") or 0)
-            if score < min_score:
-                continue
-            out.append({"id": sid, "title": str(item.get("title") or "").strip(),
-                        "url": url, "score": score,
-                        "by": str(item.get("by") or ""),
-                        "comments": int(item.get("descendants") or 0),
-                        "hn_time": int(item.get("time") or 0),
-                        "source": "Hacker News",
-                        "first_seen": time.time()})
-            if len(out) >= limit:
-                break
+                return None
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for start in range(0, len(candidates), 6):
+                batch = candidates[start:start + 6]
+                for sid, item in zip(batch, pool.map(_one, batch)):
+                    art = self._item_to_article(sid, item)
+                    if art and art["score"] >= min_score:
+                        out.append(art)
+                        if len(out) >= limit:
+                            return out
         return out
 
     # ------------------------------------------------------------- 摘要
