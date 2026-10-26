@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -666,6 +666,20 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v23(conn: sqlite3.Connection) -> None:
+    """站点运营的自动更新（2026-10-26，0.15.0）。
+
+    实时站点需要"到点就产出一轮"，但 0.14.0 的运营回合刻意**不自动开跑**。
+    这里用**显式字段**打开这个口子：`auto_interval_s > 0` 才参与自动更新，
+    默认 0 = 永不自动；且每次自动开跑仍然先过预算闸门。
+    """
+    try:
+        conn.execute("ALTER TABLE ops_goals ADD COLUMN auto_interval_s INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass                      # 已经有了
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -692,6 +706,7 @@ _MIGRATIONS: dict[int, Any] = {
     20: _migrate_v20,
     21: _migrate_v21,
     22: _migrate_v22,
+    23: _migrate_v23,
 }
 
 
@@ -2149,19 +2164,23 @@ class Database:
             self._conn.execute(
                 """INSERT INTO ops_goals(id, name, description, metric_name, metric_unit,
                                          direction, baseline, target, cadence, pipeline_id,
-                                         enabled, created_at, updated_at, last_round_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                         auto_interval_s, enabled, created_at, updated_at,
+                                         last_round_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET
                      name=excluded.name, description=excluded.description,
                      metric_name=excluded.metric_name, metric_unit=excluded.metric_unit,
                      direction=excluded.direction, baseline=excluded.baseline,
                      target=excluded.target, cadence=excluded.cadence,
-                     pipeline_id=excluded.pipeline_id, enabled=excluded.enabled,
+                     pipeline_id=excluded.pipeline_id,
+                     auto_interval_s=excluded.auto_interval_s,
+                     enabled=excluded.enabled,
                      updated_at=excluded.updated_at""",
                 (gid, row.get("name") or "", row.get("description") or "",
                  row.get("metric_name") or "", row.get("metric_unit") or "",
                  row.get("direction") or "up", row.get("baseline"), row.get("target"),
                  row.get("cadence") or "manual", row.get("pipeline_id") or "",
+                 int(row.get("auto_interval_s") or 0),
                  int(row.get("enabled", 1) or 0),
                  row.get("created_at") or now, now,
                  row.get("last_round_at") or ""))

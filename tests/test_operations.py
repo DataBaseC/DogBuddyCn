@@ -264,6 +264,7 @@ def test_console_operations_wired():
     assert "/api/ops/goals" in api and "/api/ops/journal" in api
     assert "startRound" in api and "startRound" in view
     assert "计划" in view and "跑一轮" in view
+    assert "auto_interval_s" in view and "og-auto" in view
     assert "views-operations.js" in order
 
 

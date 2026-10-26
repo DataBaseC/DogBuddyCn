@@ -37,6 +37,7 @@ from .services.model_service import ModelService
 from .services.report_service import ReportService
 from .services.backup_service import BackupService
 from .services.cost_service import CostService
+from .services.news_service import NewsService
 from .services.operations_service import OperationsService
 from .services.pipeline_service import PipelineService
 from .services.cv_adapter import CvAdapter
@@ -164,10 +165,17 @@ class DogBuddyApp:
         # v0.13.0：工业信号（边缘推指标）+ 本地视觉服务适配器（图像不出厂）
         self.metrics = SensorHub(self.db)
         self.cv = CvAdapter(cost=self.cost)
+        # v0.15.0：首个真实站点（新闻聚合，静态页挂 /news）
+        # 内容来自 HN 公共 API；运营工位只做翻译/导读，不编造事件。
+        self.news = NewsService(
+            self.db, metrics=self.metrics,
+            site_dir=str(Path(config.paths.data) / "site" / "news"),
+            editor=self.windows.dispatch_and_wait, cost=self.cost)
         self.pipelines = PipelineService(
             self.db,
             qc=self.qc,
             cv=self.cv,
+            news=self.news,
             sensors=self.metrics,
             dispatch=self.windows.dispatch_and_wait,
             workspace_root=str(getattr(config.paths, "workspaces_dir",
@@ -302,6 +310,8 @@ class DogBuddyApp:
             cv=self.cv,
             # v0.14.0：运营回合（/api/ops/* 与 /healthz.ops）
             ops=self.ops,
+            # v0.15.0：运营站点（/news 静态站与 /api/news/status）
+            news=self.news, site_dir=str(self.news.site_dir),
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)

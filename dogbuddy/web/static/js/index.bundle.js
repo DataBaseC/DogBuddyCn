@@ -8626,7 +8626,11 @@
         '<td>' + metric + '</td>' +
         '<td class="mono">' + (g.direction === 'down' ? '↓' : '↑') + ' ' + target + '</td>' +
         '<td class="mono">' + U.esc(g.pipeline_id || '—') + '</td>' +
-        '<td>' + U.esc(g.cadence || 'manual') + '</td>' +
+        '<td>' + U.esc(g.cadence || 'manual') +
+        (Number(g.auto_interval_s || 0) > 0
+          ? ' <span class="badge badge-green">每 ' +
+            Math.round(Number(g.auto_interval_s) / 60) + ' 分钟自动</span>'
+          : '') + '</td>' +
         '<td class="hint">' + rel(g.last_round_at) + '</td>' +
         '<td>' + goalButtons(g) + '</td></tr>';
     });
@@ -8789,7 +8793,10 @@
         ['manual', 'daily', 'weekly'].map(function (c) {
           return '<option value="' + c + '"' + ((g.cadence || 'manual') === c ? ' selected' : '') +
             '>' + c + '</option>';
-        }).join('') + '</select></div>' +
+        }).join('') +         '</select></div>' +
+        '<div class="field"><span class="field-label">自动更新间隔（秒，0 = 关闭；站点建议 600）</span>' +
+        '<input class="input mono" id="og-auto" value="' +
+        U.esc(g.auto_interval_s === undefined ? 0 : g.auto_interval_s) + '"></div>' +
         '<div class="field"><span class="field-label">执行流水线 id（可留空：只记计划）</span>' +
         '<input class="input mono" id="og-pipe" value="' + U.esc(g.pipeline_id || '') + '"></div>' +
         '<div class="hint">动作里的 <code>{goal_name}</code> / <code>{action}</code> / ' +
@@ -8808,6 +8815,7 @@
               direction: body.querySelector('#og-dir').value,
               target: body.querySelector('#og-target').value,
               cadence: body.querySelector('#og-cadence').value,
+              auto_interval_s: Number(body.querySelector('#og-auto').value || 0),
               pipeline_id: body.querySelector('#og-pipe').value.trim(),
               enabled: true
             };

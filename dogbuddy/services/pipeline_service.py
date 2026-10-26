@@ -54,11 +54,11 @@ class PipelineError(ValueError):
 class PipelineService:
     #: 可用的步骤动作。新增动作要同时改 `_run_step`（否则跑到就报错）。
     ACTIONS = ("noop", "write_file", "window_run", "cv_detect", "sensor_read",
-               "qc_plan")
+               "qc_plan", "news_update")
 
     def __init__(self, db: Any, *, dispatch: Callable[..., Any] | None = None,
                  cv: Any = None, sensors: Any = None, qc: Any = None,
-                 workspace_root: str = "") -> None:
+                 news: Any = None, workspace_root: str = "") -> None:
         self.db = db
         #: async (window_id, prompt) -> str；由 main 注入 WindowManager.dispatch_and_wait
         self.dispatch = dispatch
@@ -67,6 +67,8 @@ class PipelineService:
         self.sensors = sensors
         #: 0.12.2：抽检策略（qc_plan 步骤用）
         self.qc = qc
+        #: 0.15.0：站点运营（news_update 步骤用）
+        self.news = news
         self.workspace_root = Path(workspace_root or ".").resolve()
 
     # ------------------------------------------------------------- 定义
@@ -354,6 +356,10 @@ class PipelineService:
                     task_class=str(params.get("task_class") or "qc"))
                 plan["batch_id"] = row.get("id")
             return plan
+        if action == "news_update":
+            if self.news is None:
+                raise RuntimeError("news_update 未装配新闻站服务（0.15.0 提供）")
+            return await self.news.update(params, payload)
         raise RuntimeError(f"未知 action：{action}")
 
     def _write_file(self, params: dict[str, Any]) -> dict[str, Any]:

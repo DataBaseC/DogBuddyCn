@@ -11,8 +11,8 @@
   3. 用变体（`ops_experiments`）隔离尝试：赢了继续放大，输了换变体。
 
 三条克制（写进代码，防止"AI 运营"变成"AI 乱花钱"）：
-  * **不自动开跑**：`tick()` 只收尾在跑的回合，不会自己发起新回合；
-    发起必须显式 `POST /ops/goals/{id}/rounds`（或人排的定时任务）。
+* **默认不自动开跑**：`tick()` 只收尾在跑的回合。实时站点这类需求由目标上的
+  `auto_interval_s` **显式开启**（默认 0 = 永不），且自动开跑仍先过预算闸门。
   * **不猜指标**：读不到指标就记 `unknown` 并停下判断，不拿 0 冒充数据。
   * **不静默失败**：预算拦下、流水线缺失、指标缺失都写进 journal 的 `notes`。
 """
@@ -62,6 +62,9 @@ class OperationsService:
         if pipeline_id and self.pipelines is not None:
             if self.pipelines.get(pipeline_id) is None:
                 raise ValueError(f"执行流水线不存在：{pipeline_id}")
+        auto_interval = int(payload.get("auto_interval_s") or 0)
+        if auto_interval and auto_interval < 60:
+            raise ValueError("auto_interval_s 要么 0（关闭），要么 ≥60 秒")
         target = payload.get("target")
         baseline = payload.get("baseline")
         row = self.db.upsert_goal({
@@ -73,6 +76,7 @@ class OperationsService:
             "baseline": float(baseline) if baseline not in (None, "") else None,
             "target": float(target) if target not in (None, "") else None,
             "cadence": cadence, "pipeline_id": pipeline_id,
+            "auto_interval_s": auto_interval,
             "enabled": 1 if payload.get("enabled", True) else 0})
         self._audit("ops:goal", f"{gid} metric={row.get('metric_name')} "
                                 f"target={row.get('target')} cadence={cadence}")
@@ -319,10 +323,42 @@ class OperationsService:
                 updated.append(self.db.get_journal(str(row["id"])) or {})
         return updated
 
+    def auto_tick(self) -> list[dict[str, Any]]:
+        """到点就开一轮 —— **仅限显式设了 `auto_interval_s` 的目标**。
+
+        三道闸：① 该目标已有 running 回合 → 跳过（不叠跑）；② 距上一轮不够间隔 →
+        跳过；③ `start_round` 里照旧走预算闸门（超预算只记 blocked，不执行）。
+        """
+        started: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+        for goal in self.db.list_goals(enabled_only=True):
+            interval = int(goal.get("auto_interval_s") or 0)
+            if interval <= 0:
+                continue
+            gid = str(goal["id"])
+            if self.db.list_journal(goal_id=gid, limit=1, status="running"):
+                continue
+            last = str(goal.get("last_round_at") or "")
+            if last:
+                try:
+                    when = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    if (now - when).total_seconds() < interval:
+                        continue
+                except ValueError:
+                    pass                  # 时间坏了就按"该跑了"处理
+            try:
+                started.append(self.start_round(gid))
+            except Exception:  # noqa: BLE001 — 单个目标坏了不能拖垮调度
+                logger.warning("ops auto round failed: %s", gid, exc_info=True)
+        return started
+
     async def run_loop(self, interval: float = 120.0) -> None:
-        """后台只做收尾（不发起新回合），所以不会偷花钱。"""
+        """收尾 + 自动更新。自动更新只对显式开启的目标生效，且走预算闸门。"""
         while True:
             try:
+                self.auto_tick()
                 self.tick()
             except Exception:  # noqa: BLE001
                 logger.warning("ops tick failed", exc_info=True)
@@ -342,6 +378,8 @@ class OperationsService:
                     for v in self.VERDICTS}
         return {"goals": len(goals),
                 "enabled": len([g for g in goals if int(g.get("enabled") or 0)]),
+                "auto_goals": len([g for g in goals
+                                   if int(g.get("auto_interval_s") or 0) > 0]),
                 "rounds": len(rows),
                 "running": len([r for r in rows if r.get("status") == "running"]),
                 "blocked": len([r for r in rows if r.get("status") == "blocked"]),

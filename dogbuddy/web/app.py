@@ -35,6 +35,7 @@ from .routes import ledger as ledger_routes
 from .routes import jobs as jobs_routes
 from .routes import logs as logs_routes
 from .routes import models as models_routes
+from .routes import news as news_routes
 from .routes import industry as industry_routes
 from .routes import pipelines as pipelines_routes
 from .routes import ops as ops_routes
@@ -95,6 +96,9 @@ class WebServices:
         self.cv = kw.get("cv")
         #: v0.14.0：运营回合（`/api/ops/*`、`/healthz.ops`）
         self.ops = kw.get("ops")
+        #: v0.15.0：站点运营（`/news` 静态站、`/api/news/status`）
+        self.news = kw.get("news")
+        self.site_dir = str(kw.get("site_dir") or "")
         self.models = kw.get("models")
         self.iterations = kw.get("iterations")
         self.iteration_exec = kw.get("iteration_exec")
@@ -158,6 +162,8 @@ def create_app(svc: WebServices) -> FastAPI:
             "cv": (svc.cv.health() if getattr(svc, "cv", None) else None),
             # v0.14.0：运营回合（卡住的回合要能一眼看到）
             "ops": (svc.ops.health() if getattr(svc, "ops", None) else None),
+            # v0.15.0：站点（文章数/更新时间；"站还活着吗"一眼可见）
+            "news": (svc.news.status() if getattr(svc, "news", None) else None),
         }
 
     @app.get("/api/version")
@@ -218,6 +224,8 @@ def create_app(svc: WebServices) -> FastAPI:
     app.include_router(industry_routes.router(svc, auth_deps), prefix="/api")
     # v0.14.0：运营回合（目标/回合/日志/实验）
     app.include_router(ops_routes.router(svc, auth_deps), prefix="/api")
+    # v0.15.0：站点运营（状态查询；站点本体是静态文件）
+    app.include_router(news_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(settings_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(logs_routes.router(svc, auth_deps), prefix="/api")
 
@@ -303,5 +311,10 @@ def create_app(svc: WebServices) -> FastAPI:
         @app.get("/")
         def index() -> FileResponse:
             return FileResponse(str(static_dir / "index.html"))
+
+    # v0.15.0：运营站点（静态）—— `/news/` 直接访问，不需要登录
+    if getattr(svc, "site_dir", ""):
+        app.mount("/news", StaticFiles(directory=str(svc.site_dir), html=True,
+                                       check_dir=False), name="news")
 
     return app

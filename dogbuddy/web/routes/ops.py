@@ -23,6 +23,8 @@ class GoalIn(BaseModel):
     target: float | None = None
     cadence: str = "manual"         # manual | daily | weekly
     pipeline_id: str = ""
+    #: >0 = 自动更新间隔（秒）；默认 0 永不自动，自动开跑仍走预算闸门
+    auto_interval_s: int = 0
     enabled: bool = True
 
 
