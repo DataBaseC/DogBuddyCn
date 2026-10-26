@@ -38,6 +38,8 @@ MAX_KEEP = 120
 #: 推荐口径：近 N 天**新建**、星数达门槛，按星数排序（避免全是几个超级仓库）
 GITHUB_DEFAULT_DAYS = 90
 GITHUB_DEFAULT_STARS = 50
+#: 上限：近期新建却几万星的，多半是刷星/搬运，不配叫"推荐"
+GITHUB_MAX_STARS = 5000
 
 
 def _now() -> str:
@@ -149,16 +151,22 @@ class NewsService:
 
     # ------------------------------------------------------- GitHub 推荐
     def _fetch_github(self, limit: int, min_score: int, known: set[int],
-                      days: int = GITHUB_DEFAULT_DAYS) -> list[dict[str, Any]]:
-        """GitHub Search：近 N 天新建、星数达门槛，按星数取推荐。
+                      days: int = GITHUB_DEFAULT_DAYS,
+                      max_score: int = GITHUB_MAX_STARS) -> list[dict[str, Any]]:
+        """GitHub Search：近 N 天新建、星数在区间内，按星数取推荐。
 
         一次请求拿 50 条，按已知项目数翻页 —— 不做逐仓库请求（会直接撞限速）。
-        未认证 Search API 10 次/分钟，我们每轮只调 1 次，10 分钟一轮远低于上限。
+        未认证 Search API 10 次/分钟，我们每轮只调 1 次，远低于上限。
+
+        星数要**有上限**：近期新建却几万星的多半是刷星/搬运；只推 50~5000 的
+        上升项目，才像"推荐"而不是"热搜搬运"。
         """
         since = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
                  ).strftime("%Y-%m-%d")
+        lo = max(0, int(min_score))
+        hi = max(lo + 1, int(max_score))
         # fork/archived 直接排掉；`forks:>=5` 专治"新建仓库刷星但没人用"
-        q = (f"created:>={since} stars:>={max(0, int(min_score))} "
+        q = (f"created:>={since} stars:{lo}..{hi} "
              f"forks:>=5 fork:false archived:false")
         page = 1 + (len(known) // 50)
         url = (f"{GITHUB_SEARCH}?q={urllib.parse.quote(q)}&sort=stars&order=desc"
@@ -181,7 +189,7 @@ class NewsService:
             if not full or not url.startswith("http"):
                 continue
             stars = int(item.get("stargazers_count") or 0)
-            if stars < int(min_score):
+            if stars < int(min_score) or stars > int(max_score):
                 continue
             desc = str(item.get("description") or "").strip()
             # 没有描述的仓库没法写"推荐理由"，硬编就是编造；直接跳过
@@ -277,7 +285,8 @@ class NewsService:
             if source == "github":
                 fresh = await asyncio.to_thread(
                     self._fetch_github, limit, min_score, set(existing),
-                    int(params.get("days") or GITHUB_DEFAULT_DAYS))
+                    int(params.get("days") or GITHUB_DEFAULT_DAYS),
+                    int(params.get("max_score") or GITHUB_MAX_STARS))
             else:
                 fresh = await asyncio.to_thread(self._fetch_new, limit, min_score,
                                                 set(existing))

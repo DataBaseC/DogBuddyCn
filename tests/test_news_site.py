@@ -151,11 +151,12 @@ def _repo(i: int, stars: int = 1200, lang: str = "Python") -> dict:
 
 def test_github_recommendations(env):
     make, metrics, db, feeds, calls, tmp_path = env
-    payload = {"items": [_repo(1), _repo(2, 800, "Go"), _repo(3, 10)]}
+    payload = {"items": [_repo(1), _repo(2, 800, "Go"), _repo(3, 10),
+                         _repo(4, 9000)]}                  # 10 太低、9000 太高
 
     def gh_http(url, timeout=15.0):
         assert url.startswith(GITHUB_SEARCH)
-        assert "stars" in url and "created" in url
+        assert "created%3A" in url and "stars%3A200..5000" in url
         return payload
 
     news = NewsService(db, site_dir=str(tmp_path / "gh"), metrics=metrics, http=gh_http)
