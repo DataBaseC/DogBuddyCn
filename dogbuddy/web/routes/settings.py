@@ -52,11 +52,17 @@ class ReportIn(BaseModel):
     default_strategy: str | None = None
 
 
+class RoutingIn(BaseModel):
+    #: 模型不可用时自动切备用（默认关；开/关都留审计）
+    failover_enabled: bool | None = None
+
+
 class SettingsIn(BaseModel):
     llm: LLMIn | None = None
     panel: PanelIn | None = None
     gateway: GatewayIn | None = None
     report: ReportIn | None = None
+    routing: RoutingIn | None = None
 
 
 class WhitelistIn(BaseModel):
@@ -120,6 +126,9 @@ def router(svc, auth_deps) -> APIRouter:
                         "push_target": cfg.gateway.push_target},
             "notify": {"channels": [c.model_dump() for c in cfg.notify.channels]},
             "report": {"default_strategy": svc.config.get("report.default_strategy", "brief")},
+            # v0.16.1：模型故障切换开关（默认关）
+            "routing": {"failover_enabled": bool(
+                svc.config.get("routing.failover_enabled", False))},
         }
 
     @r.get("/config", dependencies=auth_deps)
@@ -195,6 +204,10 @@ def router(svc, auth_deps) -> APIRouter:
                 svc.db.whitelist_add(str(qq))
         if body.report and body.report.default_strategy:
             svc.config.set_report_strategy(body.report.default_strategy)
+        if body.routing and body.routing.failover_enabled is not None:
+            svc.config.set("routing.failover_enabled", bool(body.routing.failover_enabled))
+            svc.db.audit("web", "routing:failover_toggle",
+                         f"enabled={bool(body.routing.failover_enabled)}")
         saved = svc.persist()
         svc.db.audit("web", "settings:update", f"settings updated via console (saved={saved})")
         out = _dump()

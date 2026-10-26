@@ -34,9 +34,11 @@ class RoutingService:
     #: 便宜档失败率超过它 → 不降（省下来的钱不够赔）
     ESCALATE_AT = 0.30
 
-    def __init__(self, db: Any, cost: Any = None):
+    def __init__(self, db: Any, cost: Any = None, config: Any = None):
         self.db = db
         self.cost = cost
+        #: 通用配置（`routing.failover_enabled` 开关）；main 在 ConfigService 建好后注入
+        self.config = config
 
     # ------------------------------------------------------------ 样本
     def stats(self) -> list[dict[str, Any]]:
@@ -82,6 +84,55 @@ class RoutingService:
         `p_fail` 因此同时反映"跑不完"和"判错了"——这正是路由该优化的目标。
         """
         self.record(task_class, model, ok, escalated=not ok)
+
+    # ------------------------------------------------------------ 故障切换
+    def failover_enabled(self) -> bool:
+        """设置页的开关；默认关（不乱切模型）。"""
+        cfg = getattr(self, "config", None)
+        if cfg is None:
+            return False
+        try:
+            return bool(cfg.get("routing.failover_enabled", False))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def failover(self, current_model: str = "", *, task_class: str = "default",
+                 error: str = "") -> dict[str, Any] | None:
+        """当前模型**不可用**时选一个可接管的模型（设置开关控制）。
+
+        与 `decide()` 的区别很重要：
+          * `decide()` 是**成本优化**，只能同端点（跨端点=换 key，会 401）；
+          * `failover()` 是**故障接管**，允许跨端点 —— 因为不切的后果是整轮失败，
+            不是多花几分钱。但候选仍然必须有 `api_key`，否则切过去一样用不了。
+        优先同端点、失败率低、单价低的；没有候选就返回 None（让原错误抛出）。
+        """
+        if not self.failover_enabled():
+            return None
+        catalog = self._catalog()
+        cur = catalog.get(current_model)
+        cur_ep = endpoint_of(str((cur or {}).get("base_url") or ""))
+        prices = {str(r.get("model") or ""): float(r.get("out_price") or 0)
+                  for r in self._priced()}
+        ranked: list[tuple[int, float, float, str, dict[str, Any]]] = []
+        for mid, entry in catalog.items():
+            if not mid or mid == current_model:
+                continue
+            if not str(entry.get("api_key") or "").strip():
+                continue                    # 没有自己的 key，切过去也是 401
+            ep = endpoint_of(str(entry.get("base_url") or ""))
+            cross = 1 if (cur_ep and ep != cur_ep) else 0
+            ranked.append((cross, self.p_fail(task_class, mid),
+                           prices.get(mid, 9999.0), mid, entry))
+        if not ranked:
+            return None
+        ranked.sort(key=lambda x: (x[0], x[1], x[2]))
+        cross, pf, price, mid, _entry = ranked[0]
+        return {"action": "failover", "model": mid, "from": current_model,
+                "cross_endpoint": bool(cross), "p_fail": round(pf, 4),
+                "price": price,
+                "reason": (f"{current_model or '当前模型'} 不可用"
+                           f"（{error[:80] or '调用失败'}）→ 故障切到 {mid}"
+                           f"{'（跨端点）' if cross else '（同端点）'}")}
 
     # ------------------------------------------------------- 候选模型
     def _catalog(self) -> dict[str, dict[str, Any]]:
@@ -180,4 +231,6 @@ class RoutingService:
         return {"classes": len({r.get("task_class") for r in rows}),
                 "models": len({r.get("model") for r in rows}),
                 "attempts": total, "failed": failed,
-                "min_samples": self.MIN_SAMPLES}
+                "min_samples": self.MIN_SAMPLES,
+                # v0.17.0：设置页的故障切换开关（关时不会自动换模型）
+                "failover_enabled": self.failover_enabled()}

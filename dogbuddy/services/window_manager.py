@@ -432,6 +432,16 @@ class WindowManager:
             routing.record(task_class, model, bool(ok), bool(escalated))
         return record
 
+    def _failover(self, task_class: str):
+        """模型故障切换（v0.16.1）：设置里开了开关才生效。"""
+        routing = getattr(self, "routing", None)
+        if routing is None:
+            return None
+
+        def pick(current_model: str = "", error: str = ""):
+            return routing.failover(current_model, task_class=task_class, error=error)
+        return pick
+
     def _budget_check(self, window_id: str, run_id: str = ""):
         """预算闸门（v0.11.1）：工位作用域 = 窗口 + 本次 run。
 
@@ -1021,6 +1031,8 @@ class WindowManager:
                    "router": self._router(w.id, run_id,
                                           getattr(role, "name", "") or "worker"),
                    "route_record": self._route_record(getattr(role, "name", "") or "worker"),
+                   # v0.16.1：模型不可用 → 切备用（设置开关控制）
+                   "failover": self._failover(getattr(role, "name", "") or "worker"),
                    "supervision_dispatch": self.supervision_dispatch,
                    # P1-6：升级给主管的待决事项要落 queue、主管要用工具裁决它们
                    "decisions": self.decisions,

@@ -157,7 +157,9 @@ class NewsService:
         """
         since = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
                  ).strftime("%Y-%m-%d")
-        q = f"created:>={since} stars:>={max(0, int(min_score))}"
+        # fork/archived 直接排掉；`forks:>=5` 专治"新建仓库刷星但没人用"
+        q = (f"created:>={since} stars:>={max(0, int(min_score))} "
+             f"forks:>=5 fork:false archived:false")
         page = 1 + (len(known) // 50)
         url = (f"{GITHUB_SEARCH}?q={urllib.parse.quote(q)}&sort=stars&order=desc"
                f"&per_page=50&page={page}")
@@ -181,12 +183,16 @@ class NewsService:
             stars = int(item.get("stargazers_count") or 0)
             if stars < int(min_score):
                 continue
+            desc = str(item.get("description") or "").strip()
+            # 没有描述的仓库没法写"推荐理由"，硬编就是编造；直接跳过
+            if len(desc) < 8:
+                continue
             out.append({
                 "id": rid, "title": full, "url": url, "score": stars,
                 "by": str((item.get("owner") or {}).get("login") or ""),
                 "comments": int(item.get("forks_count") or 0),
                 "language": str(item.get("language") or ""),
-                "desc": str(item.get("description") or "").strip(),
+                "desc": desc,
                 "created_at": str(item.get("created_at") or ""),
                 "pushed_at": str(item.get("pushed_at") or ""),
                 "source": "GitHub", "first_seen": time.time()})

@@ -146,6 +146,8 @@ class AgentLoop:
         guard_threshold: int = DEFAULT_GUARD_THRESHOLD,
     ):
         self.llm = llm
+        #: v0.16.1：模型故障切换每轮只做一次
+        self._failover_used = False
         self.registry = registry
         self.session = session
         self.builder = builder or ContextBuilder()
@@ -221,6 +223,8 @@ class AgentLoop:
         budget_downgraded = False
         #: v0.12.0：本轮是否被"分级路由"换过模型（切模型会改缓存前缀，只切一次）
         route_applied: dict[str, Any] | None = None
+        #: v0.16.1：本轮是否已经因"模型不可用"故障切换过（只切一次，避免连环换）
+        self._failover_used = False
 
         for step in range(1, self.max_iterations + 1):
             result.iterations = step
@@ -294,7 +298,8 @@ class AgentLoop:
             try:
                 # C1: transient failures get continuation attempts instead of
                 # killing the whole run on the first timeout.
-                resp = await self._chat_with_continuation(messages, schemas, on_delta, result)
+                resp = await self._chat_with_continuation(messages, schemas, on_delta,
+                                                          result, ctx)
             except RateLimitPaused as e:
                 # T8.8 封禁级限速：**暂停**任务，不是失败。
                 # stop_reason=rate_limited 会被 PromptRunner 映射成 rate_limited 状态，
@@ -421,9 +426,44 @@ class AgentLoop:
             return await self._stream_turn(messages, schemas, on_delta)
         return await self.llm.chat(messages, tools=schemas or None)
 
+    def _switch_for_failover(self, ctx: Any, err: BaseException) -> bool:
+        """模型不可用时切到备用模型（设置开关控制，一轮只切一次）。"""
+        if self._failover_used:
+            return False
+        cb = ctx.extra.get("failover")
+        if not callable(cb):
+            return False
+        current = str(getattr(self.llm, "model_name", "") or "")
+        try:
+            decision = cb(current, errors.describe(err)) or {}
+        except Exception:  # noqa: BLE001 — 切换算错不能掩盖原始错误
+            logger.debug("failover decision failed", exc_info=True)
+            return False
+        target = str(decision.get("model") or "")
+        if not target or target == current or not hasattr(self.llm, "set_model"):
+            return False
+        try:
+            self.llm.set_model(target)
+        except Exception:  # noqa: BLE001
+            logger.warning("failover set_model failed: %s", target, exc_info=True)
+            return False
+        self._failover_used = True
+        msg = f"[模型故障切换] {current or '?'} → {target}：{decision.get('reason') or ''}"
+        self.session.append("system", msg)
+        try:
+            db = getattr(ctx, "db", None)
+            if db is not None:
+                db.audit("system", "cost:failover",
+                         f"{current} -> {target} cross={decision.get('cross_endpoint')} "
+                         f"p_fail={decision.get('p_fail')} reason={decision.get('reason')}")
+        except Exception:  # noqa: BLE001
+            logger.debug("failover audit failed", exc_info=True)
+        logger.warning(msg)
+        return True
+
     async def _chat_with_continuation(self, messages: list, schemas: list,
                                       on_delta: Callable[[str], None] | None,
-                                      result: AgentResult) -> Any:
+                                      result: AgentResult, ctx: Any) -> Any:
         """LLM 调用的瞬态失败续跑（C1）。
 
         永久错误 / 策略拒绝立即抛出（外层停止）；瞬态错误最多续跑
@@ -441,6 +481,10 @@ class AgentLoop:
             except Exception as e:  # noqa: BLE001 — classified immediately
                 cls = errors.classify(e, assume_tool_args=False)
                 if cls is not ErrorClass.TRANSIENT:
+                    # 模型被下线/鉴权失败/端点 404 这类**永久错误**：如果设置里
+                    # 开了故障切换，换一个可用模型再试一次（只一次）。
+                    if self._switch_for_failover(ctx, e):
+                        return await self._chat(messages, schemas, on_delta)
                     raise
                 last = e
                 if attempt >= attempts:
@@ -454,6 +498,9 @@ class AgentLoop:
                 if self.transient_delay > 0:
                     await asyncio.sleep(self.transient_delay)
         assert last is not None
+        # 瞬态重试也耗尽了（对端可能真挂了）：开了开关就切备用模型再试一次
+        if self._switch_for_failover(ctx, last):
+            return await self._chat(messages, schemas, on_delta)
         raise last
 
     # ------------------------------------------------------- C2 死循环熔断

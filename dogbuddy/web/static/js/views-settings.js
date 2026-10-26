@@ -69,6 +69,7 @@
          工位/任务的 `llm_profile` 字段），只是不再在设置页提供编辑入口。 */
       host.innerHTML =
         Settings.cardRetry(llm.retry || {}) +
+        Settings.cardFailover(d.routing || {}) +
         Settings.cardPanel(panel) +
         Settings.cardGateway(gw, rep) +
         Settings.cardNotify(d.notify || {}) +
@@ -115,6 +116,23 @@
         '<div class="backoff-preview" id="set-backoff-preview"></div></div>' +
         '<div class="set-card-foot"><div class="spacer"></div>' +
         '<button class="btn btn-primary btn-sm" data-save="retry">保存该组</button></div></div>';
+    },
+
+    cardFailover: function (r) {
+      return '<div class="card set-card" data-group="failover">' +
+        '<div class="set-card-head"><span class="set-card-icon">' + U.icon('zap', 'sm') + '</span>' +
+        '<div><h3>模型故障切换</h3><p>模型被下线 / 鉴权失效时自动换一个</p></div></div>' +
+        '<div class="set-card-body">' +
+        '<div class="set-row"><span class="field-label">启用自动故障切换</span>' +
+        '<label class="switch"><input type="checkbox" id="set-failover-enabled"' +
+        (r.failover_enabled ? ' checked' : '') + '><i></i></label></div>' +
+        '<p class="hint" style="margin-top:10px">开启后：当前模型出现**永久错误**' +
+        '（被下线、401、端点 404 等）时，自动切到模型目录里另一条**带密钥且启用**的模型，' +
+        '再试一次。优先同端点，没有同端点才跨端点；每轮只切一次，并写审计 ' +
+        '<code>cost:failover</code>。<br>注意：成本优化路由仍然只走同端点——' +
+        '故障切换是"总比整轮失败好"的兜底，不是常规降档。</p></div>' +
+        '<div class="set-card-foot"><div class="spacer"></div>' +
+        '<button class="btn btn-primary btn-sm" data-save="failover">保存该组</button></div></div>';
     },
 
     cardPanel: function (p) {
@@ -266,7 +284,15 @@
     /* ---------- 交互绑定 ---------- */
     /* v0.10.27：LLM 兜底卡片的三个监听（高级折叠 / 打开模型管理 / 测试兜底配置）
        随卡片一起移除 —— 模型、地址、密钥都归「模型管理」页。 */
-    bind: function () {},
+    bind: function () {
+      /* 设置卡片统一委托：此前 bind 是空的，保存按钮靠别处（实际没绑上）。
+         这里一次性绑 `data-save`，新加卡片只要带这个属性就能保存。 */
+      U.$$('#settings-cards [data-save]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          Settings.saveGroup(btn.getAttribute('data-save'));
+        });
+      });
+    },
 
     renderBackoff: function () {
       var host = document.getElementById('set-backoff-preview');
@@ -300,6 +326,10 @@
               inline_cap: Number(document.getElementById('set-rcap').value),
               wait_budget: Number(document.getElementById('set-rbudget').value)
             }
+          };
+        } else if (group === 'failover') {
+          body.routing = {
+            failover_enabled: document.getElementById('set-failover-enabled').checked
           };
         } else if (group === 'panel') {
           body.panel = {

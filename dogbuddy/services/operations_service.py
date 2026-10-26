@@ -177,6 +177,13 @@ class OperationsService:
 
     # ------------------------------------------------------------- 开跑
     def start_round(self, gid: str, *, execute: bool = True) -> dict[str, Any]:
+        # 同一目标只允许一个在跑的回合：自动轮次和手动轮次并发时，两轮会同时
+        # 写同一个站点/文件，后结束的那轮会把新内容覆盖回去（实测踩过）。
+        running = self.db.list_journal(goal_id=gid, limit=1, status="running")
+        if running:
+            raise ValueError(
+                f"该目标已有在跑的回合（round_no={running[0].get('round_no')}），"
+                "等它收尾或先关闭它")
         plan = self.plan_round(gid)
         goal = plan["goal"]
         budget = {"level": "ok", "exceeded": False, "reason": ""}

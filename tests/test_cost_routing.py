@@ -42,11 +42,12 @@ def svc(tmp_path):
         db.upsert_cost_model({"id": f"p:{mid}", "provider": "p", "model": mid,
                               "in_price": price / 4, "out_price": price, "enabled": 1})
     db.upsert_model({"id": "p_m-strong", "provider": "p", "model": "m-strong",
-                     "base_url": EP, "enabled": 1})
+                     "base_url": EP, "enabled": 1, "api_key": "sk-strong"})
     db.upsert_model({"id": "p_m-cheap", "provider": "p", "model": "m-cheap",
-                     "base_url": EP, "enabled": 1})
+                     "base_url": EP, "enabled": 1, "api_key": "sk-cheap"})
     db.upsert_model({"id": "x_m-other", "provider": "x", "model": "m-other",
-                     "base_url": "https://api.other.example.com/v1", "enabled": 1})
+                     "base_url": "https://api.other.example.com/v1", "enabled": 1,
+                     "api_key": "sk-other"})
     routing = RoutingService(db, cost)
     yield routing, cost, db
     db.close()
@@ -130,6 +131,49 @@ def test_no_upgrade_in_cold_start(svc):
     assert d["action"] == "stay", "样本不足时不许升级（否则一次失败就上最贵档）"
 
 
+# --------------------------------------------------------------- 故障切换
+class _Cfg:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def get(self, key, default=None):
+        return self.enabled if key == "routing.failover_enabled" else default
+
+
+def test_failover_is_off_by_default(svc):
+    routing, cost, db = svc
+    assert routing.failover("m-strong") is None
+    routing.config = _Cfg(False)
+    assert routing.failover("m-strong") is None
+
+
+def test_failover_prefers_same_endpoint_then_cross(svc):
+    routing, cost, db = svc
+    routing.config = _Cfg(True)
+    d = routing.failover("m-strong", task_class="t", error="model disabled")
+    assert d["model"] == "m-cheap" and d["cross_endpoint"] is False
+    # 同端点的备选下线 → 才允许跨端点接管
+    db.upsert_model({"id": "p_m-cheap", "provider": "p", "model": "m-cheap",
+                     "base_url": EP, "enabled": 0, "api_key": "sk-cheap"})
+    d2 = routing.failover("m-strong", task_class="t", error="404")
+    assert d2["model"] == "m-other" and d2["cross_endpoint"] is True
+
+
+def test_failover_skips_candidates_without_key(svc):
+    routing, cost, db = svc
+    routing.config = _Cfg(True)
+    for mid in ("m-cheap", "m-other"):
+        db.upsert_model({"id": f"x_{mid}", "provider": "x", "model": mid,
+                         "base_url": EP, "enabled": 1, "api_key": ""})
+    # m-cheap 没 key；m-other 也没 key → 没有可用备选
+    db.upsert_model({"id": "p_m-cheap", "provider": "p", "model": "m-cheap",
+                     "base_url": EP, "enabled": 1, "api_key": ""})
+    db.upsert_model({"id": "x_m-other", "provider": "x", "model": "m-other",
+                     "base_url": "https://api.other.example.com/v1", "enabled": 1,
+                     "api_key": ""})
+    assert routing.failover("m-strong") is None
+
+
 # ------------------------------------------------------------------- loop
 class _Session:
     def __init__(self):
@@ -197,6 +241,26 @@ def test_loop_applies_route_once_and_records(svc):
     assert "cost:route" in acts
 
 
+def test_loop_switches_model_once_on_failover(svc):
+    routing, cost, db = svc
+    llm = _LLM("m-strong")
+    loop = AgentLoop(llm=llm, registry=_Registry(), session=_Session(),
+                     tool_names=[], max_iterations=2)
+    ctx = _ctx(db, None)
+    ctx.extra["failover"] = lambda cur, err: {
+        "model": "m-cheap", "reason": "模型被下线", "cross_endpoint": False,
+        "p_fail": 0.15}
+    assert loop._switch_for_failover(ctx, RuntimeError("model not found")) is True
+    assert llm.switched == ["m-cheap"] and llm.model_name == "m-cheap"
+    # 一轮只切一次
+    assert loop._switch_for_failover(ctx, RuntimeError("again")) is False
+    assert llm.switched == ["m-cheap"]
+    acts = [r[0] for r in db._conn.execute(
+        "select action from audit_log where action='cost:failover'")]
+    assert len(acts) == 1
+    assert any("模型故障切换" in c for _r, c in loop.session.appended)
+
+
 def test_loop_ignores_router_errors(svc):
     routing, cost, db = svc
     llm = _LLM("m-strong")
@@ -237,6 +301,19 @@ def test_routes_endpoint(client):
     body = c.get("/api/costs/routes").json()
     assert body["stats"][0]["model"] == "m-cheap"
     assert body["health"]["attempts"] == 1 and body["health"]["failed"] == 1
+
+
+def test_settings_failover_toggle_wired():
+    from dogbuddy.web.routes.settings import SettingsIn
+    body = SettingsIn(routing={"failover_enabled": True})
+    assert body.routing and body.routing.failover_enabled is True
+    js = (REPO / "dogbuddy/web/static/js/views-settings.js").read_text(encoding="utf-8")
+    assert "cardFailover" in js and "set-failover-enabled" in js
+    assert "data-save=\"failover\"" in js
+    assert "body.routing = {" in js and "failover_enabled" in js
+    routes = (REPO / "dogbuddy/web/routes/settings.py").read_text(encoding="utf-8")
+    assert "routing.failover_enabled" in routes
+    assert "routing:failover_toggle" in routes
 
 
 def test_console_wiring_for_routes():

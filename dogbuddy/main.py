@@ -206,6 +206,8 @@ class DogBuddyApp:
         self.windows.job_store = self.job_store
         self.windows.run_job_now = self.jobs.run_now
         self.config_svc = ConfigService(self.db, config, persist=self.persist_config)
+        # v0.16.1：路由服务要读设置页的「模型故障切换」开关
+        self.routing.config = self.config_svc
         # 模型目录（模型管理页）：目录是备选清单，activate() 才写运行时配置并落盘
         self.models = ModelService(self.db, config, persist=self.persist_config,
                                    fetch_models=self.config_svc.fetch_models,

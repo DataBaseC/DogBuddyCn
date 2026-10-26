@@ -175,6 +175,23 @@ def test_round_blocked_by_budget(env):
     assert ops.health()["blocked"] == 1
 
 
+def test_no_concurrent_rounds_per_goal(env):
+    """自动轮次与手动轮次并发会同时写站点，后结束的会覆盖新内容。"""
+    ops, pipelines, metrics, cost, db, _ = env
+    _goal(ops)
+    metrics.push("site.visits", 100)
+    first = ops.start_round("g1")
+    assert first["started"] is True
+    with pytest.raises(ValueError) as exc:
+        ops.start_round("g1")
+    assert "已有在跑的回合" in str(exc.value)
+    _run(pipelines.tick(first["journal"]["pipeline_run_id"]))
+    ops.tick()
+    # 收尾后可以再开
+    second = ops.start_round("g1")
+    assert second["started"] is True
+
+
 def test_round_without_pipeline_is_planned_only(env):
     ops, pipelines, metrics, cost, db, _ = env
     _goal(ops, pipeline_id="")

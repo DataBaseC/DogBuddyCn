@@ -394,7 +394,9 @@ class AdminService:
                                  # v0.12.0：分级路由（便宜的先跑，翻车再升）
                                  "router": self._router(f"admin:{sender}",
                                                         task_class="admin_chat"),
-                                 "route_record": self._route_record("admin_chat")})
+                                 "route_record": self._route_record("admin_chat"),
+                                 # v0.16.1：模型不可用时切备用（设置开关控制）
+                                 "failover": self._failover("admin_chat")})
         loop = AgentLoop(
             llm=llm_client, registry=self.registry, session=session,
             builder=self.builder, tool_names=role_spec.tool_names if role_spec else [],
@@ -507,6 +509,16 @@ class AdminService:
         def record(ok: bool, model: str, escalated: bool = False) -> None:
             routing.record(task_class, model, bool(ok), bool(escalated))
         return record
+
+    def _failover(self, task_class: str):
+        """模型故障切换（v0.16.1）：设置里开了开关才生效。"""
+        routing = getattr(self, "routing", None)
+        if routing is None:
+            return None
+
+        def pick(current_model: str = "", error: str = ""):
+            return routing.failover(current_model, task_class=task_class, error=error)
+        return pick
 
     def _budget_check(self, window_id: str, run_id: str = ""):
         """预算闸门（v0.11.1）：每次调模型前问一句，超了就停/降档。
