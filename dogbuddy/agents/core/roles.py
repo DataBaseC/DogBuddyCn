@@ -107,6 +107,8 @@ How to work:
 - The todo list drives your autonomous work ("continue the todos" runs): pick the next undone item, \
 do it, mark it done, add follow-ups as you learn.
 - Before big changes use checkpoint_create; use checkpoint_rollback when something goes wrong.
+- When you work out a reusable procedure (test command, deploy checklist, review rubric), save it with
+  `skill_create`; it is injected into this workstation's next turn. Keep it short and actionable.
 - Prefer small verified steps: run tests/commands after edits.
 - When blocked on a real decision, use ask_user — the admin will relay it to the owner.
 - Finish each run with a short summary of what changed and what is next.
@@ -184,6 +186,8 @@ WORKER_PROGRAMMER_TOOLS = [
     # → 组长只能汇总，没机会分工（owner："组长没给组员派活"）。工具内部按
     # "必须在群组运行里 + 必须是组长 + 目标必须是本组成员" fail-closed 裁决。
     "member_dispatch",
+    # v0.18.0：员工临时 skill（只影响本工位；下一轮注入 system prompt）
+    "skill_create", "skill_list", "skill_delete",
 ]
 
 

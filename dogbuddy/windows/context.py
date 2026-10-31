@@ -10,9 +10,12 @@ Business rule (compression policy glue) lives here in Domain, not in L1/L2.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from ..ports import Message
+
+logger = logging.getLogger("dogbuddy.windows.context")
 
 # keep at most this many compaction blocks in context
 MAX_COMPACTION_BLOCKS = 3
@@ -38,8 +41,9 @@ def message_to_llm(m: Message) -> dict[str, Any]:
 
 
 class ContextBuilder:
-    def __init__(self, memory_service: Any = None):
+    def __init__(self, memory_service: Any = None, skills_root: str = ""):
         self.memory = memory_service
+        self.skills_root = str(skills_root or "")
 
     def system_block(self, session: Any) -> str:
         w = session.window
@@ -51,6 +55,14 @@ class ContextBuilder:
             wm = self.memory.recall_window(w.id)
             if wm:
                 parts.append(f"## Window memory ({w.name})\n{wm}")
+        if self.skills_root:
+            try:
+                from ..skills import format_skills, load_skills
+                skill_block = format_skills(load_skills(self.skills_root, w.id))
+                if skill_block:
+                    parts.append(skill_block)
+            except Exception:  # noqa: BLE001 — 坏 skill 不能拖垮整个会话
+                logger.warning("skill load failed", exc_info=True)
         facts = self.compaction_block(session)
         if facts:
             parts.append(facts)
@@ -83,7 +95,7 @@ class ContextBuilder:
             )
         return "## Compacted conversation facts (older wording dropped)\n" + "\n\n".join(chunks)
 
-    def build(self, session: Any, recent_limit: int = 60) -> list[dict[str, Any]]:
+    def build(self, session: Any, recent_limit: int = 400) -> list[dict[str, Any]]:
         msgs: list[dict[str, Any]] = [{"role": "system", "content": self.system_block(session)}]
         # v0.10.17：**修复 tool / tool_calls 配对**。
         # 历史一旦被裁剪（recent_limit）、压缩或被外部清空，就可能出现

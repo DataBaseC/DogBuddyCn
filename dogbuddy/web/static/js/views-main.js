@@ -287,7 +287,8 @@
 
     /* ---------- 会话气泡渲染 ---------- */
     renderContent: function (text) {
-      var s = String(text || '');
+      // 尾部换行会在气泡底部多渲染一个 <br>（owner 反馈的“空行”）。
+      var s = String(text || '').replace(/\s+$/, '');
       var out = [], parts = s.split(/```/);
       parts.forEach(function (chunk, i) {
         if (i % 2 === 1) {

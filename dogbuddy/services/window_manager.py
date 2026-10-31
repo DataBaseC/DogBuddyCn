@@ -141,6 +141,13 @@ class WindowManager:
         self.bus = bus
         self.panel = panel
         self.memory = memory
+        # v0.18.0：员工临时 skill（窗口级）。memory.root = <data>/memory，
+        # 所以 skills 固定落在 <data>/skills，和记忆同一个数据目录。
+        if memory is not None and getattr(memory, "root", ""):
+            data_root = Path(memory.root).parent
+        else:
+            data_root = Path(checkpoints_dir).parent
+        self.skills_root = str(data_root / "skills")
         self.decisions = decisions
         self.cost = cost
         self.routing = routing
@@ -161,7 +168,8 @@ class WindowManager:
         from ..agents.core.scope import ScopeResolver
         self.scope_resolver = ScopeResolver(db)
         self.max_iterations = max_iterations
-        self.builder = ContextBuilder(memory_service=memory)
+        self.builder = ContextBuilder(memory_service=memory,
+                                      skills_root=self.skills_root)
         self.threshold = threshold
         self.max_context_tokens = max_context_tokens
         #: v0.10.32：人工派单的"最后一次任务"，限速暂停后据此自动续跑
@@ -218,7 +226,9 @@ class WindowManager:
         registry = build_worker_registry(w.role, gate=self.gate, audit=self.db,
                                          jobs=self.job_store, run_job_now=self._run_job_now,
                                          # v0.10.33：组长派活给组员要走 WindowManager
-                                         coordinator=self)
+                                         coordinator=self,
+                                         # v0.18.0：员工临时 skill（只写本工位域）
+                                         skills_root=self.skills_root)
         # T9.3：主管工位额外装上"项目级管理工具"（system 级永远不给）。
         # 装配只是"少给"，真正的越权拦截在 PermissionGate.check_scope（fail-closed）。
         #

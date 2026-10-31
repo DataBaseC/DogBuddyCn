@@ -200,5 +200,13 @@ class WindowSession:
         return self.compactions.list_compactions(self.window.id)
 
     # ------------------------------------------------------------- context
-    def build_context(self, builder: ContextBuilder, recent_limit: int = 60) -> list[dict[str, Any]]:
+    def build_context(self, builder: ContextBuilder,
+                      recent_limit: int = 400) -> list[dict[str, Any]]:
+        """Build the request with a **stable prefix**.
+
+        这里曾用 60，而压缩阈值是 96：消息到 60~96 之间时，每轮都会丢掉最老的
+        一条 → 请求前缀整体位移 → 服务商只能命中系统提示那一点，实测缓存命中
+        在 90%/0% 间交替。取 400 与压缩器自己的 `recent(400)` 对齐：要么不动，
+        要么压缩一次性重写前缀，不再逐轮滑动。
+        """
         return builder.build(self, recent_limit=recent_limit)

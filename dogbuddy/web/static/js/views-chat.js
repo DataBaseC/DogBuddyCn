@@ -154,7 +154,10 @@
     var role = m.role === 'user' ? 'user' : (m.role === 'assistant' ? 'bot' : 'tool');
     var who = role === 'user' ? '我' : (role === 'assistant' ? '管理员' : m.role);
     var time = U.relTime(m.created_at);
-    var content = U.esc(m.content || '');
+    /* v0.18.0：模型回复常以 \n / \n\n 结尾，逐行转 <br> 后会在气泡底部多出
+       一整行空白（owner 反馈“对话框多一行空行”）。先去掉尾部空白，再转行。 */
+    var raw = String(m.content || '').replace(/\s+$/, '');
+    var content = U.esc(raw);
     /* 工具消息常是 JSON，用等宽块呈现更易读 */
     if (role === 'tool') {
       content = '<pre class="chat-pre">' + content + '</pre>';
