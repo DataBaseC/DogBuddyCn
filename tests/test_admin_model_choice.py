@@ -86,6 +86,31 @@ def test_window_update_rejects_unknown_model(tmp_path):
     db.close()
 
 
+def test_window_update_can_raise_iteration_cap(tmp_path):
+    """轮次上限是工位参数：管理员必须能通过工具改，否则只能让 owner 点控制台。"""
+    db, _cfg, _m, wm, tools, ctx = _stack(tmp_path)
+
+    async def main():
+        created = await tools["window_create"].execute(
+            {"name": "长任务", "workspace": str(tmp_path / "ws" / "long"),
+             "max_iterations": 30}, ctx)
+        assert created.ok, created.output
+        wid = created.data["window_id"]
+        assert wm.get(wid).params["max_iterations"] == 30
+        ok = await tools["window_update"].execute(
+            {"window_id": wid, "max_iterations": 80,
+             "compact_threshold": 0.7}, ctx)
+        assert ok.ok, ok.output
+        got = wm.get(wid).params
+        assert got["max_iterations"] == 80 and got["compact_threshold"] == 0.7
+        bad = await tools["window_update"].execute(
+            {"window_id": wid, "max_iterations": 999}, ctx)
+        assert not bad.ok and "max_iterations" in bad.output
+
+    run(main())
+    db.close()
+
+
 def test_model_select_changes_the_admin_model(tmp_path):
     db, cfg, _m, _wm, tools, ctx = _stack(tmp_path)
 

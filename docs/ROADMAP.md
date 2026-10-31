@@ -2366,3 +2366,24 @@ skill 是“临时”的：只对创建它的工位可见，别的窗口拿不�
 
 基线：**993 passed / 4 skipped**（新增 6 条：窗口隔离/工具创建删除/注入/不滑动/工具注册/前端尾部裁剪）。
 
+---
+
+## 63. 管理员可改轮次上限（2026-10-31，`0.18.1`）
+
+owner："询问轮次经常超上限，导致任务被终止，我们的管理员能改轮次上限吗？"
+
+**能，但此前后端只做了一半**：`max_iterations` 是工位级参数（默认 25，范围 1~200），
+控制台「工位参数」页和 `PATCH /api/windows/{id}` 都已支持；但 AI 管理员手里的
+`window_update` 只暴露了 `compact_threshold` / `max_context_tokens`，所以管理员在对话里
+改不了——这是接线缺口，不是权限设计。
+
+修法：`window_create` / `window_update` 增加 `max_iterations`（1~200），与已有参数
+**合并**而不是整包替换；越界由 `WindowManager._PARAM_RANGES` 拒绝并回人话。
+
+边界：只影响**下一次任务**（运行中的任务仍用启动时的参数）；`max_iterations` 用尽时
+run 标记为 `partial`，不是 `failed`，管理员可以调高后重试。别和项目层的
+`iteration_service.max_rounds`（运营/迭代回合上限 20/50/100）混为一谈。
+
+基线：**994 passed / 4 skipped**（新增：管理员创建/更新 `max_iterations`，并验证与
+`compact_threshold` 合并不丢、999 越界被拒）。
+

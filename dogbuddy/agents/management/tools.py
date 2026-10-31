@@ -174,6 +174,8 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
             params["compact_threshold"] = args["compact_threshold"]
         if args.get("max_context_tokens") not in (None, ""):
             params["max_context_tokens"] = args["max_context_tokens"]
+        if args.get("max_iterations") not in (None, ""):
+            params["max_iterations"] = args["max_iterations"]
         try:
             w = W.create(name=args["name"], role=args.get("role", "worker_programmer"),
                          workspace_path=args["workspace"], model=args.get("model", ""),
@@ -183,21 +185,25 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         except ValueError as e:  # 参数越界 / 重名 / 未知角色 → 让模型看见人话
             return ToolResult.failure(f"建工位失败：{e}")
         extra = f"，压缩阈值 {params['compact_threshold']}" if "compact_threshold" in params else ""
+        if "max_iterations" in params:
+            extra += f"，轮次上限 {params['max_iterations']}"
         return ToolResult.success(f"window created: {w.id} ({w.name}){extra}", window_id=w.id)
 
     tools.append(FnTool("window_create",
         "Create an employee window (workstation). Omit `model`/`llm_profile` unless the user "
         "asked for a specific model: empty means the new window inherits the same model the "
         "admin itself runs on, which is the desired default. `compact_threshold` (0.3~0.95) is "
-        "how full the context may get before the app compacts it: ask the user when they care "
-        "about cost/context, otherwise leave it empty (= inherit the global default).",
+        "how full the context may get before the app compacts it; `max_iterations` (1~200) is "
+        "the per-task tool-round cap. Ask the user when they care about cost/context, otherwise "
+        "leave them empty (= inherit the global default).",
         _props(name=_p("string", "window name", True), role=_p("string", "role, default worker_programmer"),
                workspace=_p("string", "workspace path", True),
                model=_p("string", "model override; leave empty to inherit the admin's model"),
                mode=_p("string", "BUILD|PLAN|AUTO, default BUILD"),
                llm_profile=_p("string", "named LLM config set to use (empty = inherit)"),
                compact_threshold=_p("number", "context compaction threshold 0.3~0.95 (empty = inherit)"),
-               max_context_tokens=_p("integer", "context window override in tokens (empty = inherit)")),
+               max_context_tokens=_p("integer", "context window override in tokens (empty = inherit)"),
+               max_iterations=_p("integer", "per-task tool-round cap 1~200 (empty = inherit)")),
         window_create, "write"))
 
     async def window_list(args: dict, ctx: ToolContext) -> ToolResult:
@@ -245,18 +251,17 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
             return ToolResult.failure(bad)
         fields = {k: v for k, v in args.items()
                   if k in ("name", "model", "mode", "llm_profile") and v is not None and v != ""}
-        # 压缩阈值/上下文上限走工位参数覆盖：与**已有覆盖合并**（不是整包替换）
-        if args.get("compact_threshold") not in (None, "") or \
-                args.get("max_context_tokens") not in (None, ""):
+        # 压缩阈值/上下文上限/轮次上限走工位参数覆盖：与**已有覆盖合并**（不是整包替换）
+        param_keys = ("compact_threshold", "max_context_tokens", "max_iterations")
+        if any(args.get(k) not in (None, "") for k in param_keys):
             try:
                 cur = W.get(args["window_id"])
                 merged = dict(getattr(cur, "params", {}) or {})
             except Exception:  # noqa: BLE001 — 取不到就当空
                 merged = {}
-            if args.get("compact_threshold") not in (None, ""):
-                merged["compact_threshold"] = args["compact_threshold"]
-            if args.get("max_context_tokens") not in (None, ""):
-                merged["max_context_tokens"] = args["max_context_tokens"]
+            for key in param_keys:
+                if args.get(key) not in (None, ""):
+                    merged[key] = args[key]
             fields["params"] = merged
         try:
             w = W.update(args["window_id"], **fields)
@@ -265,13 +270,14 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         return ToolResult.success(f"updated {w.id}: {fields}")
 
     tools.append(FnTool("window_update",
-        "Update window name/model/mode/llm_profile, and optionally compact_threshold (0.3~0.95) "
-        "or max_context_tokens.",
+        "Update window name/model/mode/llm_profile, and optionally compact_threshold (0.3~0.95), "
+        "max_context_tokens, or max_iterations (1~200, the per-task tool-round cap).",
         _props(window_id=_p("string", "window id", True), name=_p("string", "new name"),
                model=_p("string", "new model"), mode=_p("string", "BUILD|PLAN|AUTO"),
                llm_profile=_p("string", "named LLM config set"),
                compact_threshold=_p("number", "context compaction threshold 0.3~0.95"),
-               max_context_tokens=_p("integer", "context window in tokens")),
+               max_context_tokens=_p("integer", "context window in tokens"),
+               max_iterations=_p("integer", "per-task tool-round cap 1~200")),
         window_update, "write"))
 
     for action, verb in (("window_pause", "pause"), ("window_resume", "resume"), ("window_delete", "delete")):
