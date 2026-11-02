@@ -295,6 +295,13 @@ class AgentLoop:
                 except Exception:  # noqa: BLE001 — 压缩失败不影响本轮
                     logger.warning("mid-run compaction failed", exc_info=True)
             messages = self.session.build_context(self.builder)
+            # v0.20.0：每次迭代先刷一次心跳（长 LLM 调用不等于“没进展”）
+            _progress = ctx.extra.get("progress")
+            if callable(_progress):
+                try:
+                    _progress(iteration=step, last_tool="", ok=True)
+                except Exception:  # noqa: BLE001
+                    logger.debug("progress hook failed", exc_info=True)
             try:
                 # C1: transient failures get continuation attempts instead of
                 # killing the whole run on the first timeout.
@@ -377,6 +384,11 @@ class AgentLoop:
                 self.session.append(
                     "tool", tool_result.as_tool_text(),
                     meta={"tool_call_id": tc.id, "tool_name": tc.name})
+                if callable(_progress):
+                    try:
+                        _progress(iteration=step, last_tool=tc.name, ok=tool_result.ok)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("progress hook failed", exc_info=True)
                 if tool_result.needs_confirm:
                     result.pending_confirms.append(tool_result.output)
                 if tc.name == "ask_user" and not tool_result.data.get("answered", True):

@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -770,6 +770,34 @@ def _migrate_v24(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v25(conn: sqlite3.Connection) -> None:
+    """资源卡片 + 工具级进展（2026-11-02，0.20.0）。
+
+    压缩前把旧消息归档成 `resources`（全文在 body，摘要进 prompt），
+    Watchdog 用 `runs.progress_at/last_tool` 判断“活着但有进展”。
+    """
+    for table, columns in (
+        ("resources", (("window_id", "TEXT DEFAULT ''"),
+                       ("body", "TEXT DEFAULT ''"))),
+        ("runs", (("last_tool", "TEXT DEFAULT ''"),
+                  ("last_tool_ok", "INTEGER DEFAULT 1"),
+                  ("progress_at", "TEXT DEFAULT ''"))),
+    ):
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, decl in columns:
+            if name not in existing:
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                except sqlite3.OperationalError:
+                    pass
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_resources_window "
+                     "ON resources(window_id, created_at)")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -798,6 +826,7 @@ _MIGRATIONS: dict[int, Any] = {
     22: _migrate_v22,
     23: _migrate_v23,
     24: _migrate_v24,
+    25: _migrate_v25,
 }
 
 

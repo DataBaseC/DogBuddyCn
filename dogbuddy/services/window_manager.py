@@ -172,7 +172,8 @@ class WindowManager:
         self.scope_resolver = ScopeResolver(db)
         self.max_iterations = max_iterations
         self.builder = ContextBuilder(memory_service=memory,
-                                      skills_root=self.skills_root)
+                                      skills_root=self.skills_root,
+                                      resources=self.queue_store)
         self.threshold = threshold
         self.max_context_tokens = max_context_tokens
         #: v0.10.32：人工派单的"最后一次任务"，限速暂停后据此自动续跑
@@ -238,7 +239,9 @@ class WindowManager:
                                          # v0.10.33：组长派活给组员要走 WindowManager
                                          coordinator=self,
                                          # v0.18.0：员工临时 skill（只写本工位域）
-                                         skills_root=self.skills_root)
+                                         skills_root=self.skills_root,
+                                         # v0.20.0：压缩归档资源读取
+                                         resources=self.queue_store)
         # T9.3：主管工位额外装上"项目级管理工具"（system 级永远不给）。
         # 装配只是"少给"，真正的越权拦截在 PermissionGate.check_scope（fail-closed）。
         #
@@ -475,6 +478,17 @@ class WindowManager:
             return cost.budget_state(window_id=window_id, run_id=run_id)
         return check
 
+    def _progress_hook(self, run_id: str):
+        """v0.20.0：工具级进展钩子，给 Watchdog 用；没有 run 台账就返回 None。"""
+        runs = getattr(self, "runs", None)
+        if not run_id or runs is None:
+            return None
+
+        def hook(*, iteration: int | None = None, last_tool: str = "",
+                 ok: bool = True) -> None:
+            runs.progress(run_id, iteration=iteration, last_tool=last_tool, ok=ok)
+        return hook
+
     def _usage_hook(self, w: Window, run_id: str, model: str | None):
         """v0.11.0：成本账本钩子 —— 员工每轮 LLM 调用记一笔。
 
@@ -519,7 +533,9 @@ class WindowManager:
                          threshold=p.get("compact_threshold", self.threshold),
                          max_context_tokens=p.get("max_context_tokens", self.max_context_tokens),
                          # v0.11.0：压缩摘要也是钱，进同一本账
-                         cost=getattr(self, "cost", None))
+                         cost=getattr(self, "cost", None),
+                         # v0.20.0：压缩前归档资源卡片
+                         resources=self.queue_store)
 
     # ---------------------------------------------------------- crud facade
     #: 工位级参数的范围（与参数面板一致）。越界**直接报错**——否则一个 "compact_threshold: 5"
@@ -1045,6 +1061,8 @@ class WindowManager:
                    "approval_router": self.approval_router,
                    # v0.11.0：成本账本（每轮 LLM 调用记一笔，幂等键 = run + 轮次）
                    "on_usage": self._usage_hook(w, run_id, model),
+                   # v0.20.0：工具级进展（Watchdog 用，不写 token 增量）
+                   "progress": self._progress_hook(run_id),
                 # v0.11.1：预算闸门（工位作用域 = 窗口 + 本次 run）
                 "budget_check": self._budget_check(w.id, run_id),
                    # v0.12.0：分级路由（任务类型 = 角色名，避免不同活儿混统计）

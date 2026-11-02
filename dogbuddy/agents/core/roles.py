@@ -188,6 +188,8 @@ WORKER_PROGRAMMER_TOOLS = [
     "member_dispatch",
     # v0.18.0：员工临时 skill（只影响本工位；下一轮注入 system prompt）
     "skill_create", "skill_list", "skill_delete",
+    # v0.20.0：压缩归档的旧证据按需读取（只读、限本工位）
+    "read_resource",
 ]
 
 
@@ -345,7 +347,7 @@ TESTER_TOOLS = [
     "read_file", "glob", "grep", "shell", "page_check", "web_fetch",
     "run_status", "todo_view", "todo_add", "todo_done",
     "window_memory_read", "window_memory_write", "project_memory_read",
-    "ask_user", "notify_owner",
+    "ask_user", "notify_owner", "read_resource",
 ]
 #: 前端：programmer 全集 + page_check
 FRONTEND_TOOLS = sorted(set(WORKER_PROGRAMMER_TOOLS) | {"page_check"})
@@ -356,7 +358,7 @@ REVIEWER_TOOLS = [
     "read_file", "glob", "grep", "shell", "web_fetch",
     "run_status", "todo_view", "todo_add", "todo_done",
     "window_memory_read", "window_memory_write", "project_memory_read",
-    "ask_user", "notify_owner",
+    "ask_user", "notify_owner", "read_resource",
 ]
 #: 纯聊天：没有任何文件/命令/网络工具（连读文件都不给）
 WORKER_CHAT_TOOLS = [
@@ -368,7 +370,7 @@ ARCHITECT_TOOLS = [
     "read_file", "glob", "grep", "web_search", "web_fetch", "explore_subagent",
     "run_status", "todo_view", "todo_add", "todo_done",
     "window_memory_read", "window_memory_write", "project_memory_read",
-    "ask_user",
+    "ask_user", "read_resource",
 ]
 
 

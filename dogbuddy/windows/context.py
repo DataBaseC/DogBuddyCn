@@ -41,9 +41,12 @@ def message_to_llm(m: Message) -> dict[str, Any]:
 
 
 class ContextBuilder:
-    def __init__(self, memory_service: Any = None, skills_root: str = ""):
+    def __init__(self, memory_service: Any = None, skills_root: str = "",
+                 resources: Any = None):
         self.memory = memory_service
         self.skills_root = str(skills_root or "")
+        #: v0.20.0：压缩归档的资源卡片；全文用 read_resource 按需读
+        self.resources = resources
 
     def system_block(self, session: Any) -> str:
         w = session.window
@@ -66,6 +69,21 @@ class ContextBuilder:
         facts = self.compaction_block(session)
         if facts:
             parts.append(facts)
+        if self.resources is not None:
+            try:
+                cards = self.resources.list_resources(w.id, limit=8)
+            except Exception:  # noqa: BLE001 — 卡片坏了不能拖垮会话
+                cards = []
+            if cards:
+                lines = ["## Resource cards (older evidence archived on compaction)",
+                         "Full text is NOT inlined. Use `read_resource(resource_id, offset)` "
+                         "when you need the original details."]
+                for c in cards:
+                    lines.append(
+                        f"- `{c.get('id')}` [{c.get('kind')}] {c.get('title')} — "
+                        f"{(c.get('summary') or '')[:240]} "
+                        f"({c.get('token_estimate') or 0} tok)")
+                parts.append("\n".join(lines))
         parts.append(f"## Workstation\nwindow_id={w.id} name={w.name} role={w.role} "
                      f"workspace={getattr(session, 'effective_workspace', '') or w.workspace_path} "
                      f"mode={w.mode}")

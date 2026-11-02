@@ -103,6 +103,8 @@ class WebServices:
         self.kernel = kw.get("kernel")
         #: v0.19.0：入口 shadow 记录（Web 边界；即使 LLM 未配置也记录 trigger）
         self.intake = kw.get("intake")
+        #: v0.20.0：只读进展 Watchdog
+        self.watchdog = kw.get("watchdog")
         self.models = kw.get("models")
         self.iterations = kw.get("iterations")
         self.iteration_exec = kw.get("iteration_exec")
@@ -158,6 +160,8 @@ def create_app(svc: WebServices) -> FastAPI:
             "routing": (svc.routing.health() if getattr(svc, "routing", None) else None),
             # v0.19.0：任务内核（shadow trigger / 持久队列 / outbox 积压）
             "kernel": (svc.kernel.health() if getattr(svc, "kernel", None) else None),
+            # v0.20.0：进展监控（活着但没进展的任务数）
+            "watchdog": (svc.watchdog.health() if getattr(svc, "watchdog", None) else None),
             # v0.12.1：流水线（"有没有卡住/失败"要一眼看到）
             "pipelines": (svc.pipelines.health()
                           if getattr(svc, "pipelines", None) else None),

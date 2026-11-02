@@ -70,6 +70,10 @@ class Run:
     lease_until: str = ""
     heartbeat_at: str = ""
     dedupe_key: str = ""
+    #: v0.20.0：工具级进展（Watchdog 判断“活着但有进展”）
+    last_tool: str = ""
+    last_tool_ok: int = 1
+    progress_at: str = ""
     #: 只活在内存里：让"取消"能真的打断正在跑的那件事
     task: Any = field(default=None, repr=False, compare=False)
     #: 展示用（不入库）：工位名 / 群组名
@@ -94,6 +98,8 @@ class Run:
             "work_item_id": self.work_item_id, "attempt": self.attempt,
             "owner_pid": self.owner_pid, "lease_until": self.lease_until,
             "heartbeat_at": self.heartbeat_at, "dedupe_key": self.dedupe_key,
+            "last_tool": self.last_tool, "last_tool_ok": self.last_tool_ok,
+            "progress_at": self.progress_at,
             "error_code": self.error_code, "summary": self.summary,
             # v0.10.41：DTO 里**截断**任务原文（DB 存全文供 run_retry 用）。
             # 不截断的话 /api/runs（50 条）与每个 SSE run.* 事件都会带上整段
@@ -109,7 +115,8 @@ _DB_COLUMNS = ("id", "kind", "parent_run_id", "window_id", "group_id", "project_
                "cancel_requested", "started_at", "updated_at", "finished_at",
                "error_code", "summary", "prompt",
                "work_item_id", "attempt", "owner_pid", "lease_until",
-               "heartbeat_at", "dedupe_key")
+               "heartbeat_at", "dedupe_key", "last_tool", "last_tool_ok",
+               "progress_at")
 
 
 class RunRegistry:
@@ -139,7 +146,7 @@ class RunRegistry:
                   window_name=window_name,
                   group_name=group_name, status=status, prompt=prompt or "",
                   work_item_id=work_item_id, attempt=attempt, dedupe_key=dedupe_key,
-                  owner_pid=os.getpid(), heartbeat_at=now,
+                  owner_pid=os.getpid(), heartbeat_at=now, progress_at=now,
                   lease_until=(datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat(),
                   started_at=now, updated_at=now)
         self._active[run.id] = run
@@ -160,6 +167,10 @@ class RunRegistry:
             if hasattr(run, k) and k not in ("id", "task"):
                 setattr(run, k, v)
         run.updated_at = _now_iso()
+        # v0.20.0：群组按 phase/step 推进也算“有进展”，否则 Watchdog 会误报。
+        if any(k in fields for k in ("phase", "step_no", "iterations", "last_tool")):
+            run.progress_at = run.updated_at
+            run.heartbeat_at = run.updated_at
         self._persist(run)
         self._emit("run.updated", run)
         return run
@@ -182,6 +193,54 @@ class RunRegistry:
                 self.db._conn.commit()
         except Exception:  # noqa: BLE001
             logger.debug("run heartbeat persist failed", exc_info=True)
+
+    def progress(self, run_id: str, *, iteration: int | None = None,
+                 last_tool: str = "", ok: bool = True) -> None:
+        """每个工具调用后写一条轻量进展（不写 token 增量，避免高频写库）。"""
+        now = _now_iso()
+        run = self._active.get(run_id)
+        if run is not None:
+            if iteration is not None:
+                run.iterations = int(iteration)
+            if last_tool:
+                run.last_tool = str(last_tool)[:80]
+                run.last_tool_ok = 1 if ok else 0
+            run.progress_at = now
+            run.heartbeat_at = now
+        try:
+            if self.db is not None:
+                self.db._conn.execute(
+                    "UPDATE runs SET progress_at=?, heartbeat_at=?, updated_at=?, "
+                    "last_tool=?, last_tool_ok=?, iterations=COALESCE(?,iterations) "
+                    "WHERE id=?",
+                    (now, now, now, str(last_tool or "")[:80], 1 if ok else 0,
+                     iteration, run_id))
+                self.db._conn.commit()
+        except Exception:  # noqa: BLE001
+            logger.debug("run progress persist failed", exc_info=True)
+
+    def stalled(self, older_than_s: float = 300.0) -> list[dict[str, Any]]:
+        """返回长时间没有进展的活跃运行；只读，不自动杀任务。"""
+        if self.db is None:
+            return []
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(seconds=max(30.0, float(older_than_s)))).isoformat()
+        try:
+            rows = self.db._conn.execute(
+                "SELECT * FROM runs WHERE status IN ('running','paused') AND "
+                "COALESCE(NULLIF(progress_at,''), NULLIF(heartbeat_at,''), "
+                "updated_at, started_at, '') < ? ORDER BY started_at",
+                (cutoff,)).fetchall()
+        except Exception:  # noqa: BLE001
+            logger.debug("stalled scan failed", exc_info=True)
+            return []
+        out = []
+        for row in rows:
+            d = {k: row[k] for k in row.keys() if k in _DB_COLUMNS}
+            d["live"] = True
+            out.append(d)
+        return out
 
     def finish(self, run_id: str, status: str, summary: str = "",
                error_code: str = "") -> Run | None:

@@ -55,10 +55,13 @@ class Compactor:
                  threshold: float = 0.8, max_context_tokens: int = 128000,
                  max_messages: int = 96, summarize_timeout: float = 90.0,
                  retry_timeout: float = 45.0, min_interval_s: float = 1800.0,
-                 cost: Any = None):
+                 cost: Any = None, resources: Any = None):
         self.llm = llm
         self.repo = compaction_repo
         self.memory = memory_service
+        #: v0.20.0：Resource 归档（KernelStore）。压缩前先把全文存卡片，
+        #: prompt 只内联摘要，`read_resource` 可按需翻旧证据。
+        self.resources = resources
         #: v0.11.0：压缩摘要也是钱（4 天 94 次调用），进同一本成本账。
         self.cost = cost
         self.threshold = threshold
@@ -150,6 +153,10 @@ class Compactor:
         compaction = self.repo.add_compaction(
             session.window.id, summary, replaced_count=len(doomed))
 
+        # v0.20.0：先归档证据，再删消息。以前 drop 后只剩摘要，第 4 次压缩
+        # 以后早期决策/报错原文不可追溯。
+        self._archive(session, doomed)
+
         # drop compacted messages; keep the tail verbatim
         session.drop_messages(doomed[-1].id)
 
@@ -168,6 +175,37 @@ class Compactor:
             except Exception:  # noqa: BLE001 — memory precipitation must not break compaction
                 logger.warning("memory precipitation failed", exc_info=True)
         return compaction
+
+    def _archive(self, session: Any, messages: list[Any]) -> None:
+        """把被压缩的消息落成 Resource 卡片（全文在 body，prompt 只放摘要）。"""
+        if self.resources is None or not messages:
+            return
+        wid = str(getattr(getattr(session, "window", None), "id", "") or "")
+        work_item = str(getattr(session, "work_item_id", "") or "")
+        archived = 0
+        for m in messages[:40]:
+            body = str(getattr(m, "content", "") or "").strip()
+            if not body:
+                continue
+            role = str(getattr(m, "role", "") or "message")
+            first = body.splitlines()[0][:100] if body.splitlines() else body[:100]
+            try:
+                self.resources.create_resource(
+                    window_id=wid, kind=f"message:{role}",
+                    title=f"[{role}] {first}",
+                    summary=body[:500],
+                    body=body[:50_000],
+                    work_item_id=work_item,
+                    storage_ref=f"message:{getattr(m, 'id', '')}")
+                archived += 1
+            except Exception:  # noqa: BLE001 — 归档失败不能阻断压缩
+                logger.warning("resource archive failed", exc_info=True)
+        if archived:
+            try:
+                self.repo.audit("system", "compaction:resources",
+                                f"{wid} archived={archived} dropped={len(messages)}")
+            except Exception:  # noqa: BLE001
+                logger.debug("resource archive audit failed", exc_info=True)
 
     async def _summarize(self, conversation: str, window_id: str = "") -> dict[str, Any]:
         """抽摘要：先 30k 字符，失败再用 12k 重试一次，两次都失败才降级。

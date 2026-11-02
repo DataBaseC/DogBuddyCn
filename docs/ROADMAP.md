@@ -2434,3 +2434,33 @@ owner：短期只用 Web，非 root 单独开关；按《问题报告与修改�
 SSE ticket、shell env、Outbox 去重/ack、task_queue 恢复、trigger 去重、shadow
 WorkItem/Mandate/Subscription、群组锁）。
 
+---
+
+## 65. 阶段 4：资源卡片 + 进展 Watchdog（2026-11-02，`0.20.0`）
+
+owner：开始下一轮。短期仍只做 Web，非 root 保持单独开关。
+
+### Resource 卡片（压缩不丢证据）
+
+- schema 25：`resources` 增 `window_id/body`，`runs` 增 `last_tool/last_tool_ok/progress_at`。
+- 压缩前 `Compactor._archive()` 把被丢弃的消息逐条写成卡片：
+  `kind=message:role`、title=首行、summary=前 500 字、body=原文（单条上限 50k，单次最多 40 条）。
+- `ContextBuilder` 只内联最近 8 张卡片的摘要，不把全文塞回 prompt；
+  提示模型用 `read_resource(resource_id, offset)` 按需翻旧证据。
+- 新工具 `read_resource`（只读、限本工位）：分页返回，带 `next_offset`。
+- 程序员/前端/后端/主管/测试/审查/架构可用；聊天角色仍保持无文件工具边界。
+
+### 进展 Watchdog（只看，不杀）
+
+- `AgentLoop` 每次迭代前和每次工具调用后调 `ctx.extra["progress"]`；
+  `WindowManager` 把它接到 `RunRegistry.progress()`，写
+  `progress_at/last_tool/last_tool_ok/iterations`。
+- `RunRegistry.stalled(300s)` 只读扫描 `running/paused` 的陈旧进展；
+  `Watchdog` 每 60 秒跑一次，首次发现写审计 `watchdog:stalled` 并发
+  `run.stalled` 事件；**不自动杀、不重试、不扩权**。
+- `/healthz.watchdog` 暴露 `stalled/alerted`；群组按 `phase/step_no` 更新也算进展，
+  避免长步骤被误报。
+
+基线：**1008 passed / 4 skipped**（新增 5 条：资源窗口隔离/分页、压缩前归档、
+上下文只注入摘要、run 进展与 stalled、Watchdog 只告警一次）。
+

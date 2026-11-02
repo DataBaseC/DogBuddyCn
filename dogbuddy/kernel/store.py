@@ -263,10 +263,71 @@ class KernelStore:
                 "SELECT COUNT(*) FROM task_queue WHERE status='queued'").fetchone()
         return int(row[0] if row else 0)
 
+    # ------------------------------------------------------------ resources
+    def create_resource(self, *, window_id: str, kind: str, title: str,
+                        summary: str, body: str = "", work_item_id: str = "",
+                        parent_id: str = "", storage_ref: str = "") -> dict[str, Any]:
+        """Archive evidence BEFORE compaction drops the original messages.
+
+        Full body stays in SQLite (bounded by caller); prompt only gets the
+        summary card. `read_resource` pages the body back on demand.
+        """
+        rid = f"rs-{new_id()[:10]}"
+        body = str(body or "")
+        now = _now_iso()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO resources(id,work_item_id,window_id,kind,title,"
+                "summary,body,storage_ref,size_bytes,token_estimate,parent_id,"
+                "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (rid, work_item_id, window_id, kind[:40], title[:200],
+                 summary[:1000], body, storage_ref,
+                 len(body.encode("utf-8")), max(1, len(body) // 3),
+                 parent_id, now))
+            self._conn.commit()
+        return {"id": rid, "work_item_id": work_item_id, "window_id": window_id,
+                "kind": kind, "title": title[:200], "summary": summary[:1000],
+                "size_bytes": len(body.encode("utf-8")),
+                "token_estimate": max(1, len(body) // 3), "created_at": now}
+
+    def list_resources(self, window_id: str = "", limit: int = 8,
+                       work_item_id: str = "") -> list[dict[str, Any]]:
+        q = "SELECT id,work_item_id,window_id,kind,title,summary,storage_ref," \
+            "size_bytes,token_estimate,parent_id,created_at FROM resources WHERE 1=1"
+        args: list[Any] = []
+        if window_id:
+            q += " AND (window_id=? OR window_id='')"
+            args.append(window_id)
+        if work_item_id:
+            q += " AND work_item_id=?"
+            args.append(work_item_id)
+        q += " ORDER BY created_at DESC LIMIT ?"
+        args.append(max(1, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(q, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_resource(self, resource_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM resources WHERE id=?", (resource_id,)).fetchone()
+        return dict(row) if row else None
+
+    def count_resources(self, window_id: str = "") -> int:
+        q = "SELECT COUNT(*) FROM resources"
+        args: tuple = ()
+        if window_id:
+            q += " WHERE window_id=? OR window_id=''"
+            args = (window_id,)
+        with self._lock:
+            row = self._conn.execute(q, args).fetchone()
+        return int(row[0] if row else 0)
+
     # --------------------------------------------------------------- health
     def health(self) -> dict[str, Any]:
         return {"triggers": self.count_triggers(),
                 "triggers_candidate": self.count_triggers("candidate"),
                 "work_items": len(self.list_work_items(limit=1000)),
                 "queued_tasks": self.count_queued(),
-                "outbox_pending": self.count_pending_outbox()}
+                "outbox_pending": self.count_pending_outbox(),
+                "resources": self.count_resources()}
