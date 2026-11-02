@@ -158,7 +158,16 @@ class SupervisionService:
             logger.warning("no WindowManager; dropping %s for %s", why, window_id)
             return
         try:
-            self.windows.dispatch(window_id, text, urgent=True)
+            # v0.21.0：有统一入口就走它（会建 Run/持久队列）；旧测试桩仍回退 dispatch。
+            if hasattr(self.windows, "dispatch_run"):
+                try:
+                    self.windows.dispatch_run(window_id=window_id, prompt=text,
+                                              origin="supervision", urgent=True,
+                                              sender="supervisor")
+                except TypeError:      # 测试桩只实现了旧 dispatch 签名
+                    self.windows.dispatch(window_id, text, urgent=True)
+            else:
+                self.windows.dispatch(window_id, text, urgent=True)
             logger.info("supervision dispatch → %s (%s)", window_id, why)
         except Exception:  # noqa: BLE001 — 投递失败不能炸总线
             logger.exception("supervision dispatch failed for %s", window_id)

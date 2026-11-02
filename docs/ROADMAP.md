@@ -2464,3 +2464,23 @@ owner：开始下一轮。短期仍只做 Web，非 root 保持单独开关。
 基线：**1008 passed / 4 skipped**（新增 5 条：资源窗口隔离/分页、压缩前归档、
 上下文只注入摘要、run 进展与 stalled、Watchdog 只告警一次）。
 
+---
+
+## 66. 统一执行入口 dispatch_run（2026-11-02，`0.21.0`）
+
+owner：继续。目标是把“人工/Cron/组长派活/主管指令”收到一个入口，先统一**执行语义**，
+不激进收窄 Router。
+
+- `kernel/domain.py`：`RunRequest`、`RunHandle`（status/cancel/wait）。
+- `WindowManager.dispatch_run()`：校验工位 → 建 Run(queued) → 持久入队 → 返回 Handle；
+  入队失败把 Run 收成 failed，杜绝“显示运行但没有执行者”。
+- `dispatch_manual()`：改走 `dispatch_run()`；`POST /api/windows/{id}/dispatch`
+  现在返回 `run_id/work_item_id`，队列满回 503（不再假装已排队）。
+- `dispatch_and_wait()`（Cron/组长）与 `dispatch_pending()`（member 不等待）改走
+  同一入口；删除重复的 `_child_run()`。
+- `SupervisionService._dispatch()` 有统一入口就走，旧测试桩回退 `dispatch`。
+- 仍未收口：`GroupManager` 的成员步骤仍是直接 `AgentLoop`（已持有 session_lock），
+  Router 仍走旧管理员路径——下一轮再做 DAG/dispatch 化。
+
+基线：**1010 passed / 4 skipped**（新增 2 条：dispatch_run 建 run+持久任务、未知工位拒绝）。
+

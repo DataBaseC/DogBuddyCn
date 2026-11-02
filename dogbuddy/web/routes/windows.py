@@ -184,10 +184,14 @@ def router(svc, auth_deps) -> APIRouter:
     @r.post("/windows/{window_id}/dispatch", dependencies=auth_deps)
     def dispatch(window_id: str, body: DispatchIn) -> dict:
         try:
-            svc.windows.dispatch_manual(window_id, body.prompt)
+            handle = svc.windows.dispatch_manual(window_id, body.prompt)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
-        return {"queued": True}
+        if handle is None:
+            raise HTTPException(status_code=503, detail="工位队列已满或台账不可用，任务未入队")
+        return {"queued": True,
+                "run_id": getattr(handle, "run_id", ""),
+                "work_item_id": getattr(handle, "work_item_id", "")}
 
     @r.get("/windows/{window_id}/messages", dependencies=auth_deps)
     def messages(window_id: str, limit: int = 100) -> dict:
