@@ -604,6 +604,9 @@ class GroupManager:
                        # 它自己的临时 list，群组运行永远等不到（装配漏洞的老毛病）
                        "delegated": delegated,
                        "pending_runs": pending_runs})
+            # v0.19.0：群组步骤也拿工位的 session_lock，不能再绕过队列/压缩互斥
+            # 直接跑 AgentLoop（report P1-07）。同步等待但执行权仍串行。
+            await rt.session_lock.acquire()
             try:
                 # v0.10.22：单成员**挂钟预算**。限速退避是"无限耐心"的（heavy 档会
                 # 追加重试预算，实测单次退避就 600s），一次群组运行因此可能挂几分钟
@@ -669,6 +672,11 @@ class GroupManager:
                               "prompt_chars": len(step_prompt),
                               "summary": f"[step failed] {e}"})
             finally:
+                # 先释放执行权，再翻状态（否则下一步/队列任务会被白等）
+                try:
+                    rt.session_lock.release()
+                except Exception:  # noqa: BLE001
+                    logger.debug("group session lock release failed", exc_info=True)
                 # 这一步结束：把状态翻回 idle（哪怕超时/异常也不能一直挂着"运行中"）
                 try:
                     self.windows._set_status(wid, "idle")

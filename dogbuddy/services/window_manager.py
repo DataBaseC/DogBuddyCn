@@ -134,6 +134,7 @@ class WindowManager:
         routing: Any = None,
         approval_config: Callable[..., Any] | None = None,
         mcp_bridge: Any = None,
+        queue_store: Any = None,
     ):
         self.db = db
         self.llm_factory = llm_factory
@@ -155,6 +156,8 @@ class WindowManager:
         self.approval_config = approval_config
         # T5.1: bridged MCP tools are registered into every window registry
         self.mcp_bridge = mcp_bridge
+        #: v0.19.0：持久 task_queue（None = 纯内存，测试/旧部署）
+        self.queue_store = queue_store
         self.checkpoints_dir = str(checkpoints_dir)
         # T8.1：自助排期工具需要 JobStore + "立即执行"入口。
         # 由 main 在 JobManager 建好后 setattr 注入（窗口在 start() 才 boot，时序安全）。
@@ -222,7 +225,14 @@ class WindowManager:
         # 否则"员工调用工具"只有刷新才看得见（owner 实测）。
         session = WindowSession(w, self.db, self.db, self.db,
                                 on_message=lambda m: self._emit_message(w.id, m))
-        queue = TaskQueue(w.id, on_status=lambda s: self._set_status(w.id, s))
+        queue = TaskQueue(w.id, on_status=lambda s: self._set_status(w.id, s),
+                          store=self.queue_store)
+        if self.queue_store is not None:
+            try:
+                # 启动恢复：只恢复 queued；running 由 run lease 逻辑处理。
+                queue.restore(self.queue_store.queued_tasks(w.id))
+            except Exception:  # noqa: BLE001 — 恢复失败不能阻止工位启动
+                logger.warning("queue restore failed for %s", w.id, exc_info=True)
         registry = build_worker_registry(w.role, gate=self.gate, audit=self.db,
                                          jobs=self.job_store, run_job_now=self._run_job_now,
                                          # v0.10.33：组长派活给组员要走 WindowManager

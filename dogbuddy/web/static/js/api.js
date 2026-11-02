@@ -540,27 +540,34 @@
 
       function connect() {
         if (closed) return;
-        var url = '/api/events' + qs({ token: getToken() });
-        try {
-          es = new EventSource(url);
-        } catch (e) {
-          schedule();
-          return;
-        }
-        es.onopen = function () { attempt = 0; };
-        es.onmessage = function (ev) {
-          if (closed || !ev || typeof ev.data !== 'string') return;
-          var frame = null;
-          try { frame = JSON.parse(ev.data); } catch (e) { return; } /* 坏帧忽略 */
-          if (!frame || typeof frame !== 'object') return;
-          try { onEvent(frame); } catch (e) { /* 回调异常不断连 */ }
-        };
-        es.onerror = function () {
+        /* v0.19.0：EventSource 不能带 X-Auth-Token，先把长期 token 换成
+           60 秒一次性 ticket；URL/日志里不会出现长期凭据。 */
+        request('POST', '/api/events/ticket').then(function (t) {
           if (closed) return;
-          try { es.close(); } catch (e) { /* 忽略 */ }
-          es = null;
+          var url = '/api/events' + qs({ ticket: (t && t.ticket) || '' });
+          try {
+            es = new EventSource(url);
+          } catch (e) {
+            schedule();
+            return;
+          }
+          es.onopen = function () { attempt = 0; };
+          es.onmessage = function (ev) {
+            if (closed || !ev || typeof ev.data !== 'string') return;
+            var frame = null;
+            try { frame = JSON.parse(ev.data); } catch (e) { return; } /* 坏帧忽略 */
+            if (!frame || typeof frame !== 'object') return;
+            try { onEvent(frame); } catch (e) { /* 回调异常不断连 */ }
+          };
+          es.onerror = function () {
+            if (closed) return;
+            try { es.close(); } catch (e) { /* 忽略 */ }
+            es = null;
+            schedule();
+          };
+        }).catch(function () {
           schedule();
-        };
+        });
       }
 
       connect();

@@ -23,6 +23,8 @@ from .cron.jobs import JobStore
 from .cron.scheduler import CronScheduler
 from .db import Database
 from .events.bus import CONFIRM_REQUEST, WORKER_QUESTION, Event, EventBus
+from .kernel import KernelStore
+from .kernel.intake import ShadowIntake
 from .external.mcp_bridge import McpBridge
 from .gateway.adapters.onebot_v11 import OneBotV11Adapter
 from .gateway.router import Router
@@ -103,7 +105,15 @@ class DogBuddyApp:
         # v0.12.0：模型分级路由（便宜的先跑、翻车再升；同端点 + 样本门槛）
         self.routing = RoutingService(self.db, self.cost)
         self.memory = MemoryService(config.memory_dir)
-        self.bus = EventBus()
+        # v0.19.0：任务内核（shadow）。Outbox 先落库，EventBus 才入内存。
+        self.kernel_store = (KernelStore(self.db)
+                             if getattr(config, "kernel", None) is None
+                             or config.kernel.enabled else None)
+        self.bus = EventBus(outbox=self.kernel_store)
+        self.intake = ShadowIntake(
+            self.kernel_store,
+            enabled=bool(self.kernel_store is not None
+                         and getattr(config.kernel, "shadow", True)))
         self.panel = self._build_panel()
         # T8.7：退避记忆落盘位置（每 profile "上次退避多久才成功"）
         from .llm.retry import RetryMemory
@@ -138,7 +148,8 @@ class DogBuddyApp:
                 whitelist=config.gateway.whitelist or self._whitelist_ids(),
                 # v0.10.50：群里只认 @；连发 2 秒合并
                 mention_only=getattr(config.gateway, "mention_only", True),
-                merge_seconds=getattr(config.gateway, "merge_seconds", 2.0))
+                merge_seconds=getattr(config.gateway, "merge_seconds", 2.0),
+                allow_all=getattr(config.gateway, "allow_all", False))
 
         self.windows = WindowManager(
             db=self.db, llm_factory=self.llm_factory, bus=self.bus, panel=self.panel,
@@ -154,7 +165,8 @@ class DogBuddyApp:
             # v0.12.0：分级路由（工位按角色区分任务类型）
             routing=self.routing,
             approval_config=lambda k, d=None: self.config_svc.get(k, d),
-            mcp_bridge=self.mcp)
+            mcp_bridge=self.mcp,
+            queue_store=self.kernel_store)
         self.sessions = SessionManager(self.windows, self.db)
         self.groups = GroupManager(self.db, self.windows, bus=self.bus)
 
@@ -237,6 +249,7 @@ class DogBuddyApp:
             cost=self.cost,
             # v0.12.0：分级路由（管理员对话单独一个任务类型）
             routing=self.routing,
+            intake=self.intake,
             self_status=self.update_status, self_update=self.start_self_update)
         # v0.10.40（owner）：异常/崩溃/重启导致循环停下后，**管理员必须能唤醒**
         # 未完成的任务。启动清理把僵尸行标成 interrupted，这里主动告诉 owner
@@ -314,6 +327,8 @@ class DogBuddyApp:
             ops=self.ops,
             # v0.15.0：运营站点（/news 静态站与 /api/news/status）
             news=self.news, site_dir=str(self.news.site_dir),
+            # v0.19.0：任务内核状态（/healthz.kernel）
+            kernel=self.kernel_store,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)
@@ -739,6 +754,8 @@ class DogBuddyApp:
         self._started = False
         self.scheduler.stop()
         await self._shutdown_step(self.windows.stop(), "windows.stop")
+        # v0.19.0：先让 EventBus drain 终态/汇报事件，再取消后台任务。
+        await self._shutdown_step(self.bus.stop(), "bus.stop")
         await self._shutdown_step(self.mcp.close(), "mcp.close")
         for t in self._tasks:
             t.cancel()
@@ -757,8 +774,18 @@ def build_uvicorn_config(app: DogBuddyApp, config: AppConfig) -> uvicorn.Config:
                           log_level="info", timeout_graceful_shutdown=10)
 
 
+def validate_web_bind(web: Any) -> None:
+    """fail-closed：非本机监听且 Web 无任何鉴权 → 拒绝启动。"""
+    if (not (getattr(web, "auth_token", "") or getattr(web, "password", ""))
+            and str(getattr(web, "host", "")) not in ("127.0.0.1", "::1", "localhost")):
+        raise RuntimeError(
+            "Web 拒绝启动：host=%s 但 auth_token/password 都为空。"
+            "请配置鉴权，或改为 127.0.0.1。" % getattr(web, "host", ""))
+
+
 def run(config_path: str | None = None) -> None:
     config = load_config(config_path)
+    validate_web_bind(config.web)
     app = DogBuddyApp(config)
     # startup/shutdown run through FastAPI's lifespan (create_app hooks)
     server = uvicorn.Server(build_uvicorn_config(app, config))

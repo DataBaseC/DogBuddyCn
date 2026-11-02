@@ -62,8 +62,11 @@ class AdminService:
         max_iterations: int = 20,
         self_status: Callable[[bool], dict] | None = None,
         self_update: Callable[..., dict] | None = None,
+        #: v0.19.0：Shadow intake（只记录，不接管执行）
+        intake: Any = None,
     ):
         self.db = db
+        self.intake = intake
         self.llm_factory = llm_factory
         self.windows = windows
         self.jobs = jobs
@@ -356,6 +359,12 @@ class AdminService:
             return await self._run_turn(text, sender)
 
     async def _run_turn(self, text: str, sender: str) -> str:
+        # v0.19.0：Shadow intake —— 只写 Trigger/Thread，失败绝不影响旧路径。
+        if self.intake is not None and sender != "system":
+            try:
+                self.intake.accept_web(conversation=sender, text=text, sender=sender)
+            except Exception:  # noqa: BLE001
+                logger.warning("shadow intake failed", exc_info=True)
         role_spec = get_role("admin")
         session = self.session_for(sender)
         # v9：对话首条消息自动成为标题；同时刷新"最近活动时间"
@@ -713,6 +722,22 @@ class _AdminGate:
 
     def check(self, tool_name: str, permission: str, args: dict[str, Any],
               ctx: ToolContext, required_scope: str = ""):
+        from ..agents.core.permissions import is_irreversible_command
         from ..tools.registry import GateDecision
+        confirmed = bool((getattr(ctx, "extra", {}) or {}).get("confirmed"))
+        # 管理员仍有 system scope，但宿主机命令和不可逆命令**不是**全放行：
+        # 这是 report P0-02 的第二道门。server_exec 一律逐次确认。
+        if tool_name == "server_exec" and not confirmed:
+            cmd = str(args.get("command", ""))[:150]
+            return GateDecision(
+                False, f"宿主机命令必须人工确认（server_exec）：{cmd}",
+                needs_confirm=True, irreversible=True)
+        if permission == "shell":
+            cmd = str(args.get("command", "") or args.get("script", "") or "")
+            reason = is_irreversible_command(cmd)
+            if reason and not confirmed:
+                return GateDecision(
+                    False, f"不可逆命令必须人工确认（{reason}）：{cmd[:150]}",
+                    needs_confirm=True, irreversible=True)
         return GateDecision(True)
 

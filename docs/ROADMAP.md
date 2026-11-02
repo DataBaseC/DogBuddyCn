@@ -2387,3 +2387,50 @@ run 标记为 `partial`，不是 `failed`，管理员可以调高后重试。别
 基线：**994 passed / 4 skipped**（新增：管理员创建/更新 `max_iterations`，并验证与
 `compact_threshold` 合并不丢、999 越界被拒）。
 
+---
+
+## 64. 可靠任务内核 PR-1/2/3（2026-11-02，`0.19.0`）
+
+owner：短期只用 Web，非 root 单独开关；按《问题报告与修改指南》把三个 PR 全做完。
+**schema 23 → 24**，只增表/增列。
+
+### PR-1 安全止血（Web-only）
+
+- 网关默认 `127.0.0.1`；空白名单 fail-closed；`allow_all` 必须显式打开；
+  token 用 `hmac.compare_digest`；非本机监听且无 token 直接拒绝启动。
+- Web 非本机监听且 `auth_token/password` 都为空 → 拒绝启动。
+- `_AdminGate` 不再无条件放行：`server_exec` 和不可逆 shell 命令逐次确认；
+  `ToolRegistry` 的 `confirmed` 改为**一次重放后清除**，同一轮第二条危险命令仍需新审批。
+- Shell 子进程 env 白名单（PATH/HOME/LANG/TERM 等），不再继承 `DOGBUDDY_*` 密钥。
+- SSE 不再把长期 token 放 URL：`POST /api/events/ticket` 换 60 秒一次性 ticket，
+  前端先换票再建 EventSource。
+
+### PR-2 持久队列 / Outbox / 恢复
+
+- 新表 `task_queue`、`outbox_events`；`runs` 增 `work_item_id/attempt/owner_pid/
+  lease_until/heartbeat_at/dedupe_key`。
+- `TaskQueue` 有界（默认 1000），`submit()` 返回 bool；入队先落库，启动恢复
+  `queued`；出队标 running，完成/取消删除。
+- EventBus 对 `job.* / worker.question / confirm.request / window.run_finished`
+  等终态事件先写 Outbox 再投递；消费成功 ack，失败退避重试；启动 replay pending；
+  关停先 drain 再取消。
+- `RunRegistry` 启动只把 `running/paused/cancelling` 标 interrupted，`queued`
+  不再一刀切；新增 `heartbeat()` 刷新租约。
+
+### PR-3 Shadow 任务内核
+
+- 新包 `dogbuddy/kernel/`：`store.py`（SQLite Repository）与 `intake.py`。
+- 新表 `threads/triggers/work_items/mandates/subscriptions/resources`。
+- Web 管理员消息进入旧路径前，先 best-effort 记 Trigger → Thread → WorkItem →
+  Mandate → Subscription；**不接管执行、失败不影响回复**。
+- `/healthz.kernel` 暴露 trigger/work item/queue/outbox 积压。
+- 群组步骤补 `rt.session_lock`，不再绕过工位串行保护（report P1-07）。
+
+**未在本次切换**：Router 真正接管路由、群组全面改走 `dispatch_run`、资源卡片/
+`read_resource`、语义 Watchdog、GitHub/CI 主动 Trigger。这些是阶段 3-5 的后续，
+当前 `kernel.shadow=true` 可随时回退到旧路径。
+
+基线：**1003 passed / 4 skipped**（新增：网关/Web fail-closed、管理员危险门、
+SSE ticket、shell env、Outbox 去重/ack、task_queue 恢复、trigger 去重、shadow
+WorkItem/Mandate/Subscription、群组锁）。
+

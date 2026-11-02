@@ -175,6 +175,8 @@ class ToolRegistry:
             return ToolResult.failure(
                 f"tool not found: {name}. 可用工具见能力清单；不要臆造工具名。",
                 tool_failure=True)
+        #: 一次性授权：只对本次重放有效。以前写进 ctx.extra 后整轮都为 True，
+        #: 管理员在同一轮再发一条危险命令会静默放行（report P0-02）。
         if approved:
             ctx.extra["confirmed"] = True  # human-approved replay (T4.1)
         required = getattr(tool, "required_scope", "") or ""
@@ -209,6 +211,9 @@ class ToolRegistry:
             return ToolResult.failure(
                 f"tool crashed: {describe(e)}. {action_hint(e)}",
                 tool_failure=True, error_class=cls.value)
+        finally:
+            if approved:
+                ctx.extra.pop("confirmed", None)
         if self.audit and tool.permission in ("write", "shell"):
             self._audit(ctx, name, "executed" if result.ok else f"failed: {result.output[:200]}", args)
         return result

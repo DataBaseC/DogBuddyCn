@@ -28,13 +28,16 @@ except ImportError:  # pragma: no cover
 
 
 class OneBotV11Adapter(BaseAdapter):
-    def __init__(self, host: str = "0.0.0.0", port: int = 8095, access_token: str = "",
+    def __init__(self, host: str = "127.0.0.1", port: int = 8095, access_token: str = "",
                  whitelist: list[str | int] | None = None,
-                 mention_only: bool = True, merge_seconds: float = 0.0):
+                 mention_only: bool = True, merge_seconds: float = 0.0,
+                 allow_all: bool = False):
         super().__init__()
         self.host = host
         self.port = port
         self.access_token = access_token
+        #: 空白名单默认拒绝；只有显式 allow_all 才放行所有人。
+        self.allow_all = bool(allow_all)
         self.whitelist = {str(q) for q in (whitelist or [])}
         #: v0.10.50：群聊只在 @机器人 时才响应。以前群里任何白名单成员每说一句
         #: 都跑一轮管理员逻辑（一轮几十秒、几十万 token），等于拿群聊当输入法。
@@ -64,6 +67,7 @@ class OneBotV11Adapter(BaseAdapter):
             "mention_only": self.mention_only,
             "merge_seconds": self.merge_seconds,
             "whitelist_size": len(self.whitelist),
+            "allow_all": self.allow_all,
             "clients": len(self._connections),
             **self._stats,
         }
@@ -86,11 +90,19 @@ class OneBotV11Adapter(BaseAdapter):
     async def run(self) -> None:
         if websockets is None:
             raise RuntimeError("websockets package required for the OneBot adapter")
+        # fail-closed：非本机监听且没有 token，直接拒绝启动，而不是裸奔。
+        if not self.access_token and self.host not in ("127.0.0.1", "::1", "localhost"):
+            raise RuntimeError(
+                "OneBot 拒绝启动：host=%s 但 access_token 为空。"
+                "请配置 token，或显式改为 127.0.0.1。" % self.host)
         self._server = await websockets.serve(
             self._handler, self.host, self.port,
             process_request=self._check_token if self.access_token else None)
         self._stats["listening"] = True
-        logger.info("OneBot v11 reverse WS listening on %s:%s", self.host, self.port)
+        logger.warning(
+            "OneBot v11 reverse WS listening on %s:%s (token=%s whitelist=%d allow_all=%s)",
+            self.host, self.port, "yes" if self.access_token else "NO",
+            len(self.whitelist), self.allow_all)
         await asyncio.Future()  # run until cancelled
 
     async def terminate(self) -> None:
@@ -108,7 +120,8 @@ class OneBotV11Adapter(BaseAdapter):
         if not token:
             auth = headers.get("Authorization", "") if hasattr(headers, "get") else ""
             token = auth.replace("Bearer ", "")
-        if token != self.access_token:
+        import hmac
+        if not hmac.compare_digest(str(token), str(self.access_token)):
             return (401, [], b"invalid access token")
         return None
 
@@ -144,8 +157,8 @@ class OneBotV11Adapter(BaseAdapter):
         if not text:
             self._stats["dropped_empty"] += 1
             return
-        # whitelist gate (L1 responsibility) — silent drop otherwise
-        if self.whitelist and user_id not in self.whitelist:
+        # whitelist gate (L1 responsibility) — 空白名单默认拒绝；allow_all 才放开。
+        if not self.allow_all and (not self.whitelist or user_id not in self.whitelist):
             self._stats["dropped_whitelist"] += 1
             logger.info("dropped message from non-whitelisted QQ %s", user_id)
             return

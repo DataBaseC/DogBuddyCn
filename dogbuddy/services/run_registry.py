@@ -63,6 +63,13 @@ class Run:
     #: v0.10.40：**原始任务文本**（落库）。异常/重启导致的停止之后，管理员靠它
     #: "唤醒"未完成的任务——以前 retry 从内存 `_manual_last` 取，重启即丢。
     prompt: str = ""
+    #: v0.19.0：任务内核关联（WorkItem/尝试/租约/心跳）
+    work_item_id: str = ""
+    attempt: int = 1
+    owner_pid: int = 0
+    lease_until: str = ""
+    heartbeat_at: str = ""
+    dedupe_key: str = ""
     #: 只活在内存里：让"取消"能真的打断正在跑的那件事
     task: Any = field(default=None, repr=False, compare=False)
     #: 展示用（不入库）：工位名 / 群组名
@@ -84,6 +91,9 @@ class Run:
             "cancel_requested": bool(self.cancel_requested),
             "started_at": self.started_at, "updated_at": self.updated_at,
             "finished_at": self.finished_at,
+            "work_item_id": self.work_item_id, "attempt": self.attempt,
+            "owner_pid": self.owner_pid, "lease_until": self.lease_until,
+            "heartbeat_at": self.heartbeat_at, "dedupe_key": self.dedupe_key,
             "error_code": self.error_code, "summary": self.summary,
             # v0.10.41：DTO 里**截断**任务原文（DB 存全文供 run_retry 用）。
             # 不截断的话 /api/runs（50 条）与每个 SSE run.* 事件都会带上整段
@@ -97,7 +107,9 @@ _DB_COLUMNS = ("id", "kind", "parent_run_id", "window_id", "group_id", "project_
                "job_id", "status", "phase", "step_no", "steps_total", "prompt_chars",
                "recap_chars", "iterations", "pause_count", "paused_seconds",
                "cancel_requested", "started_at", "updated_at", "finished_at",
-               "error_code", "summary", "prompt")
+               "error_code", "summary", "prompt",
+               "work_item_id", "attempt", "owner_pid", "lease_until",
+               "heartbeat_at", "dedupe_key")
 
 
 class RunRegistry:
@@ -114,7 +126,11 @@ class RunRegistry:
               project_id: str = "", job_id: str = "", parent_run_id: str = "",
               phase: str = "", steps_total: int = 0, prompt_chars: int = 0,
               window_name: str = "", group_name: str = "", status: str = "running",
-              run_id: str = "", prompt: str = "") -> Run:
+              run_id: str = "", prompt: str = "", work_item_id: str = "",
+              attempt: int = 1, dedupe_key: str = "") -> Run:
+        import os
+        from datetime import datetime, timedelta, timezone
+        now = _now_iso()
         run = Run(id=run_id or f"r-{new_id()[:8]}", kind=kind, window_id=window_id,
                   group_id=group_id, project_id=project_id, job_id=job_id,
                   parent_run_id=parent_run_id, phase=phase, steps_total=steps_total,
@@ -122,7 +138,10 @@ class RunRegistry:
                   prompt_chars=prompt_chars or len(prompt or ""),
                   window_name=window_name,
                   group_name=group_name, status=status, prompt=prompt or "",
-                  started_at=_now_iso(), updated_at=_now_iso())
+                  work_item_id=work_item_id, attempt=attempt, dedupe_key=dedupe_key,
+                  owner_pid=os.getpid(), heartbeat_at=now,
+                  lease_until=(datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat(),
+                  started_at=now, updated_at=now)
         self._active[run.id] = run
         self._persist(run)
         self._emit("run.started", run)
@@ -144,6 +163,25 @@ class RunRegistry:
         self._persist(run)
         self._emit("run.updated", run)
         return run
+
+    def heartbeat(self, run_id: str, lease_seconds: float = 300.0) -> None:
+        """刷新租约；Watchdog/重启恢复据此区分“还活着”和“进程已死”。"""
+        from datetime import datetime, timedelta, timezone
+        now = _now_iso()
+        lease = (datetime.now(timezone.utc)
+                 + timedelta(seconds=max(30.0, float(lease_seconds)))).isoformat()
+        run = self._active.get(run_id)
+        if run is not None:
+            run.heartbeat_at = now
+            run.lease_until = lease
+        try:
+            if self.db is not None:
+                self.db._conn.execute(
+                    "UPDATE runs SET heartbeat_at=?, lease_until=?, updated_at=? WHERE id=?",
+                    (now, lease, now, run_id))
+                self.db._conn.commit()
+        except Exception:  # noqa: BLE001
+            logger.debug("run heartbeat persist failed", exc_info=True)
 
     def finish(self, run_id: str, status: str, summary: str = "",
                error_code: str = "") -> Run | None:
@@ -308,9 +346,12 @@ class RunRegistry:
         if self.db is None:
             return n
         try:
+            # v0.19.0：queued 不再一刀切——它由持久 task_queue 恢复；
+            # 只有真正跑过的 running/paused/cancelling 才需要标中断。
+            stale = ("running", "paused", "cancelling")
             cur = self.db._conn.execute(
                 "SELECT id FROM runs WHERE status IN ({})".format(
-                    ",".join("?" * len(LIVE_STATUSES))), LIVE_STATUSES)
+                    ",".join("?" * len(stale))), stale)
             ids = [r[0] for r in cur.fetchall()]
             for rid in ids:
                 self.db._conn.execute(

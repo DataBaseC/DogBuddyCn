@@ -58,6 +58,18 @@ def _spawn_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
+def _child_env() -> dict[str, str]:
+    """Minimal env for shell children: do NOT leak DOGBUDDY_* secrets.
+
+    The app process carries the panel token / LLM keys in env. A worker with
+    shell could otherwise print them and exfiltrate via web_fetch.
+    """
+    keys = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR", "TMP", "TEMP",
+            "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE", "APPDATA",
+            "LOCALAPPDATA", "WINDIR")
+    return {k: os.environ[k] for k in keys if k in os.environ}
+
+
 def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
     """Kill the whole process tree; POSIX uses killpg, Windows uses taskkill /T."""
     if os.name == "nt":
@@ -194,6 +206,7 @@ class ShellTool:
                     cwd=cwd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    env=_child_env(),
                     **_spawn_kwargs(),
                 )
                 ctx.extra.setdefault("bg_processes", []).append(proc)
@@ -209,6 +222,7 @@ class ShellTool:
                 cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env=_child_env(),
                 **_spawn_kwargs(),
             )
             try:

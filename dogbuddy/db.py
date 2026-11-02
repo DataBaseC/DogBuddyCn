@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -680,6 +680,96 @@ def _migrate_v23(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v24(conn: sqlite3.Connection) -> None:
+    """任务内核 v1（2026-11-02，0.19.0）—— 只增表/增列，可回滚。
+
+    Trigger/Thread/WorkItem/Mandate/Subscription 先做 shadow；同时把
+    队列、Outbox、租约所需的最小字段落到 SQLite。旧路径不改语义。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS threads(
+      id TEXT PRIMARY KEY,
+      kind TEXT DEFAULT '', source TEXT DEFAULT '', external_id TEXT DEFAULT '',
+      title TEXT DEFAULT '', status TEXT DEFAULT 'open',
+      created_at TEXT DEFAULT '', updated_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_threads_external ON threads(source, external_id);
+
+    CREATE TABLE IF NOT EXISTS triggers(
+      id TEXT PRIMARY KEY,
+      source TEXT DEFAULT '', external_id TEXT DEFAULT '', thread_id TEXT DEFAULT '',
+      kind TEXT DEFAULT '', payload_json TEXT DEFAULT '',
+      dedupe_key TEXT UNIQUE,
+      status TEXT DEFAULT 'received',
+      received_at TEXT DEFAULT '', processed_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_triggers_status ON triggers(status, received_at);
+
+    CREATE TABLE IF NOT EXISTS work_items(
+      id TEXT PRIMARY KEY,
+      thread_id TEXT DEFAULT '', title TEXT DEFAULT '', description TEXT DEFAULT '',
+      status TEXT DEFAULT 'open', project_id TEXT DEFAULT '', window_id TEXT DEFAULT '',
+      current_run_id TEXT DEFAULT '', created_by TEXT DEFAULT '',
+      created_at TEXT DEFAULT '', updated_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_work_status ON work_items(status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS mandates(
+      id TEXT PRIMARY KEY,
+      work_item_id TEXT DEFAULT '', policy_version TEXT DEFAULT '',
+      scope TEXT DEFAULT '', allowed_actions_json TEXT DEFAULT '[]',
+      budget_json TEXT DEFAULT '{}', actor_id TEXT DEFAULT '',
+      expires_at TEXT DEFAULT '', status TEXT DEFAULT 'active'
+    );
+    CREATE INDEX IF NOT EXISTS ix_mandates_work ON mandates(work_item_id, status);
+
+    CREATE TABLE IF NOT EXISTS subscriptions(
+      work_item_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+      created_at TEXT DEFAULT '', created_by TEXT DEFAULT '',
+      PRIMARY KEY(work_item_id, thread_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS outbox_events(
+      id TEXT PRIMARY KEY,
+      topic TEXT DEFAULT '', ref_id TEXT DEFAULT '', payload_json TEXT DEFAULT '',
+      status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0,
+      next_at TEXT DEFAULT '', created_at TEXT DEFAULT '', sent_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_outbox_pending ON outbox_events(status, next_at);
+
+    CREATE TABLE IF NOT EXISTS resources(
+      id TEXT PRIMARY KEY,
+      work_item_id TEXT DEFAULT '', kind TEXT DEFAULT '', title TEXT DEFAULT '',
+      summary TEXT DEFAULT '', storage_ref TEXT DEFAULT '',
+      size_bytes INTEGER DEFAULT 0, token_estimate INTEGER DEFAULT 0,
+      parent_id TEXT DEFAULT '', created_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_resources_work ON resources(work_item_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS task_queue(
+      id TEXT PRIMARY KEY,
+      window_id TEXT NOT NULL, kind TEXT DEFAULT 'prompt', prompt TEXT DEFAULT '',
+      job_id TEXT DEFAULT '', urgent INTEGER DEFAULT 0,
+      llm_profile TEXT DEFAULT '', meta_json TEXT DEFAULT '',
+      priority INTEGER DEFAULT 0, dedupe_key TEXT DEFAULT '',
+      work_item_id TEXT DEFAULT '', status TEXT DEFAULT 'queued',
+      created_at TEXT DEFAULT '', updated_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_task_queue_window
+      ON task_queue(window_id, status, priority, created_at);
+    """)
+    for name, decl in (
+        ("work_item_id", "TEXT DEFAULT ''"), ("attempt", "INTEGER DEFAULT 1"),
+        ("owner_pid", "INTEGER DEFAULT 0"), ("lease_until", "TEXT DEFAULT ''"),
+        ("heartbeat_at", "TEXT DEFAULT ''"), ("dedupe_key", "TEXT DEFAULT ''"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {decl}")
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -707,6 +797,7 @@ _MIGRATIONS: dict[int, Any] = {
     21: _migrate_v21,
     22: _migrate_v22,
     23: _migrate_v23,
+    24: _migrate_v24,
 }
 
 

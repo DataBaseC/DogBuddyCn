@@ -64,10 +64,13 @@ class LLMConfig(BaseModel):
 
 class GatewayConfig(BaseModel):
     enabled: bool = True
-    host: str = "0.0.0.0"
+    #: 安全默认：只监听本机；要暴露到局域网必须显式改 host 并配 token/白名单。
+    host: str = "127.0.0.1"
     port: int = 8095
     access_token: str = ""
     whitelist: list[int] = Field(default_factory=list, description="allowed QQ user ids")
+    #: 只有显式打开才允许“空白名单 = 所有人”。默认 fail-closed。
+    allow_all: bool = False
     # default push target for task reports: {"type": "private"|"group", "id": 123}
     push_target: dict[str, Any] = Field(default_factory=dict)
     #: v0.10.50：群聊只在 @机器人 时响应（否则群里每个人的每句话都跑一轮管理员回合）
@@ -126,6 +129,12 @@ class UpdateConfig(BaseModel):
     health_delay: float = Field(default=1.0, ge=0.1, le=60.0)
 
 
+class KernelConfig(BaseModel):
+    """任务内核开关（v0.19.0）。shadow=True 只记录，不接管执行。"""
+    enabled: bool = True
+    shadow: bool = True
+
+
 class AppConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     llm_profiles: dict[str, LLMConfig] = Field(
@@ -135,6 +144,7 @@ class AppConfig(BaseModel):
                                 description="agent tool-loop rounds per run (windows may override)")
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    kernel: KernelConfig = Field(default_factory=KernelConfig)
     panel: PanelConfig = Field(default_factory=PanelConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     notify: NotifyConfig = Field(default_factory=NotifyConfig)
