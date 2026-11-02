@@ -327,8 +327,8 @@ class DogBuddyApp:
             ops=self.ops,
             # v0.15.0：运营站点（/news 静态站与 /api/news/status）
             news=self.news, site_dir=str(self.news.site_dir),
-            # v0.19.0：任务内核状态（/healthz.kernel）
-            kernel=self.kernel_store,
+            # v0.19.0：任务内核状态（/healthz.kernel）+ Web 入口 shadow
+            kernel=self.kernel_store, intake=self.intake,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)

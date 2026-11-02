@@ -101,6 +101,8 @@ class WebServices:
         self.site_dir = str(kw.get("site_dir") or "")
         #: v0.19.0：任务内核（shadow 记录 + 持久队列/Outbox 状态）
         self.kernel = kw.get("kernel")
+        #: v0.19.0：入口 shadow 记录（Web 边界；即使 LLM 未配置也记录 trigger）
+        self.intake = kw.get("intake")
         self.models = kw.get("models")
         self.iterations = kw.get("iterations")
         self.iteration_exec = kw.get("iteration_exec")
