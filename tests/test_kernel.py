@@ -133,12 +133,12 @@ def test_shell_does_not_leak_dogbuddy_env(tmp_path, monkeypatch):
 
     monkeypatch.setenv("DOGBUDDY_PANEL_TOKEN", "super-secret")
     ctx = ToolContext(window_id="w1", workspace=str(tmp_path), mode="BUILD")
-    cmd = ("echo %DOGBUDDY_PANEL_TOKEN%" if os.name == "nt"
-           else "echo ${DOGBUDDY_PANEL_TOKEN:-empty}")
+    # 不用 ${VAR}（边界守卫会判成 E_BOUNDARY_UNEVALUABLE）；直接列环境。
+    cmd = "set" if os.name == "nt" else "env"
     res = _run(ShellTool().execute({"command": cmd}, ctx))
     assert res.ok, res.output
     assert "super-secret" not in res.output
-    assert "empty" in res.output or "%DOGBUDDY_PANEL_TOKEN%" in res.output
+    assert "DOGBUDDY_PANEL_TOKEN" not in res.output
 
 
 def test_web_refuses_public_bind_without_auth():
