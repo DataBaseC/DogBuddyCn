@@ -210,12 +210,22 @@ class WindowManager:
     def _ensure_worker(self, rt: WindowRuntime) -> None:
         """Start the queue worker if a running loop is available; otherwise defer
         until start() (sync routes run outside the event loop)."""
-        if rt.worker is not None and not rt.worker.done():
-            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = getattr(self, "_loop", None)
+        if rt.worker is not None and not rt.worker.done():
+            try:
+                same_loop = rt.worker.get_loop() is loop
+            except Exception:  # noqa: BLE001
+                same_loop = False
+            if same_loop:
+                return
+            # 测试/嵌入方可能换了一个新 event loop：旧 worker 绑在已关闭的 loop 上，
+            # 不重建就会“提交成功但永远没人消费”。
+            rt.worker.cancel()
+            rt.worker = None
+            rt.queue.rebind_loop()
         if loop is not None and loop.is_running():
             rt.worker = loop.create_task(rt.queue.run_loop())
 

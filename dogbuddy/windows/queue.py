@@ -119,6 +119,12 @@ class TaskQueue:
     def pending(self) -> list[TaskItem]:
         return list(self._queue)
 
+    def rebind_loop(self) -> None:
+        """换 event loop 后重建 Event（旧 Event 已绑到关闭的 loop）。"""
+        self._event = asyncio.Event()
+        if self._queue:
+            self._event.set()
+
     @property
     def current(self) -> TaskItem | None:
         return self._current
