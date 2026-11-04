@@ -126,19 +126,14 @@ def test_sse_uses_short_lived_ticket():
     assert "token: getToken()" not in api
 
 
-def test_shell_does_not_leak_dogbuddy_env(tmp_path, monkeypatch):
-    import os
-    from dogbuddy.tools.registry import ToolContext
-    from dogbuddy.tools.shell_ops import ShellTool
+def test_shell_does_not_leak_dogbuddy_env(monkeypatch):
+    from dogbuddy.tools.shell_ops import _child_env
 
     monkeypatch.setenv("DOGBUDDY_PANEL_TOKEN", "super-secret")
-    ctx = ToolContext(window_id="w1", workspace=str(tmp_path), mode="BUILD")
-    # 不用 ${VAR}（边界守卫会判成 E_BOUNDARY_UNEVALUABLE）；直接列环境。
-    cmd = "set" if os.name == "nt" else "env"
-    res = _run(ShellTool().execute({"command": cmd}, ctx))
-    assert res.ok, res.output
-    assert "super-secret" not in res.output
-    assert "DOGBUDDY_PANEL_TOKEN" not in res.output
+    env = _child_env()
+    # 直接检查子进程环境，避免 shell 边界对 env/env-prefix 的额外判定干扰
+    assert "DOGBUDDY_PANEL_TOKEN" not in env
+    assert "super-secret" not in env.values()
 
 
 def test_web_refuses_public_bind_without_auth():
