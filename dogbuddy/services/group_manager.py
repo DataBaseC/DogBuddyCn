@@ -555,7 +555,7 @@ class GroupManager:
                 + f"\n{duty}"
             )
             # 这条编排提示词不该进共享频道（否则被下一个成员读回来 → 自指增长）
-            rt.session.channel_mute = {"marker": GROUP_STEP_MARK, "left": 1}
+            # v0.22.0：mute 在真正拿到队列执行权后再设置（见 _run_queued_step）。
             role_spec = get_role(w.role)
             # `_strict_tools` 返回 `[]`（交集为空）时**必须一个工具都不给**；
             # 返回 None（算不出来）才退回该角色自己的白名单。初版 `[]` 会被
@@ -573,7 +573,8 @@ class GroupManager:
             # 这是"群组协作"能成立的前提：组员看到同一批文件，组长汇总的产物
             # 就在同一个目录里，不用互相传。没挂项目才退回各自工作区。
             ws = shared_ws or self.windows.effective_workspace(w)
-            rt.session.workspace_override = ws
+            # v0.22.0：workspace_override 也放到拿到执行权后设置；
+            # 在队列里等待时不能影响前一个正常任务。
             ctx = ToolContext(
                 window_id=w.id, workspace=ws, mode=w.mode, actor="worker",
                 todo_repo=self.db, db=self.db, panel=self.windows.panel,
@@ -604,9 +605,8 @@ class GroupManager:
                        # 它自己的临时 list，群组运行永远等不到（装配漏洞的老毛病）
                        "delegated": delegated,
                        "pending_runs": pending_runs})
-            # v0.19.0：群组步骤也拿工位的 session_lock，不能再绕过队列/压缩互斥
-            # 直接跑 AgentLoop（report P1-07）。同步等待但执行权仍串行。
-            await rt.session_lock.acquire()
+            # v0.22.0：不再直接抢锁跑 AgentLoop，改为把这一步作为队列内
+            # 自定义执行体投递（队列 worker 会在 session_lock 内执行）。
             try:
                 # v0.10.22：单成员**挂钟预算**。限速退避是"无限耐心"的（heavy 档会
                 # 追加重试预算，实测单次退避就 600s），一次群组运行因此可能挂几分钟
@@ -632,13 +632,31 @@ class GroupManager:
                     except Exception:  # noqa: BLE001 — UI 推流失败不能影响运行
                         logger.debug("group stream emit failed", exc_info=True)
 
-                result = await asyncio.wait_for(loop.run(step_prompt, ctx, on_delta=_on_delta),
-                                                timeout=budget)
+                async def _run_queued_step() -> Any:
+                    # 等真正拿到执行权后再设置会话状态，避免阻塞队列里的前一个任务
+                    rt.session.workspace_override = ws
+                    rt.session.channel_mute = {"marker": GROUP_STEP_MARK, "left": 1}
+                    return await loop.run(step_prompt, ctx, on_delta=_on_delta)
+
+                future, step_handle = self.windows.dispatch_group_step(
+                    wid, step_prompt, _run_queued_step,
+                    parent_run_id=(parent_run.id if parent_run is not None else ""),
+                    sender=(f"群组·{g.name}（编排）" if is_lead else f"群组·{g.name}"))
+                try:
+                    result = await asyncio.wait_for(future, timeout=budget)
+                except asyncio.TimeoutError:
+                    # 超时不能只放弃等待：队列里的这一步也要真的停掉
+                    try:
+                        step_handle.cancel()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("group step cancel failed", exc_info=True)
+                    raise
                 # v0.10.28：成员被限速而**暂停**（非失败）要如实标出来，别混进 ok=False
                 # 的"失败"里 —— 它只是"这次没轮上"，稍后重跑就能继续。
                 limited = result.stop_reason == "rate_limited"
                 steps.append({"window_id": wid, "window_name": w.name,
                               "is_lead": is_lead, "phase": phase,
+                              "run_id": step_handle.run_id,
                               "ok": result.stop_reason == "done",
                               "rate_limited": limited,
                               "error_code": getattr(result, "error_code", "") or "",
@@ -672,11 +690,7 @@ class GroupManager:
                               "prompt_chars": len(step_prompt),
                               "summary": f"[step failed] {e}"})
             finally:
-                # 先释放执行权，再翻状态（否则下一步/队列任务会被白等）
-                try:
-                    rt.session_lock.release()
-                except Exception:  # noqa: BLE001
-                    logger.debug("group session lock release failed", exc_info=True)
+                # 执行权由队列 worker 持有并释放；这里只翻状态。
                 # 这一步结束：把状态翻回 idle（哪怕超时/异常也不能一直挂着"运行中"）
                 try:
                     self.windows._set_status(wid, "idle")

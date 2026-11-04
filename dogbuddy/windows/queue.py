@@ -76,7 +76,9 @@ class TaskQueue:
             return False
         task.window_id = task.window_id or self.window_id
         task.id = task.id or f"tq-{uuid.uuid4().hex[:12]}"
-        if self.store is not None:
+        # v0.22.0：ephemeral 任务带进程内闭包（群组步骤），不能跨重启恢复，
+        # 因此不写 task_queue；正常任务仍然先落库。
+        if self.store is not None and not (task.meta or {}).get("ephemeral"):
             try:
                 self.store.enqueue_task(task)
             except Exception:  # noqa: BLE001 — 持久化失败不能阻断执行

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -186,6 +187,8 @@ class WindowManager:
         # injected rule for per-window params (AppConfig.effective_params)
         self.param_resolver = param_resolver
         self._runtime: dict[str, WindowRuntime] = {}
+        #: v0.22.0：队列内自定义执行体（群组步骤用；不持久化，重启即失效）
+        self._custom_runners: dict[str, Any] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self.gate = PermissionGate(confirm_available=True)
 
@@ -672,7 +675,7 @@ class WindowManager:
                  job_id: str | None = None, kind: str = "prompt",
                  llm_profile: str = "", run_id: str = "",
                  sender: str = "", work_item_id: str = "",
-                 dedupe_key: str = "",
+                 dedupe_key: str = "", task_id: str = "",
                  extra_meta: dict[str, Any] | None = None) -> bool:
         rt = self._rt(window_id)
         meta: dict[str, Any] = dict(extra_meta or {})
@@ -684,7 +687,7 @@ class WindowManager:
                                       kind=kind or "prompt",
                                       llm_profile=llm_profile or "",
                                       meta=meta, work_item_id=work_item_id,
-                                      dedupe_key=dedupe_key))
+                                      dedupe_key=dedupe_key, id=task_id))
         self.db.audit("system", "window:dispatch",
                       f"{rt.window.id} job={job_id} kind={kind} run={run_id or '-'} "
                       f"prompt={prompt[:80]}")
@@ -806,6 +809,8 @@ class WindowManager:
         """
         if not self.bus or getattr(task, "job_id", None):
             return
+        if (getattr(task, "meta", None) or {}).get("group_step"):
+            return
         if str(getattr(task, "kind", "prompt") or "prompt") != "prompt":
             return
         status = _run_status(result)
@@ -831,6 +836,7 @@ class WindowManager:
                      job_id: str | None = None, llm_profile: str = "",
                      sender: str = "", work_item_id: str = "",
                      parent_run_id: str = "", dedupe_key: str = "",
+                     task_id: str = "",
                      extra_meta: dict[str, Any] | None = None) -> RunHandle:
         """**唯一新执行入口**（v0.21.0）。
 
@@ -853,7 +859,8 @@ class WindowManager:
         ok = self.dispatch(window_id, prompt, urgent=urgent, job_id=job_id,
                            kind=kind, llm_profile=llm_profile, run_id=run_id,
                            sender=sender, work_item_id=work_item_id,
-                           dedupe_key=dedupe_key, extra_meta=extra_meta)
+                           dedupe_key=dedupe_key, task_id=task_id,
+                           extra_meta=extra_meta)
         if not ok:
             if run_id and runs is not None:
                 try:
@@ -863,6 +870,43 @@ class WindowManager:
             raise RuntimeError("工位队列已满，任务未入队")
         return RunHandle(run_id=run_id, work_item_id=work_item_id,
                          windows=self, runs=runs)
+
+    def dispatch_group_step(self, window_id: str, prompt: str, factory: Any,
+                            *, parent_run_id: str = "", sender: str = "",
+                            ) -> tuple["asyncio.Future", RunHandle]:
+        """把群组的一步作为**队列内自定义执行体**投递（v0.22.0）。
+
+        群组步骤有自己的 ctx（成员工具白名单、共享工作区、频道上下文），
+        不能套默认 PromptRunner；但执行权必须经过工位队列/session_lock。
+        factory 只在当前进程有效（ephemeral），重启后由群组层面兜底。
+        """
+        self._rt(window_id)                      # 提前校验工位存在
+        task_id = f"gstep-{uuid.uuid4().hex[:10]}"
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+
+        async def _run_custom() -> Any:
+            try:
+                result = await factory()
+                if not future.done():
+                    future.set_result(result)
+                return result
+            except BaseException as e:  # noqa: BLE001 — 让等待方拿到同一个失败
+                if not future.done():
+                    future.set_exception(e)
+                raise
+
+        self._custom_runners[task_id] = _run_custom
+        meta = {"future": future, "run_owned_by_caller": True,
+                "coordinated": True, "ephemeral": True, "group_step": True}
+        try:
+            handle = self.dispatch_run(
+                window_id=window_id, prompt=prompt, origin="group_step",
+                kind="prompt", urgent=False, parent_run_id=parent_run_id,
+                sender=sender, task_id=task_id, extra_meta=meta)
+        except Exception:
+            self._custom_runners.pop(task_id, None)
+            raise
+        return future, handle
 
     def dispatch_manual(self, window_id: str, prompt: str,
                         sender: str = "") -> RunHandle | None:
@@ -1029,6 +1073,10 @@ class WindowManager:
             raise
 
     async def _execute_inner(self, rt: WindowRuntime, task: TaskItem) -> Any:
+        # v0.22.0：群组步骤等自定义执行体（在 session_lock 内、走队列）。
+        custom = self._custom_runners.pop(str(getattr(task, "id", "") or ""), None)
+        if custom is not None:
+            return await custom()
         w = rt.window
         role = get_role(w.role)
         profile = task.llm_profile or w.llm_profile or None
