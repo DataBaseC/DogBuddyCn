@@ -2484,3 +2484,24 @@ owner：继续。目标是把“人工/Cron/组长派活/主管指令”收到�
 
 基线：**1010 passed / 4 skipped**（新增 2 条：dispatch_run 建 run+持久任务、未知工位拒绝）。
 
+---
+
+## 67. 群组步骤队列化（2026-11-04，`0.22.0`）
+
+owner：继续。目标是不再让 `GroupManager` 直接启动 `AgentLoop`，成员步骤必须经过工位
+队列/session_lock，同时保留成员 ctx、流式输出、超时和 step run 台账。
+
+- `WindowManager.dispatch_group_step()`：把群组一步作为**队列内自定义执行体**投递；
+  `TaskItem.meta["ephemeral"]=True`（闭包不能跨重启，不写 task_queue）；
+  队列 worker 在 `session_lock` 内执行 factory，返回 future + RunHandle。
+- `_execute_inner` 优先消费 `_custom_runners`，群组步骤不会再落进默认 PromptRunner。
+- 群组只负责构建 `loop/ctx/step_prompt`；`workspace_override/channel_mute` 改为**拿到
+  执行权后**再设置，避免等待期间污染前一个正常任务。
+- 超时会 `RunHandle.cancel()` 真正停掉队列里的这一步，而不是只放弃等待。
+- 每步有独立 run_id，写进 `steps[]`；`_report_manual_run` 跳过 group_step。
+- `dispatch_group_step` 自动补起队列 worker；`_ensure_worker` 在 event loop 变化时
+  重建 worker/Event（测试与嵌入方会换 loop，旧 worker 绑在关闭的 loop 上）。
+
+服务器全量（不是本地）：**1012 passed / 2 skipped**（Linux 下 2 条平台跳过）。
+仍未收口：Router 真正接管路由。
+
