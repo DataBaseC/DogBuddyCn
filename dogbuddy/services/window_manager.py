@@ -880,7 +880,10 @@ class WindowManager:
         不能套默认 PromptRunner；但执行权必须经过工位队列/session_lock。
         factory 只在当前进程有效（ephemeral），重启后由群组层面兜底。
         """
-        self._rt(window_id)                      # 提前校验工位存在
+        rt = self._rt(window_id)                 # 提前校验工位存在
+        # 测试/脚本路径可能没调用 start()：在运行中的 loop 里补起队列 worker，
+        # 否则提交后永远没人消费。
+        self._ensure_worker(rt)
         task_id = f"gstep-{uuid.uuid4().hex[:10]}"
         future: asyncio.Future = asyncio.get_event_loop().create_future()
 
