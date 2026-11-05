@@ -45,6 +45,7 @@ def _stack(tmp_path):
                                 window_id="w1")
     store.create_mandate(work_item_id=wi["id"], scope="workspace",
                          allowed_actions=["read", "write", "exec"])
+    store.update_work_item(wi["id"], status="working")
     return db, store, wi
 
 
@@ -164,7 +165,7 @@ def test_reviewer_is_hard_read_only():
 
 
 def test_run_tests_only_allowlisted(tmp_path):
-    allowed = "python -c \"print('ok')\""
+    allowed = f'{sys.executable} -c "print(\'ok\')"'
     tool = RunTestsTool([allowed])
     ctx = ToolContext(window_id="reviewer", workspace=str(tmp_path), mode="PLAN")
     ok = _run(tool.execute({"command": allowed}, ctx))
