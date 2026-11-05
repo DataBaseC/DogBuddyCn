@@ -2555,3 +2555,25 @@ M2：只对明确命令真正执行；普通聊天仍走旧管理员路径。
 服务器全量：**1025 passed / 2 skipped**（新增 7 条 explicit 测试）。
 仍未做：自然语言路由、Review 闭环、缓存诊断。
 
+---
+
+## 70. Review Shadow + reviewer 硬只读（2026-11-05，`0.24.0`）
+
+按建议工作流 B 先做“看见并记录”，不阻断交付。
+
+- schema 27：`review_requests`（run_id UNIQUE 幂等）、`review_findings`。
+- `ReviewService` 订阅 `run.finished`（已在 Durable Topics）：
+  - 仅根 Run、`done/partial`、`review_required=1`、非 review/group_step；
+  - 创建请求 → 没有 reviewer 工位则 `waiting_human`，**绝不默认 PASS**；
+  - 配置了 `review.window_id` 则派一个 `origin=review` 的只读 Run；
+  - reviewer Run 结束后解析 JSON verdict；PASS/FAIL/解析失败分别记录，
+    **shadow 只改 `review_status`，不改 WorkItem 交付状态**。
+- Router 的 `/task` 创建 WorkItem 时置 `review_required=1`。
+- `worker_reviewer` 真正硬只读：移除 `shell/window_memory_write/todo写`，
+  `default_mode=PLAN`；保留 read_file/glob/grep/web_fetch/run_status/read_resource。
+- `/healthz.review` 暴露 mode/requests/waiting。
+- 配置：`review.mode=off|shadow`、`review.window_id`、`review.reviewer_model`。
+
+服务器全量：**1030 passed / 2 skipped**（新增 5 条 Review 测试）。
+仍未做：enforce（FAIL 阻断/返工）、受限 run_tests、自然语言路由、缓存诊断。
+
