@@ -2531,3 +2531,27 @@ owner：继续。目标是不再让 `GroupManager` 直接启动 `AgentLoop`，�
 服务器全量：**1018 passed / 2 skipped**（新增 7 条 Router 测试）。
 仍未做：`/task` 真正 dispatch、Mandate 校验、Review 闭环、缓存诊断。
 
+---
+
+## 69. Router 显式任务接管（2026-11-05，`0.23.1`）
+
+M2：只对明确命令真正执行；普通聊天仍走旧管理员路径。
+
+- `kernel.route=explicit|auto` 时：
+  - `/task <目标>`：选队列最短的非 admin/supervisor/chat 工位 → 建 WorkItem
+    （origin=router）→ 建 active Mandate（workspace/read,write,exec）→
+    `dispatch_run()`；立即返回 `work_item_id/run_id`；
+  - `/continue [文本|wi-id]`：复用原 WorkItem 再派 Run；尾随文本作为追加说明，
+    只有 `wi-/rd-` 前缀才当 ID；
+  - `/cancel`：取消指定/任务当前 Run；
+  - `/status`：返回 WorkItem/Run 状态；
+  - 普通聊天：`handled=False`，继续旧路径。
+- `kernel.route_conversations`：显式接管的 Web 会话白名单；空 = 全部。
+- `dispatch_run(work_item_id=...)` 必须有 active Mandate，否则拒绝；
+  管理员 `window_dispatch` 在 explicit/auto 下被拒绝（返回人话），不能绕过 WorkItem。
+- Web chat 命中 handled 决策时**直接返回**，不再调用 AdminService，杜绝双执行。
+- Shadow 仍只记录；没有工位时 Shadow 也保留候选 WorkItem，explicit 则明确要求先建工位。
+
+服务器全量：**1025 passed / 2 skipped**（新增 7 条 explicit 测试）。
+仍未做：自然语言路由、Review 闭环、缓存诊断。
+
