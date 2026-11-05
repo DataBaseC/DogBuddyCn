@@ -1,13 +1,14 @@
-# DogBuddyCn — Kernel Router (Fast Path shadow, v0.23.0)
+# DogBuddyCn — Kernel Router (Fast Path, v0.23.1)
 # Copyright (C) DogBuddyCn contributors — AGPL-3.0
-"""Classify Web messages into chat/control/task candidates without executing.
+"""Classify Web messages and (only in explicit/auto) dispatch explicit commands.
 
-0.23.0 is deliberately **shadow-only**: it writes router_decisions and (for
-explicit `/task`) a WorkItem, but the old AdminService still answers the turn.
-No LLM call, no dispatch, no user-visible behaviour change.
+`shadow` records decisions only. `explicit` handles `/task`, `/continue`,
+`/cancel`, `/status`; ordinary chat still goes to the old AdminService path.
+No Router LLM call in this version.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -19,45 +20,78 @@ logger = logging.getLogger("dogbuddy.kernel.router")
 class KernelRouter:
     MODES = ("off", "shadow", "explicit", "auto")
 
-    def __init__(self, store: Any, intake: Any = None, mode: str = "off"):
+    def __init__(self, store: Any, intake: Any = None, mode: str = "off",
+                 windows: Any = None, route_conversations: list[str] | None = None):
         self.store = store
         self.intake = intake
         self.mode = str(mode or "off").lower()
         if self.mode not in self.MODES:
             self.mode = "off"
+        self.windows = windows
+        self.route_conversations = {str(x) for x in (route_conversations or [])}
+
+    def enabled_for(self, conversation: str) -> bool:
+        if self.mode == "off":
+            return False
+        if self.mode == "shadow":
+            return True
+        return (not self.route_conversations
+                or str(conversation) in self.route_conversations)
 
     def route_web(self, *, conversation: str, text: str,
                   sender: str = "owner") -> dict[str, Any] | None:
-        # 0.23.x 只做 shadow；explicit/auto 尚未接管，先按 shadow 记录。
-        if self.mode == "off" or self.store is None or self.intake is None:
+        if not self.enabled_for(conversation) or self.store is None or self.intake is None:
             return None
         trigger = self.intake.accept_web(
             conversation=conversation, text=text, sender=sender)
         if not trigger:
             return None
-        return self.route_trigger(trigger, text=text, sender=sender)
+        return self.route_trigger(trigger, text=text, sender=sender,
+                                  conversation=conversation)
 
     def route_trigger(self, trigger: dict[str, Any], *, text: str,
-                      sender: str = "owner") -> dict[str, Any]:
+                      sender: str = "owner", conversation: str = "") -> dict[str, Any]:
         trigger_id = str(trigger.get("id") or "")
         thread_id = str(trigger.get("thread_id") or "")
         existing = self.store.get_router_decision(trigger_id)
         if existing is not None:
-            return existing
+            return self._existing_result(existing)
 
         decision = self.decide(text=text, thread_id=thread_id, sender=sender)
+        result: dict[str, Any] = {"handled": False, "action": decision.action,
+                                  "reason": decision.reason}
         if decision.action == "create":
-            wi = self.store.create_work_item(
-                thread_id=thread_id, title=decision.title or decision.prompt[:80],
-                description=decision.prompt, created_by=sender, origin="router")
-            decision.work_item_id = str(wi.get("id") or "")
-            self.store.subscribe(work_item_id=decision.work_item_id,
-                                 thread_id=thread_id, created_by=sender)
-        rec, _created = self.store.record_router_decision(
-            trigger_id=trigger_id, thread_id=thread_id, action=decision.action,
-            decision=decision.__dict__, reason=decision.reason,
+            result = self._create_task(decision, thread_id, sender)
+        elif decision.action == "resume":
+            result = self._resume_task(decision, text, sender)
+        elif decision.action == "cancel":
+            result = self._cancel_task(text)
+        elif decision.action == "status":
+            result = self._status_task(text)
+        elif decision.action == "ask":
+            result = {"handled": self.mode in ("explicit", "auto"),
+                      "action": "ask", "reason": decision.reason,
+                      "reply": decision.prompt or "请补充任务信息。"}
+
+        decision.work_item_id = str(result.get("work_item_id") or decision.work_item_id)
+        decision.window_id = str(result.get("window_id") or decision.window_id)
+        body = dict(decision.__dict__)
+        body["result"] = result
+        self.store.record_router_decision(
+            trigger_id=trigger_id, thread_id=thread_id, action=result.get("action") or decision.action,
+            decision=body, reason=result.get("reason") or decision.reason,
             work_item_id=decision.work_item_id, window_id=decision.window_id)
-        return rec
+        return result
+
+    def _existing_result(self, row: dict[str, Any]) -> dict[str, Any]:
+        try:
+            data = json.loads(row.get("decision_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            data = {}
+        result = data.get("result") if isinstance(data.get("result"), dict) else {}
+        return {**result, "handled": bool(result.get("handled")),
+                "action": row.get("action") or result.get("action", ""),
+                "duplicate": True}
 
     def decide(self, *, text: str, thread_id: str, sender: str = "owner") -> RouterDecision:
         body = str(text or "").strip()
@@ -75,21 +109,139 @@ class KernelRouter:
                                       prompt="请补充任务目标。")
             return RouterDecision(action="create", reason="explicit /task command",
                                   prompt=prompt, title=prompt[:80],
-                                  mandate_scope="project", confidence=1.0)
+                                  mandate_scope="workspace", confidence=1.0)
         if body.startswith("/continue"):
             target = body[len("/continue"):].strip()
             wi = (self.store.get_work_item(target) if target
                   else self.store.find_open_work_item(thread_id, include_shadow=False))
             if wi is None or str(wi.get("origin") or "") == "shadow":
-                return RouterDecision(action="ask", reason="no open non-shadow WorkItem")
+                return RouterDecision(action="ask", reason="no open non-shadow WorkItem",
+                                      prompt="没有可继续的任务。")
             return RouterDecision(action="resume", reason="explicit /continue command",
                                   work_item_id=str(wi.get("id") or ""),
                                   title=str(wi.get("title") or ""), confidence=1.0)
         # 自然语言暂不建任务；explicit 阶段也只认命令。
         return RouterDecision(action="chat", reason="default chat path", confidence=0.5)
 
+    # ------------------------------------------------------------- execution
+    def _create_task(self, d: RouterDecision, thread_id: str,
+                     sender: str) -> dict[str, Any]:
+        w = self._select_window()
+        if w is None:
+            return {"handled": self.mode in ("explicit", "auto"), "action": "ask",
+                    "reason": "no worker window available",
+                    "reply": "没有可用的员工工位，请先在控制台创建或选择一个工位。"}
+        wi = self.store.create_work_item(
+            thread_id=thread_id, title=d.title or d.prompt[:80],
+            description=d.prompt, project_id=str(getattr(w, "project_id", "") or ""),
+            window_id=str(w.id), created_by=sender, origin="router")
+        wid = str(wi.get("id") or "")
+        self.store.create_mandate(
+            work_item_id=wid, scope=d.mandate_scope or "workspace",
+            allowed_actions=["read", "write", "exec"], actor_id=sender)
+        self.store.subscribe(work_item_id=wid, thread_id=thread_id, created_by=sender)
+        if self.mode == "shadow":
+            return {"handled": False, "action": "create", "work_item_id": wid,
+                    "window_id": w.id, "reason": "shadow only"}
+        try:
+            handle = self.windows.dispatch_run(
+                window_id=w.id, prompt=d.prompt, origin="router", kind="prompt",
+                urgent=True, sender=sender, work_item_id=wid)
+        except Exception as e:  # noqa: BLE001
+            self.store.update_work_item(wid, status="failed")
+            return {"handled": True, "action": "create", "work_item_id": wid,
+                    "window_id": w.id, "reply": f"任务创建失败：{e}"}
+        self.store.update_work_item(wid, status="working",
+                                    current_run_id=handle.run_id)
+        return {"handled": True, "action": "create", "work_item_id": wid,
+                "window_id": w.id, "run_id": handle.run_id,
+                "reply": f"已创建任务 {wid}，由「{w.name}」执行（Run {handle.run_id}）。"}
+
+    def _resume_task(self, d: RouterDecision, text: str,
+                     sender: str) -> dict[str, Any]:
+        wi = (self.store.get_work_item(d.work_item_id) if d.work_item_id
+              else None)
+        if wi is None:
+            return {"handled": self.mode in ("explicit", "auto"), "action": "ask",
+                    "reply": "没有可继续的任务。"}
+        wid = str(wi.get("id") or "")
+        window_id = str(wi.get("window_id") or "")
+        if not window_id or self.windows.get(window_id) is None:
+            return {"handled": True, "action": "resume", "work_item_id": wid,
+                    "reply": "任务原来绑定的工位已不存在，请重新创建任务。"}
+        extra = str(text or "").split("/continue", 1)[-1].strip()
+        prompt = f"继续任务：{wi.get('description') or wi.get('title') or ''}"
+        if extra:
+            prompt += f"\n\n用户追加：{extra}"
+        if self.mode == "shadow":
+            return {"handled": False, "action": "resume", "work_item_id": wid,
+                    "window_id": window_id, "reason": "shadow only"}
+        try:
+            handle = self.windows.dispatch_run(
+                window_id=window_id, prompt=prompt, origin="router", kind="prompt",
+                urgent=True, sender=sender, work_item_id=wid)
+        except Exception as e:  # noqa: BLE001
+            return {"handled": True, "action": "resume", "work_item_id": wid,
+                    "reply": f"续跑失败：{e}"}
+        self.store.update_work_item(wid, status="working",
+                                    current_run_id=handle.run_id)
+        return {"handled": True, "action": "resume", "work_item_id": wid,
+                "window_id": window_id, "run_id": handle.run_id,
+                "reply": f"已继续任务 {wid}（Run {handle.run_id}）。"}
+
+    def _cancel_task(self, text: str) -> dict[str, Any]:
+        if self.windows is None:
+            return {"handled": True, "action": "cancel", "reply": "运行台账不可用。"}
+        parts = str(text or "").split(maxsplit=1)
+        target = parts[1].strip() if len(parts) > 1 else ""
+        run_id = target
+        if target and self.store.get_work_item(target) is not None:
+            run_id = str(self.store.get_work_item(target).get("current_run_id") or "")
+        if not run_id:
+            return {"handled": True, "action": "cancel", "reply": "没有指定可取消的 Run。"}
+        out = self.windows.cancel_run(run_id)
+        return {"handled": True, "action": "cancel", "run_id": run_id,
+                "reply": "已取消。" if out.get("ok") else f"取消失败：{out.get('reason', '')}"}
+
+    def _status_task(self, text: str) -> dict[str, Any]:
+        parts = str(text or "").split(maxsplit=1)
+        target = parts[1].strip() if len(parts) > 1 else ""
+        wi = self.store.get_work_item(target) if target else None
+        if wi is not None:
+            run_id = str(wi.get("current_run_id") or "")
+            runs = getattr(self.windows, "runs", None) if self.windows else None
+            run = runs.get(run_id) if (runs is not None and run_id) else None
+            status = getattr(run, "status", "") if run is not None else ""
+            return {"handled": True, "action": "status", "work_item_id": target,
+                    "run_id": run_id,
+                    "reply": f"任务 {target}：{wi.get('status')}"
+                             + (f"，Run {run_id}：{status}" if run_id else "，尚无 Run")}
+        return {"handled": True, "action": "status",
+                "reply": "用法：/status <work_item_id>。"}
+
+    def _select_window(self) -> Any:
+        if self.windows is None:
+            return None
+        try:
+            candidates = [w for w in self.windows.list()
+                          if w.role not in ("admin", "supervisor", "worker_chat")
+                          and str(getattr(w, "status", "") or "") not in
+                          ("stopped", "terminated", "disabled")]
+        except Exception:  # noqa: BLE001
+            return None
+        if not candidates:
+            return None
+
+        def score(w: Any) -> tuple[int, int]:
+            rt = getattr(self.windows, "_runtime", {}).get(w.id)
+            pending = len(rt.queue.pending()) if rt is not None else 0
+            role_rank = 0 if w.role == "worker_programmer" else 1
+            return role_rank, pending
+        return sorted(candidates, key=score)[0]
+
     def health(self) -> dict[str, Any]:
         return {"mode": self.mode,
                 "decisions": (self.store.count_router_decisions()
                               if self.store is not None else 0),
-                "shadow_only": True}
+                "shadow_only": self.mode == "shadow",
+                "route_conversations": sorted(self.route_conversations)}

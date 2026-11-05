@@ -187,6 +187,8 @@ def router(svc, auth_deps) -> APIRouter:
             handle = svc.windows.dispatch_manual(window_id, body.prompt)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         if handle is None:
             raise HTTPException(status_code=503, detail="工位队列已满或台账不可用，任务未入队")
         return {"queued": True,

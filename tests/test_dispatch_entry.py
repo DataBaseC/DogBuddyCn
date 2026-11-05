@@ -44,6 +44,20 @@ def test_dispatch_run_creates_queued_run_and_task(tmp_path):
     db.close()
 
 
+def test_dispatch_run_requires_active_mandate_for_work_item(tmp_path):
+    db, wm, w = _stack(tmp_path)
+    thread = wm.queue_store.ensure_thread(source="web", external_id="c1")
+    wi = wm.queue_store.create_work_item(thread_id=thread["id"], title="t")
+    import pytest
+    with pytest.raises(ValueError):
+        wm.dispatch_run(window_id=w.id, prompt="x", work_item_id=wi["id"])
+    wm.queue_store.create_mandate(work_item_id=wi["id"], scope="workspace",
+                                  allowed_actions=["read", "write", "exec"])
+    handle = wm.dispatch_run(window_id=w.id, prompt="x", work_item_id=wi["id"])
+    assert handle.work_item_id == wi["id"] and handle.run_id
+    db.close()
+
+
 def test_dispatch_run_rejects_unknown_window(tmp_path):
     db, wm, _w = _stack(tmp_path)
     import pytest

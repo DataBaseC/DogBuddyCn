@@ -976,8 +976,13 @@ def build_admin_tools(svc: AdminServices) -> list[Any]:
         w = svc.windows.get(ref)
         if w is None:
             return ToolResult.failure(f"工位不存在：{ref}")
-        svc.windows.dispatch_manual(w.id, prompt)
-        run_id = getattr(svc.windows, "_manual_last", {}).get(w.id, {}).get("run_id", "")
+        try:
+            handle = svc.windows.dispatch_manual(w.id, prompt)
+        except RuntimeError as e:      # Router 接管中：不能绕过 WorkItem
+            return ToolResult.failure(str(e))
+        if handle is None:
+            return ToolResult.failure("派单未入队（队列已满或台账不可用）")
+        run_id = getattr(handle, "run_id", "")
         return ToolResult.success(
             f"已把任务派给「{w.name}」（后台运行，run={run_id or '（未登记）'}）。"
             f"用 run_list 看进度、run_cancel 停止。", window_id=w.id, run_id=run_id)

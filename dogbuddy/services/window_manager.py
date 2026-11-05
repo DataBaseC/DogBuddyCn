@@ -137,6 +137,7 @@ class WindowManager:
         approval_config: Callable[..., Any] | None = None,
         mcp_bridge: Any = None,
         queue_store: Any = None,
+        route_mode: str = "off",
     ):
         self.db = db
         self.llm_factory = llm_factory
@@ -160,6 +161,7 @@ class WindowManager:
         self.mcp_bridge = mcp_bridge
         #: v0.19.0：持久 task_queue（None = 纯内存，测试/旧部署）
         self.queue_store = queue_store
+        self.route_mode = str(route_mode or "off").lower()
         self.checkpoints_dir = str(checkpoints_dir)
         # T8.1：自助排期工具需要 JobStore + "立即执行"入口。
         # 由 main 在 JobManager 建好后 setattr 注入（窗口在 start() 才 boot，时序安全）。
@@ -858,6 +860,11 @@ class WindowManager:
         w = self.db.get_window(window_id)
         if w is None:
             raise ValueError(f"没有这个工位：{window_id}")
+        # v0.23.1：带 WorkItem 的执行必须有 active Mandate（Router 授权）。
+        if work_item_id and self.queue_store is not None:
+            mandate = self.queue_store.get_active_mandate(work_item_id)
+            if mandate is None:
+                raise ValueError(f"WorkItem {work_item_id} 没有 active Mandate")
         runs = getattr(self, "runs", None)
         run_id = ""
         if runs is not None:
@@ -929,6 +936,8 @@ class WindowManager:
 
         v0.21.0：统一走 `dispatch_run()`；保留 `_manual_last` 供限速自动续跑。
         """
+        if self.route_mode in ("explicit", "auto"):
+            raise RuntimeError("Router 接管中：请用 /task 创建 WorkItem，不能直接派单")
         self._manual_last[window_id] = {"prompt": prompt, "attempts": 0}
         try:
             handle = self.dispatch_run(window_id=window_id, prompt=prompt,

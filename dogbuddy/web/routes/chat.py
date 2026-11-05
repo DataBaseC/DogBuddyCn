@@ -202,12 +202,19 @@ def router(svc, auth_deps) -> APIRouter:
         if not text:
             raise HTTPException(status_code=400, detail="text 不能为空")
         cid = _conv_id(body.conversation, body.sender)
-        # v0.23.0：Router 是唯一入口（内部先落 Trigger，再算 Fast Path）。
-        # 旧测试桩没有 router 时回退到纯 intake，保证兼容。
+        # v0.23.1：Router 是唯一入口（内部先落 Trigger，再算 Fast Path）。
+        # explicit/auto 且命中命令时直接返回，不再走旧管理员回合（避免双执行）。
         try:
             router = getattr(svc, "router", None)
             if router is not None:
-                router.route_web(conversation=cid, text=text, sender=cid)
+                decision = router.route_web(conversation=cid, text=text, sender=cid)
+                if decision and decision.get("handled"):
+                    return {"conversation": cid, "sender": cid,
+                            "reply": decision.get("reply", ""),
+                            "work_item_id": decision.get("work_item_id", ""),
+                            "run_id": decision.get("run_id", ""),
+                            "handled": True,
+                            "messages": svc.admin.history(cid, 100)}
             else:
                 intake = getattr(svc, "intake", None)
                 if intake is not None:

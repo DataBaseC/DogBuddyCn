@@ -222,6 +222,13 @@ class KernelStore:
                 "allowed_actions": allowed_actions or [], "budget": budget or {},
                 "actor_id": actor_id, "expires_at": expires_at, "status": "active"}
 
+    def get_active_mandate(self, work_item_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM mandates WHERE work_item_id=? AND status='active' "
+                "ORDER BY id DESC LIMIT 1", (work_item_id,)).fetchone()
+        return dict(row) if row else None
+
     def subscribe(self, *, work_item_id: str, thread_id: str,
                   created_by: str = "web") -> None:
         with self._lock:
