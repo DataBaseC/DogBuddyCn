@@ -215,6 +215,11 @@ def router(svc, auth_deps) -> APIRouter:
                             "run_id": decision.get("run_id", ""),
                             "handled": True,
                             "messages": svc.admin.history(cid, 100)}
+                if decision is None:
+                    # 未被 explicit 白名单接管的会话：仍然只记 Trigger，不丢影子数据。
+                    intake = getattr(svc, "intake", None)
+                    if intake is not None:
+                        intake.accept_web(conversation=cid, text=text, sender=cid)
             else:
                 intake = getattr(svc, "intake", None)
                 if intake is not None:
