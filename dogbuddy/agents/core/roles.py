@@ -356,7 +356,7 @@ BACKEND_TOOLS = list(WORKER_PROGRAMMER_TOOLS)
 #: 审查员：只读（无 write/edit/checkpoint）
 REVIEWER_TOOLS = [
     # v0.24.0：硬只读——没有 shell / write / memory_write / todo 写。
-    "read_file", "glob", "grep", "web_fetch", "run_status",
+    "read_file", "glob", "grep", "web_fetch", "run_status", "run_tests",
     "window_memory_read", "project_memory_read",
     "ask_user", "notify_owner", "read_resource",
 ]

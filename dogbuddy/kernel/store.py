@@ -289,6 +289,17 @@ class KernelStore:
             rows = self._conn.execute(q, args).fetchall()
         return [dict(r) for r in rows]
 
+    def count_reviews_for_work_item(self, work_item_id: str,
+                                    status: str = "") -> int:
+        q = "SELECT COUNT(*) FROM review_requests WHERE work_item_id=?"
+        args: list[Any] = [work_item_id]
+        if status:
+            q += " AND status=?"
+            args.append(status)
+        with self._lock:
+            row = self._conn.execute(q, args).fetchone()
+        return int(row[0] if row else 0)
+
     def count_reviews(self, status: str = "") -> int:
         q = "SELECT COUNT(*) FROM review_requests"
         args: tuple = ()

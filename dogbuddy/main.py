@@ -176,7 +176,8 @@ class DogBuddyApp:
             approval_config=lambda k, d=None: self.config_svc.get(k, d),
             mcp_bridge=self.mcp,
             queue_store=self.kernel_store,
-            route_mode=str(getattr(config.kernel, "route", "off") or "off"))
+            route_mode=str(getattr(config.kernel, "route", "off") or "off"),
+            review_test_commands=list(getattr(config.review, "test_commands", []) or []))
         # Router 在 WindowManager 之前构造（需要 store/intake），这里补执行器。
         self.kernel_router.windows = self.windows
         self.sessions = SessionManager(self.windows, self.db)
@@ -221,7 +222,8 @@ class DogBuddyApp:
             mode=str(getattr(config.review, "mode", "off") or "off"),
             window_id=str(getattr(config.review, "window_id", "") or ""),
             reviewer_model=str(getattr(config.review, "reviewer_model", "") or ""),
-            db=self.db)
+            db=self.db,
+            max_rework=int(getattr(config.review, "max_rework", 1) or 0))
         # 启动清理：上个进程遗留的 running/paused 标成 interrupted
         # （否则重启/自升级后界面上会挂着永远"运行中"的僵尸行）
         interrupted = 0

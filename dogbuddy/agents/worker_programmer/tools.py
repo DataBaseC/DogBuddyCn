@@ -14,7 +14,8 @@ def build_worker_registry(role: str | RoleSpec = "worker_programmer",
                           jobs: any = None, run_job_now: any = None,
                           coordinator: any = None,
                           skills_root: str = "",
-                          resources: any = None) -> ToolRegistry:
+                          resources: any = None,
+                          review_tests: list[str] | None = None) -> ToolRegistry:
     spec = role if isinstance(role, RoleSpec) else get_role(role)
     if spec is None:
         spec = get_role("worker_programmer")
@@ -26,10 +27,13 @@ def build_worker_registry(role: str | RoleSpec = "worker_programmer",
     # v0.18.0：临时 skill（只对 ctx.window_id 生效）。注册在这里而不是
     # build_registry，是为了让管理员/能力页也能看到工具，但只有员工角色
     # 的 tool_names 会真正把它发给模型。
-    from ...tools import resource_ops, skill_ops
+    from ...tools import resource_ops, review_ops, skill_ops
     for t in skill_ops.all_tools(skills_root):
         registry.register(t)
     for t in resource_ops.all_tools(resources):
+        registry.register(t)
+    # v0.25.0：审查员的受控测试命令（白名单之外一律拒绝）
+    for t in review_ops.all_tools(review_tests):
         registry.register(t)
     # tool set is enforced at schema level (AgentLoop filters by spec.tool_names);
     # the registry itself stays complete so explore_subagent can rebuild subsets.

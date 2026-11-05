@@ -145,6 +145,10 @@ class ReviewConfig(BaseModel):
     mode: str = "off"
     window_id: str = ""
     reviewer_model: str = ""
+    #: 只允许这些命令；run_tests 不接受任意 shell
+    test_commands: list[str] = []
+    #: enforce 模式下同一 WorkItem 最多自动返工次数
+    max_rework: int = 1
 
 
 class AppConfig(BaseModel):

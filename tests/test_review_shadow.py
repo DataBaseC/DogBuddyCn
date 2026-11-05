@@ -1,4 +1,4 @@
-# DogBuddyCn — AI review shadow (0.24.0)
+# DogBuddyCn — AI review shadow/enforce (0.24.0/0.25.0)
 # Copyright (C) DogBuddyCn contributors — AGPL-3.0
 from __future__ import annotations
 
@@ -16,20 +16,24 @@ from dogbuddy.events.bus import Event  # noqa: E402
 from dogbuddy.kernel import KernelStore  # noqa: E402
 from dogbuddy.kernel.domain import RunHandle  # noqa: E402
 from dogbuddy.services.review_service import ReviewService, parse_verdict  # noqa: E402
+from dogbuddy.tools.registry import ToolContext  # noqa: E402
+from dogbuddy.tools.review_ops import RunTestsTool  # noqa: E402
 
 
 class FakeWindows:
     def __init__(self):
         self.calls = []
-        self.w = SimpleNamespace(id="reviewer", name="审", role="worker_reviewer",
-                                 status="idle")
+        self.reviewer = SimpleNamespace(id="reviewer", name="审", role="worker_reviewer",
+                                        status="idle")
+        self.worker = SimpleNamespace(id="w1", name="写", role="worker_programmer",
+                                      status="idle")
 
     def get(self, wid):
-        return self.w if wid == "reviewer" else None
+        return {"reviewer": self.reviewer, "w1": self.worker}.get(wid)
 
     def dispatch_run(self, **kw):
         self.calls.append(kw)
-        return RunHandle(run_id="r-review", work_item_id=kw.get("work_item_id", ""))
+        return RunHandle(run_id=f"r{len(self.calls)}", work_item_id=kw.get("work_item_id", ""))
 
 
 def _stack(tmp_path):
@@ -37,7 +41,8 @@ def _stack(tmp_path):
     store = KernelStore(db)
     thread = store.ensure_thread(source="web", external_id="c1")
     wi = store.create_work_item(thread_id=thread["id"], title="改登录",
-                                origin="router", review_required=True)
+                                origin="router", review_required=True,
+                                window_id="w1")
     store.create_mandate(work_item_id=wi["id"], scope="workspace",
                          allowed_actions=["read", "write", "exec"])
     return db, store, wi
@@ -65,7 +70,6 @@ def test_shadow_request_without_reviewer_waits_human(tmp_path):
     req = store.get_review_by_source_run("r1")
     assert req["status"] == "waiting_human"
     assert store.get_work_item(wi["id"])["review_status"] == "waiting_human"
-    # replayed terminal event must not create a second request
     _run(svc.on_run_finished(Event("run.finished", {
         "id": "r1", "kind": "router", "status": "done",
         "work_item_id": wi["id"]})))
@@ -82,33 +86,90 @@ def test_shadow_dispatches_reviewer_when_configured(tmp_path):
         "id": "r1", "kind": "router", "status": "done",
         "work_item_id": wi["id"], "parent_run_id": "", "summary": "done"})))
     req = store.get_review_by_source_run("r1")
-    assert req["status"] == "running" and req["reviewer_run_id"] == "r-review"
+    assert req["status"] == "running" and req["reviewer_run_id"]
     assert fw.calls and fw.calls[0]["origin"] == "review"
     db.close()
 
 
-def test_review_fail_findings_and_parse_rules(tmp_path):
+def test_shadow_fail_only_records_not_rework(tmp_path):
     db, store, wi = _stack(tmp_path)
-    svc = ReviewService(store, None, None, mode="shadow", db=db)
+    fw = FakeWindows()
+    svc = ReviewService(store, fw, None, mode="shadow", db=db)
     req, _ = store.create_review_request(work_item_id=wi["id"], run_id="r1")
     store.update_review_request(req["id"], reviewer_run_id="rr1")
-    body = json.dumps({
-        "verdict": "FAIL", "summary": "缺测试",
-        "findings": [{"severity": "blocking", "file": "a.py", "line": 3,
-                      "issue": "没关子进程", "why": "泄漏"}]})
+    body = json.dumps({"verdict": "FAIL", "summary": "缺测试",
+                       "findings": [{"severity": "blocking", "file": "a.py",
+                                     "issue": "没关子进程"}]})
     _run(svc.on_run_finished(Event("run.finished", {
         "id": "rr1", "kind": "review", "status": "done", "summary": body})))
-    got = store.get_review_request(req["id"])
-    assert got["status"] == "failed" and got["verdict"] == "FAIL"
-    assert store.get_work_item(wi["id"])["review_status"] == "failed"
-    assert parse_verdict('{"verdict":"FAIL"}') is None       # 无证据不算 FAIL
-    assert parse_verdict('noise {"verdict":"PASS","summary":"ok"}')["verdict"] == "PASS"
+    assert store.get_review_request(req["id"])["status"] == "failed"
+    assert store.get_work_item(wi["id"])["status"] == "working"
+    assert not fw.calls
     db.close()
+
+
+def test_enforce_pass_marks_done(tmp_path):
+    db, store, wi = _stack(tmp_path)
+    svc = ReviewService(store, FakeWindows(), None, mode="enforce", db=db)
+    req, _ = store.create_review_request(work_item_id=wi["id"], run_id="r1")
+    store.update_review_request(req["id"], reviewer_run_id="rr1")
+    _run(svc.on_run_finished(Event("run.finished", {
+        "id": "rr1", "kind": "review", "status": "done",
+        "summary": json.dumps({"verdict": "PASS", "summary": "ok"})})))
+    got = store.get_work_item(wi["id"])
+    assert got["status"] == "done" and got["review_status"] == "passed"
+    db.close()
+
+
+def test_enforce_fail_dispatches_one_rework_then_human(tmp_path):
+    db, store, wi = _stack(tmp_path)
+    fw = FakeWindows()
+    svc = ReviewService(store, fw, None, mode="enforce", db=db, max_rework=1)
+    body = json.dumps({"verdict": "FAIL", "summary": "缺测试",
+                       "findings": [{"severity": "blocking", "file": "a.py",
+                                     "line": 3, "issue": "没关子进程"}]})
+    # first failure: dispatch one rework to the original worker
+    req, _ = store.create_review_request(work_item_id=wi["id"], run_id="r1")
+    store.update_review_request(req["id"], reviewer_run_id="rr1")
+    _run(svc.on_run_finished(Event("run.finished", {
+        "id": "rr1", "kind": "review", "status": "done", "summary": body})))
+    calls = [c for c in fw.calls if c["origin"] == "rework"]
+    assert len(calls) == 1 and calls[0]["window_id"] == "w1"
+    got = store.get_work_item(wi["id"])
+    assert got["status"] == "working" and got["review_status"] == "changes_requested"
+
+    # second failure: max_rework=1 exhausted -> human, no second rework
+    req2, _ = store.create_review_request(work_item_id=wi["id"], run_id="r2")
+    store.update_review_request(req2["id"], reviewer_run_id="rr2")
+    _run(svc.on_run_finished(Event("run.finished", {
+        "id": "rr2", "kind": "review", "status": "done", "summary": body})))
+    assert len([c for c in fw.calls if c["origin"] == "rework"]) == 1
+    assert store.get_work_item(wi["id"])["status"] == "waiting_human"
+    db.close()
+
+
+def test_review_fail_parse_rules():
+    assert parse_verdict('{"verdict":"FAIL"}') is None
+    assert parse_verdict(
+        '{"verdict":"PASS","findings":[{"severity":"blocking"}]}') is None
+    assert parse_verdict('noise {"verdict":"PASS","summary":"ok"}')["verdict"] == "PASS"
 
 
 def test_reviewer_is_hard_read_only():
     tools = set(get_role("worker_reviewer").tool_names)
     assert not (tools & {"shell", "write_file", "edit_file",
                          "window_memory_write", "checkpoint_create"})
-    assert "read_file" in tools and "read_resource" in tools
+    assert {"read_file", "read_resource", "run_tests"} <= tools
     assert get_role("worker_reviewer").default_mode == "PLAN"
+
+
+def test_run_tests_only_allowlisted(tmp_path):
+    allowed = "python -c \"print('ok')\""
+    tool = RunTestsTool([allowed])
+    ctx = ToolContext(window_id="reviewer", workspace=str(tmp_path), mode="PLAN")
+    ok = _run(tool.execute({"command": allowed}, ctx))
+    assert ok.ok and "ok" in ok.output and ok.data["exit_code"] == 0
+    bad = _run(tool.execute({"command": "rm -rf /"}, ctx))
+    assert not bad.ok and "白名单" in bad.output
+    empty = _run(RunTestsTool().execute({}, ctx))
+    assert not empty.ok and "未配置" in empty.output

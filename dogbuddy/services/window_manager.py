@@ -138,6 +138,7 @@ class WindowManager:
         mcp_bridge: Any = None,
         queue_store: Any = None,
         route_mode: str = "off",
+        review_test_commands: list[str] | None = None,
     ):
         self.db = db
         self.llm_factory = llm_factory
@@ -162,6 +163,7 @@ class WindowManager:
         #: v0.19.0：持久 task_queue（None = 纯内存，测试/旧部署）
         self.queue_store = queue_store
         self.route_mode = str(route_mode or "off").lower()
+        self.review_test_commands = [str(x) for x in (review_test_commands or [])]
         self.checkpoints_dir = str(checkpoints_dir)
         # T8.1：自助排期工具需要 JobStore + "立即执行"入口。
         # 由 main 在 JobManager 建好后 setattr 注入（窗口在 start() 才 boot，时序安全）。
@@ -257,7 +259,9 @@ class WindowManager:
                                          # v0.18.0：员工临时 skill（只写本工位域）
                                          skills_root=self.skills_root,
                                          # v0.20.0：压缩归档资源读取
-                                         resources=self.queue_store)
+                                         resources=self.queue_store,
+                                         # v0.25.0：reviewer 受控测试命令
+                                         review_tests=self.review_test_commands)
         # T9.3：主管工位额外装上"项目级管理工具"（system 级永远不给）。
         # 装配只是"少给"，真正的越权拦截在 PermissionGate.check_scope（fail-closed）。
         #

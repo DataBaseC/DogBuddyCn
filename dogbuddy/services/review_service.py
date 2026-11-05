@@ -37,6 +37,10 @@ def parse_verdict(text: str) -> dict[str, Any] | None:
         if verdict == "FAIL" and not findings:
             # FAIL without evidence is not actionable; treat as malformed.
             continue
+        if verdict == "PASS" and any(
+                str(f.get("severity") or "").lower() == "blocking"
+                for f in findings if isinstance(f, dict)):
+            continue
         obj["verdict"] = verdict
         obj["findings"] = findings
         return obj
@@ -46,11 +50,13 @@ def parse_verdict(text: str) -> dict[str, Any] | None:
 class ReviewService:
     def __init__(self, store: Any, windows: Any, bus: Any,
                  mode: str = "off", window_id: str = "",
-                 reviewer_model: str = "", db: Any = None):
+                 reviewer_model: str = "", db: Any = None,
+                 max_rework: int = 1):
         self.store = store
         self.windows = windows
         self.bus = bus
         self.db = db
+        self.max_rework = max(0, int(max_rework))
         self.mode = str(mode or "off").lower()
         self.window_id = str(window_id or "")
         self.reviewer_model = str(reviewer_model or "")
@@ -132,7 +138,10 @@ class ReviewService:
                 req["id"], status="error", verdict="",
                 summary=str(p.get("summary") or "")[:2000],
                 finished_at=str(p.get("finished_at") or ""))
-            self.store.update_work_item(req["work_item_id"], review_status="error")
+            fields = {"review_status": "error"}
+            if self.mode == "enforce":
+                fields["status"] = "waiting_human"
+            self.store.update_work_item(req["work_item_id"], **fields)
             self._audit(f"review parse error: {req['id']} run={run_id}")
             return
         verdict = parsed["verdict"]
@@ -144,18 +153,67 @@ class ReviewService:
             findings_json=json.dumps(findings, ensure_ascii=False)[:50_000],
             finished_at=str(p.get("finished_at") or ""))
         self.store.add_review_findings(req["id"], findings)
-        # Shadow: only review_status changes; delivery status stays untouched.
-        self.store.update_work_item(req["work_item_id"], review_status=status)
+        if self.mode == "shadow":
+            # Shadow: only review_status changes; delivery status stays untouched.
+            self.store.update_work_item(req["work_item_id"], review_status=status)
+        elif verdict == "PASS":
+            self.store.update_work_item(req["work_item_id"],
+                                        review_status="passed", status="done")
+        else:
+            self.store.update_work_item(req["work_item_id"], review_status="failed")
+            self._rework(req, findings)
         self._audit(f"review {status}: {req['id']} run={run_id}")
         self._emit("review.finished", {"review_id": req["id"], "verdict": verdict,
                                        "work_item_id": req["work_item_id"]})
+
+    def _rework(self, req: dict[str, Any], findings: list[dict[str, Any]]) -> None:
+        """enforce: FAIL → changes_requested + one bounded rework run."""
+        wid = str(req.get("work_item_id") or "")
+        wi = self.store.get_work_item(wid)
+        if wi is None:
+            return
+        failures = self.store.count_reviews_for_work_item(wid, "failed")
+        if failures > self.max_rework:
+            self.store.update_work_item(wid, status="waiting_human")
+            self._audit(f"review rework exhausted: {wid} failures={failures}")
+            return
+        window_id = str(wi.get("window_id") or "")
+        if not window_id or self.windows is None or self.windows.get(window_id) is None:
+            self.store.update_work_item(wid, status="waiting_human")
+            self._audit(f"review rework has no worker: {wid}")
+            return
+        lines = ["Reviewer 打回了这个任务，请修复后重新跑测试，不要新建任务。",
+                 f"WorkItem: {wid}", f"任务: {wi.get('description')}",
+                 "Blocking findings:"]
+        for f in findings:
+            if str(f.get("severity") or "").lower() != "blocking":
+                continue
+            lines.append(f"- {f.get('file') or f.get('path') or '?'}:"
+                         f"{f.get('line') or '?'} {f.get('issue') or f.get('message') or ''}"
+                         f"（{f.get('why') or f.get('evidence') or ''}）")
+        try:
+            handle = self.windows.dispatch_run(
+                window_id=window_id, prompt="\n".join(lines), origin="rework",
+                kind="prompt", urgent=True, sender="reviewer", work_item_id=wid)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("rework dispatch failed", exc_info=True)
+            self.store.update_work_item(wid, status="waiting_human")
+            self._audit(f"review rework dispatch failed: {wid}: {e}")
+            return
+        self.store.update_work_item(
+            wid, status="working", review_status="changes_requested",
+            current_run_id=handle.run_id)
+        self._audit(f"review rework dispatched: {wid} run={handle.run_id}")
 
     def _waiting(self, review_id: str, reason: str) -> None:
         self.store.update_review_request(
             review_id, status="waiting_human", summary=reason)
         req = self.store.get_review_request(review_id)
         if req:
-            self.store.update_work_item(req["work_item_id"], review_status="waiting_human")
+            fields = {"review_status": "waiting_human"}
+            if self.mode == "enforce":
+                fields["status"] = "waiting_human"
+            self.store.update_work_item(req["work_item_id"], **fields)
         self._audit(f"review waiting human: {review_id}: {reason}")
 
     def _review_prompt(self, wi: dict[str, Any], p: dict[str, Any]) -> str:
