@@ -359,12 +359,8 @@ class AdminService:
             return await self._run_turn(text, sender)
 
     async def _run_turn(self, text: str, sender: str) -> str:
-        # v0.19.0：Shadow intake —— 只写 Trigger/Thread，失败绝不影响旧路径。
-        if self.intake is not None and sender != "system":
-            try:
-                self.intake.accept_web(conversation=sender, text=text, sender=sender)
-            except Exception:  # noqa: BLE001
-                logger.warning("shadow intake failed", exc_info=True)
+        # v0.23.0：ingress 由 Web Router 统一记录，AdminService 不再重复 intake；
+        # 直接调用本服务的旧路径（测试/内部）仍可正常工作。
         role_spec = get_role("admin")
         session = self.session_for(sender)
         # v9：对话首条消息自动成为标题；同时刷新"最近活动时间"

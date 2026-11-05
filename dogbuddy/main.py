@@ -25,6 +25,7 @@ from .db import Database
 from .events.bus import CONFIRM_REQUEST, WORKER_QUESTION, Event, EventBus
 from .kernel import KernelStore
 from .kernel.intake import ShadowIntake
+from .kernel.router import KernelRouter
 from .external.mcp_bridge import McpBridge
 from .gateway.adapters.onebot_v11 import OneBotV11Adapter
 from .gateway.router import Router
@@ -115,6 +116,9 @@ class DogBuddyApp:
             self.kernel_store,
             enabled=bool(self.kernel_store is not None
                          and getattr(config.kernel, "shadow", True)))
+        self.router = KernelRouter(
+            self.kernel_store, self.intake,
+            mode=str(getattr(config.kernel, "route", "off") or "off"))
         self.panel = self._build_panel()
         # T8.7：退避记忆落盘位置（每 profile "上次退避多久才成功"）
         from .llm.retry import RetryMemory
@@ -332,7 +336,7 @@ class DogBuddyApp:
             # v0.15.0：运营站点（/news 静态站与 /api/news/status）
             news=self.news, site_dir=str(self.news.site_dir),
             # v0.19.0：任务内核状态（/healthz.kernel）+ Web 入口 shadow
-            kernel=self.kernel_store, intake=self.intake,
+            kernel=self.kernel_store, intake=self.intake, router=self.router,
             # v0.20.0：进展 Watchdog（/healthz.watchdog）
             watchdog=self.watchdog,
             rate_limit_status=lambda: dict(self._rate_limit),

@@ -29,6 +29,21 @@ class RunRequest:
 
 
 @dataclass
+class RouterDecision:
+    """Structured Router output. Router never executes tools directly."""
+    action: str = "chat"            # chat|create|resume|ask|ignore|cancel|status
+    reason: str = ""
+    work_item_id: str = ""
+    window_id: str = ""
+    project_id: str = ""
+    title: str = ""
+    prompt: str = ""
+    mandate_scope: str = ""
+    allowed_actions: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+
+
+@dataclass
 class RunHandle:
     run_id: str
     work_item_id: str = ""

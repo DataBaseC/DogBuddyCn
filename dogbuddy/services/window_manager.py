@@ -794,6 +794,8 @@ class WindowManager:
             return
         status = _run_status(result)
         payload = {
+            "run_id": str((getattr(task, "meta", None) or {}).get("run_id") or ""),
+            "work_item_id": str(getattr(task, "work_item_id", "") or ""),
             "window_id": w.id,
             "window_name": w.name,
             "status": status,

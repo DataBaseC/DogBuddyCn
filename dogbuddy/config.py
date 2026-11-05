@@ -133,6 +133,9 @@ class KernelConfig(BaseModel):
     """任务内核开关（v0.19.0）。shadow=True 只记录，不接管执行。"""
     enabled: bool = True
     shadow: bool = True
+    #: v0.23.0：off | shadow | explicit | auto。0.23.x 只实现 off/shadow，
+    #: explicit/auto 仍按 shadow 记录，等后续版本接管。
+    route: str = "off"
 
 
 class AppConfig(BaseModel):

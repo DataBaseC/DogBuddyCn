@@ -97,8 +97,9 @@ def test_shadow_intake_dedupes_same_second(tmp_path):
     a = intake.accept_web(conversation="c1", text="同一句", sender="u1")
     b = intake.accept_web(conversation="c1", text="同一句", sender="u1")
     assert a["created"] is True and b["created"] is False
-    assert a.get("work_item_id"), "shadow 也必须落 WorkItem/Mandate"
-    assert store.health()["triggers"] == 1 and store.health()["work_items"] == 1
+    # v0.23.0：intake 只记 Trigger；聊天不再自动建 WorkItem（Route 决定）。
+    assert not a.get("work_item_id")
+    assert store.health()["triggers"] == 1 and store.health()["work_items"] == 0
     db.close()
 
 

@@ -39,16 +39,7 @@ class ShadowIntake:
             payload={"text": body[:8000], "sender": sender},
             dedupe_key=dedupe, status="candidate")
         trigger["created"] = created
-        if created:
-            # Shadow 语义：只建对象，不改变旧路径执行。下一阶段 Router 可直接复用。
-            wi = self.store.create_work_item(
-                thread_id=str(thread.get("id") or ""), title=body[:80],
-                description=body, created_by=sender)
-            self.store.create_mandate(
-                work_item_id=str(wi.get("id") or ""), scope="web",
-                allowed_actions=["reply"], actor_id=sender)
-            self.store.subscribe(work_item_id=str(wi.get("id") or ""),
-                                 thread_id=str(thread.get("id") or ""),
-                                 created_by=sender)
-            trigger["work_item_id"] = wi.get("id")
+        # v0.23.0：这里只记 Trigger/Thread。是否创建 WorkItem 交给 Router
+        # 的 Fast Path 决定——以前每条聊天都建 WorkItem，接管后会把历史闲聊
+        # 误认成“待恢复任务”。
         return trigger

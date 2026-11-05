@@ -202,11 +202,16 @@ def router(svc, auth_deps) -> APIRouter:
         if not text:
             raise HTTPException(status_code=400, detail="text 不能为空")
         cid = _conv_id(body.conversation, body.sender)
-        # v0.19.0：入口先做 shadow 记录（即使 LLM 未配置，Trigger 也不丢）。
+        # v0.23.0：Router 是唯一入口（内部先落 Trigger，再算 Fast Path）。
+        # 旧测试桩没有 router 时回退到纯 intake，保证兼容。
         try:
-            intake = getattr(svc, "intake", None)
-            if intake is not None:
-                intake.accept_web(conversation=cid, text=text, sender=cid)
+            router = getattr(svc, "router", None)
+            if router is not None:
+                router.route_web(conversation=cid, text=text, sender=cid)
+            else:
+                intake = getattr(svc, "intake", None)
+                if intake is not None:
+                    intake.accept_web(conversation=cid, text=text, sender=cid)
         except Exception:  # noqa: BLE001 — 影子记录失败绝不影响对话
             pass
         if not _llm_ready():

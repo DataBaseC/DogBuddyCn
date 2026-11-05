@@ -40,6 +40,7 @@ web:
 kernel:
   enabled: true                    # 持久队列/Outbox/Shadow 内核
   shadow: true                     # 只记录 Trigger，不接管执行（可回滚）
+  route: "off"                     # off|shadow|explicit|auto；0.23.x 只有 off/shadow 生效
 
 panel:                             # AegisServerPanel integration (never modified)
   enabled: true

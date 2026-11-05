@@ -50,7 +50,7 @@ Handler = Callable[[Event], Awaitable[None] | None]
 #: 不可丢的事件：终态/汇报/提问/审批。入队前先写 outbox；消费成功再 ack。
 DURABLE_TOPICS = frozenset({
     JOB_COMPLETED, JOB_FAILED, JOB_QUIET, RATE_LIMIT_PAUSED,
-    WORKER_QUESTION, CONFIRM_REQUEST, "window.run_finished",
+    WORKER_QUESTION, CONFIRM_REQUEST, "window.run_finished", "run.finished",
     "supervisor.digest", "worker.report", "supervisor.command",
 })
 

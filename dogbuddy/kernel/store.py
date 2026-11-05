@@ -102,16 +102,19 @@ class KernelStore:
     # ----------------------------------------------------------- work items
     def create_work_item(self, *, thread_id: str, title: str, description: str = "",
                          project_id: str = "", window_id: str = "",
-                         created_by: str = "web") -> dict[str, Any]:
+                         created_by: str = "web", origin: str = "router",
+                         review_required: bool = False) -> dict[str, Any]:
         now = _now_iso()
         wid = f"wi-{new_id()[:10]}"
         with self._lock:
             self._conn.execute(
                 "INSERT INTO work_items(id,thread_id,title,description,status,"
                 "project_id,window_id,current_run_id,created_by,created_at,"
-                "updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "updated_at,origin,review_required,review_status) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (wid, thread_id, title[:200], description[:4000], "open",
-                 project_id, window_id, "", created_by, now, now))
+                 project_id, window_id, "", created_by, now, now,
+                 origin[:20], 1 if review_required else 0, ""))
             self._conn.commit()
         return self.get_work_item(wid) or {}
 
@@ -121,12 +124,84 @@ class KernelStore:
                 "SELECT * FROM work_items WHERE id=?", (work_item_id,)).fetchone()
         return dict(row) if row else None
 
-    def list_work_items(self, limit: int = 50) -> list[dict[str, Any]]:
+    def list_work_items(self, limit: int = 50,
+                        origin: str = "") -> list[dict[str, Any]]:
+        q = "SELECT * FROM work_items"
+        args: list[Any] = []
+        if origin:
+            q += " WHERE origin=?"
+            args.append(origin)
+        q += " ORDER BY updated_at DESC LIMIT ?"
+        args.append(int(limit))
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM work_items ORDER BY updated_at DESC LIMIT ?",
-                (int(limit),)).fetchall()
+            rows = self._conn.execute(q, args).fetchall()
         return [dict(r) for r in rows]
+
+    def find_open_work_item(self, thread_id: str,
+                            include_shadow: bool = False) -> dict[str, Any] | None:
+        """Router 恢复任务时用；默认排除 Shadow 历史，避免误恢复聊天记录。"""
+        q = ("SELECT * FROM work_items WHERE thread_id=? AND "
+             "status IN ('open','working','waiting_human','changes_requested')")
+        args: list[Any] = [thread_id]
+        if not include_shadow:
+            q += " AND origin!='shadow'"
+        q += " ORDER BY updated_at DESC LIMIT 1"
+        with self._lock:
+            row = self._conn.execute(q, args).fetchone()
+        return dict(row) if row else None
+
+    def update_work_item(self, work_item_id: str, **fields: Any) -> dict[str, Any] | None:
+        allowed = {"status", "window_id", "project_id", "current_run_id",
+                   "review_required", "review_status", "origin", "title",
+                   "description"}
+        sets = [(k, v) for k, v in fields.items() if k in allowed]
+        if not sets:
+            return self.get_work_item(work_item_id)
+        sets.append(("updated_at", _now_iso()))
+        sql = "UPDATE work_items SET " + ",".join(f"{k}=?" for k, _ in sets) + " WHERE id=?"
+        with self._lock:
+            self._conn.execute(sql, [v for _, v in sets] + [work_item_id])
+            self._conn.commit()
+        return self.get_work_item(work_item_id)
+
+    # ------------------------------------------------------- router decisions
+    def record_router_decision(self, *, trigger_id: str, thread_id: str,
+                               action: str, decision: dict[str, Any],
+                               reason: str = "", work_item_id: str = "",
+                               window_id: str = "", model: str = ""
+                               ) -> tuple[dict[str, Any], bool]:
+        """Idempotent by trigger_id. Returns (decision, created)."""
+        now = _now_iso()
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT * FROM router_decisions WHERE trigger_id=?",
+                (trigger_id,)).fetchone()
+            if existing is not None:
+                return dict(existing), False
+            rid = f"rd-{new_id()[:10]}"
+            self._conn.execute(
+                "INSERT INTO router_decisions(id,trigger_id,thread_id,action,"
+                "work_item_id,window_id,decision_json,reason,model,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (rid, trigger_id, thread_id, action, work_item_id, window_id,
+                 _json(decision), reason[:1000], model, now))
+            self._conn.commit()
+        return {"id": rid, "trigger_id": trigger_id, "thread_id": thread_id,
+                "action": action, "work_item_id": work_item_id,
+                "window_id": window_id, "decision_json": _json(decision),
+                "reason": reason[:1000], "model": model, "created_at": now}, True
+
+    def get_router_decision(self, trigger_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM router_decisions WHERE trigger_id=?",
+                (trigger_id,)).fetchone()
+        return dict(row) if row else None
+
+    def count_router_decisions(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM router_decisions").fetchone()
+        return int(row[0] if row else 0)
 
     # -------------------------------------------------------------- mandates
     def create_mandate(self, *, work_item_id: str, scope: str = "web",
@@ -330,4 +405,5 @@ class KernelStore:
                 "work_items": len(self.list_work_items(limit=1000)),
                 "queued_tasks": self.count_queued(),
                 "outbox_pending": self.count_pending_outbox(),
-                "resources": self.count_resources()}
+                "resources": self.count_resources(),
+                "router_decisions": self.count_router_decisions()}

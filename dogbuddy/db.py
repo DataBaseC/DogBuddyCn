@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -798,6 +798,50 @@ def _migrate_v25(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v26(conn: sqlite3.Connection) -> None:
+    """Router 观测层（2026-11-05，0.23.0）。
+
+    只记录 Fast Path 决策，不接管旧执行路径。历史 WorkItem 全是 Shadow
+    产生的，统一标成 origin='shadow'，避免 Router 接管时被误认为待恢复任务。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS router_decisions(
+      id TEXT PRIMARY KEY,
+      trigger_id TEXT UNIQUE,
+      thread_id TEXT DEFAULT '',
+      action TEXT DEFAULT '',
+      work_item_id TEXT DEFAULT '',
+      window_id TEXT DEFAULT '',
+      decision_json TEXT DEFAULT '',
+      reason TEXT DEFAULT '',
+      model TEXT DEFAULT '',
+      created_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_router_created
+      ON router_decisions(created_at);
+    CREATE INDEX IF NOT EXISTS ix_router_action
+      ON router_decisions(action, created_at);
+    """)
+    for table, columns in (
+        ("work_items", (("origin", "TEXT DEFAULT 'legacy'"),
+                        ("review_required", "INTEGER DEFAULT 0"),
+                        ("review_status", "TEXT DEFAULT ''"))),
+        ("runs", (("reviewed_run_id", "TEXT DEFAULT ''"),)),
+    ):
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, decl in columns:
+            if name not in existing:
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                except sqlite3.OperationalError:
+                    pass
+    try:
+        conn.execute("UPDATE work_items SET origin='shadow' WHERE origin='legacy'")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -827,6 +871,7 @@ _MIGRATIONS: dict[int, Any] = {
     23: _migrate_v23,
     24: _migrate_v24,
     25: _migrate_v25,
+    26: _migrate_v26,
 }
 
 
