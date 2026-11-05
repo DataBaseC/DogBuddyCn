@@ -116,7 +116,8 @@ class DogBuddyApp:
             self.kernel_store,
             enabled=bool(self.kernel_store is not None
                          and getattr(config.kernel, "shadow", True)))
-        self.router = KernelRouter(
+        # 注意：`self.router` 是网关 Router（QQ），这里用独立名字，避免被后面重置。
+        self.kernel_router = KernelRouter(
             self.kernel_store, self.intake,
             mode=str(getattr(config.kernel, "route", "off") or "off"))
         self.panel = self._build_panel()
@@ -336,7 +337,7 @@ class DogBuddyApp:
             # v0.15.0：运营站点（/news 静态站与 /api/news/status）
             news=self.news, site_dir=str(self.news.site_dir),
             # v0.19.0：任务内核状态（/healthz.kernel）+ Web 入口 shadow
-            kernel=self.kernel_store, intake=self.intake, router=self.router,
+            kernel=self.kernel_store, intake=self.intake, router=self.kernel_router,
             # v0.20.0：进展 Watchdog（/healthz.watchdog）
             watchdog=self.watchdog,
             rate_limit_status=lambda: dict(self._rate_limit),

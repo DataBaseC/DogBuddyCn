@@ -46,6 +46,13 @@ def _app(tmp_path, monkeypatch, configured: bool = True) -> DogBuddyApp:
     return app
 
 
+def test_kernel_router_is_wired_into_web(tmp_path, monkeypatch):
+    """`self.router` 是网关 Router；KernelRouter 必须用独立字段注入 Web。"""
+    app = _app(tmp_path, monkeypatch)
+    assert app.kernel_router is not None
+    assert app.web_services.router is app.kernel_router
+
+
 def test_chat_requires_auth(tmp_path, monkeypatch):
     app = _app(tmp_path, monkeypatch)
     with TestClient(app.web_app) as client:
