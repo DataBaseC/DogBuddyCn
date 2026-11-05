@@ -2577,3 +2577,26 @@ M2：只对明确命令真正执行；普通聊天仍走旧管理员路径。
 服务器全量：**1030 passed / 2 skipped**（新增 5 条 Review 测试）。
 仍未做：enforce（FAIL 阻断/返工）、受限 run_tests、自然语言路由、缓存诊断。
 
+---
+
+## 71. Review enforce + 受限 run_tests（2026-11-05，`0.25.0`）
+
+Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow。
+
+- 新工具 `run_tests`：只执行 `review.test_commands` 白名单里的命令，
+  `shlex` 拆参数、`create_subprocess_exec` 不走 shell、env 白名单；
+  输出截尾 12k，超时上限 600s；未配置/越界一律失败。
+- reviewer 角色加入 `run_tests`，仍然没有 `shell/write/edit`。
+- `review.mode=enforce`：
+  - PASS → WorkItem `done`、`review_status=passed`；
+  - FAIL → `changes_requested`，把 blocking findings 回给原工位返工；
+  - 同一 WorkItem 最多 `review.max_rework` 次（默认 1），超过转
+    `waiting_human`，不无限返工；
+  - reviewer 缺失/超时/JSON 解析失败 → `waiting_human`，绝不默认 PASS；
+  - reviewer 的 FAIL 无 findings、PASS 带 blocking finding → 视为解析失败。
+- shadow 行为保持不变：只改 `review_status`，不阻断交付。
+- `review.test_commands` 默认空；先填例如 `["pytest -q"]` 再开 enforce。
+
+服务器全量：**1034 passed / 2 skipped**（新增 4 条 enforce/run_tests 测试）。
+仍未做：owner 人工放行入口、自然语言路由、缓存诊断。
+
