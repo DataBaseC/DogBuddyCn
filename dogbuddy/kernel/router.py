@@ -77,10 +77,12 @@ class KernelRouter:
         decision.window_id = str(result.get("window_id") or decision.window_id)
         body = dict(decision.__dict__)
         body["result"] = result
-        self.store.record_router_decision(
+        rec, _created = self.store.record_router_decision(
             trigger_id=trigger_id, thread_id=thread_id, action=result.get("action") or decision.action,
             decision=body, reason=result.get("reason") or decision.reason,
             work_item_id=decision.work_item_id, window_id=decision.window_id)
+        result["id"] = rec.get("id")
+        result["trigger_id"] = trigger_id
         return result
 
     def _existing_result(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -89,7 +91,8 @@ class KernelRouter:
         except (TypeError, ValueError, json.JSONDecodeError):
             data = {}
         result = data.get("result") if isinstance(data.get("result"), dict) else {}
-        return {**result, "handled": bool(result.get("handled")),
+        return {**result, "id": row.get("id"),
+                "handled": bool(result.get("handled")),
                 "action": row.get("action") or result.get("action", ""),
                 "duplicate": True}
 
@@ -111,7 +114,9 @@ class KernelRouter:
                                   prompt=prompt, title=prompt[:80],
                                   mandate_scope="workspace", confidence=1.0)
         if body.startswith("/continue"):
-            target = body[len("/continue"):].strip()
+            extra = body[len("/continue"):].strip()
+            # 只有显式 `wi-...` 才当 ID；否则 trailing 文本是追加说明。
+            target = extra if extra.startswith(("wi-", "rd-")) else ""
             wi = (self.store.get_work_item(target) if target
                   else self.store.find_open_work_item(thread_id, include_shadow=False))
             if wi is None or str(wi.get("origin") or "") == "shadow":
@@ -127,14 +132,16 @@ class KernelRouter:
     def _create_task(self, d: RouterDecision, thread_id: str,
                      sender: str) -> dict[str, Any]:
         w = self._select_window()
-        if w is None:
-            return {"handled": self.mode in ("explicit", "auto"), "action": "ask",
+        if w is None and self.mode != "shadow":
+            return {"handled": True, "action": "ask",
                     "reason": "no worker window available",
                     "reply": "没有可用的员工工位，请先在控制台创建或选择一个工位。"}
+        # Shadow 只记录候选：没有工位也保留 WorkItem，供后续接管前观察。
         wi = self.store.create_work_item(
             thread_id=thread_id, title=d.title or d.prompt[:80],
-            description=d.prompt, project_id=str(getattr(w, "project_id", "") or ""),
-            window_id=str(w.id), created_by=sender, origin="router")
+            description=d.prompt,
+            project_id=str(getattr(w, "project_id", "") or "") if w else "",
+            window_id=str(w.id) if w else "", created_by=sender, origin="router")
         wid = str(wi.get("id") or "")
         self.store.create_mandate(
             work_item_id=wid, scope=d.mandate_scope or "workspace",
@@ -142,7 +149,8 @@ class KernelRouter:
         self.store.subscribe(work_item_id=wid, thread_id=thread_id, created_by=sender)
         if self.mode == "shadow":
             return {"handled": False, "action": "create", "work_item_id": wid,
-                    "window_id": w.id, "reason": "shadow only"}
+                    "window_id": str(w.id) if w else "",
+                    "reason": "shadow only"}
         try:
             handle = self.windows.dispatch_run(
                 window_id=w.id, prompt=d.prompt, origin="router", kind="prompt",
