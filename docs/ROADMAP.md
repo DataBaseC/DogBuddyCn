@@ -2505,3 +2505,29 @@ owner：继续。目标是不再让 `GroupManager` 直接启动 `AgentLoop`，�
 服务器全量（不是本地）：**1012 passed / 2 skipped**（Linux 下 2 条平台跳过）。
 仍未收口：Router 真正接管路由。
 
+---
+
+## 68. Router Fast Path（Shadow，2026-11-05，`0.23.0`）
+
+按《下一步修改建议》的 M1 做**只记录、不接管**的一层，schema 26。
+
+- schema 26：`router_decisions` 表；`work_items` 增
+  `origin/review_required/review_status`；`runs` 增 `reviewed_run_id`。
+- 历史 WorkItem 全部标 `origin='shadow'`；Router 的 `/continue` 只恢复
+  `origin!='shadow'` 的开放任务，避免把历史闲聊当待恢复任务。
+- `ShadowIntake` 只记 Trigger/Thread，**不再每条聊天都建 WorkItem**；
+  WorkItem 由 Router 的 `/task` 决定。
+- 新增 `KernelRouter` Fast Path（不调 LLM）：
+  `/task` → create；`/continue` → resume；`/cancel` → cancel；
+  `/status` → status；其他 → chat；空消息 → ignore。
+- `router_decisions` 以 `trigger_id` 幂等；同一秒重复投递只一条 decision。
+- Web `chat.py` 只调用 Router（Router 内部 intake），AdminService 去掉重复 intake。
+- `kernel.route`：`off|shadow|explicit|auto`，默认 `off`；0.23.x 只有
+  `shadow` 生效，`explicit/auto` 仍按 shadow 记录。
+- 终态事实：`run.finished` 加入 Durable Topics；`window.run_finished` payload
+  补 `run_id/work_item_id`。
+- `/healthz.router` 暴露 `mode/decisions`。
+
+服务器全量：**1018 passed / 2 skipped**（新增 7 条 Router 测试）。
+仍未做：`/task` 真正 dispatch、Mandate 校验、Review 闭环、缓存诊断。
+
