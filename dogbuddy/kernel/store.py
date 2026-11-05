@@ -203,6 +203,102 @@ class KernelStore:
             row = self._conn.execute("SELECT COUNT(*) FROM router_decisions").fetchone()
         return int(row[0] if row else 0)
 
+    # --------------------------------------------------------------- reviews
+    def create_review_request(self, *, work_item_id: str, run_id: str,
+                              reviewer_window_id: str = "",
+                              status: str = "queued") -> tuple[dict[str, Any], bool]:
+        """Idempotent by run_id: a replayed run.finished never creates two reviews."""
+        now = _now_iso()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM review_requests WHERE run_id=?", (run_id,)).fetchone()
+            if row is not None:
+                return dict(row), False
+            rid = f"rv-{new_id()[:10]}"
+            self._conn.execute(
+                "INSERT INTO review_requests(id,work_item_id,run_id,status,"
+                "reviewer_window_id,created_at) VALUES(?,?,?,?,?,?)",
+                (rid, work_item_id, run_id, status, reviewer_window_id, now))
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM review_requests WHERE id=?", (rid,)).fetchone()
+        return dict(row), True
+
+    def get_review_request(self, review_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM review_requests WHERE id=?", (review_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_review_by_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM review_requests WHERE reviewer_run_id=? "
+                "ORDER BY created_at DESC LIMIT 1", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_review_by_source_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM review_requests WHERE run_id=?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_review_request(self, review_id: str, **fields: Any) -> dict[str, Any] | None:
+        allowed = {"status", "verdict", "reviewer_run_id", "reviewer_window_id",
+                   "reviewer_model", "attempt", "summary", "findings_json",
+                   "finished_at"}
+        sets = [(k, v) for k, v in fields.items() if k in allowed]
+        if not sets:
+            return self.get_review_request(review_id)
+        sql = "UPDATE review_requests SET " + ",".join(f"{k}=?" for k, _ in sets) \
+              + " WHERE id=?"
+        with self._lock:
+            self._conn.execute(sql, [v for _, v in sets] + [review_id])
+            self._conn.commit()
+        return self.get_review_request(review_id)
+
+    def add_review_findings(self, review_id: str,
+                            findings: list[dict[str, Any]]) -> None:
+        now = _now_iso()
+        with self._lock:
+            for f in findings:
+                try:
+                    line = int(f.get("line") or 0)
+                except (TypeError, ValueError):
+                    line = 0
+                self._conn.execute(
+                    "INSERT INTO review_findings(id,review_id,severity,path,line,"
+                    "message,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (f"rf-{new_id()[:10]}", review_id,
+                     str(f.get("severity") or "blocking")[:20],
+                     str(f.get("file") or f.get("path") or "")[:500], line,
+                     str(f.get("issue") or f.get("message") or "")[:2000],
+                     str(f.get("why") or f.get("evidence") or "")[:4000], now))
+            self._conn.commit()
+
+    def list_review_requests(self, limit: int = 50,
+                             status: str = "") -> list[dict[str, Any]]:
+        q = "SELECT * FROM review_requests"
+        args: list[Any] = []
+        if status:
+            q += " WHERE status=?"
+            args.append(status)
+        q += " ORDER BY created_at DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(q, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_reviews(self, status: str = "") -> int:
+        q = "SELECT COUNT(*) FROM review_requests"
+        args: tuple = ()
+        if status:
+            q += " WHERE status=?"
+            args = (status,)
+        with self._lock:
+            row = self._conn.execute(q, args).fetchone()
+        return int(row[0] if row else 0)
+
     # -------------------------------------------------------------- mandates
     def create_mandate(self, *, work_item_id: str, scope: str = "web",
                        allowed_actions: list[str] | None = None,
@@ -413,4 +509,6 @@ class KernelStore:
                 "queued_tasks": self.count_queued(),
                 "outbox_pending": self.count_pending_outbox(),
                 "resources": self.count_resources(),
-                "router_decisions": self.count_router_decisions()}
+                "router_decisions": self.count_router_decisions(),
+                "reviews": self.count_reviews(),
+                "reviews_waiting": self.count_reviews("waiting_human")}

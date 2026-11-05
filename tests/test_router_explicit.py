@@ -54,6 +54,7 @@ def test_explicit_task_dispatches_once_and_creates_mandate(tmp_path):
     assert r["handled"] and r["action"] == "create" and r["run_id"] == "r1"
     wi = store.get_work_item(r["work_item_id"])
     assert wi["origin"] == "router" and wi["status"] == "working"
+    assert int(wi["review_required"]) == 1
     assert store.get_active_mandate(wi["id"]) is not None
     assert fw.calls[0]["work_item_id"] == wi["id"]
     # 重复投递：不再次 dispatch

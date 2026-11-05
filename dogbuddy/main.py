@@ -43,6 +43,7 @@ from .services.cost_service import CostService
 from .services.news_service import NewsService
 from .services.operations_service import OperationsService
 from .services.watchdog import Watchdog
+from .services.review_service import ReviewService
 from .services.pipeline_service import PipelineService
 from .services.cv_adapter import CvAdapter
 from .services.qc_service import QcService
@@ -214,6 +215,13 @@ class DogBuddyApp:
         # v0.20.0：只读进展监控（告警，不自动杀任务）
         self.watchdog = Watchdog(self.runs, bus=self.bus, db=self.db,
                                  interval=60.0, stalled_after=300.0)
+        # v0.24.0：Review Shadow（不阻断交付；没有 reviewer 工位就 waiting_human）
+        self.review = ReviewService(
+            self.kernel_store, self.windows, self.bus,
+            mode=str(getattr(config.review, "mode", "off") or "off"),
+            window_id=str(getattr(config.review, "window_id", "") or ""),
+            reviewer_model=str(getattr(config.review, "reviewer_model", "") or ""),
+            db=self.db)
         # 启动清理：上个进程遗留的 running/paused 标成 interrupted
         # （否则重启/自升级后界面上会挂着永远"运行中"的僵尸行）
         interrupted = 0
@@ -345,6 +353,8 @@ class DogBuddyApp:
             kernel=self.kernel_store, intake=self.intake, router=self.kernel_router,
             # v0.20.0：进展 Watchdog（/healthz.watchdog）
             watchdog=self.watchdog,
+            # v0.24.0：Review Shadow（/healthz.review）
+            review=self.review,
             rate_limit_status=lambda: dict(self._rate_limit),
             on_startup=self.start, on_shutdown=self.stop,
             persist_config=self.persist_config)
@@ -733,6 +743,8 @@ class DogBuddyApp:
         except Exception:  # noqa: BLE001 — MCP never blocks startup
             logger.warning("mcp bridge start failed", exc_info=True)
         await self.windows.start()
+        # v0.24.0：先订阅 run.finished，再启动 EventBus（Outbox replay 也不漏）
+        self.review.start()
         self._tasks.append(asyncio.get_event_loop().create_task(self.bus.start()))
         # v0.20.0：只读 Watchdog（有进展就刷新，卡住只告警）
         self._tasks.append(asyncio.get_event_loop().create_task(self.watchdog.run_loop()))

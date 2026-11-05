@@ -355,9 +355,9 @@ FRONTEND_TOOLS = sorted(set(WORKER_PROGRAMMER_TOOLS) | {"page_check"})
 BACKEND_TOOLS = list(WORKER_PROGRAMMER_TOOLS)
 #: 审查员：只读（无 write/edit/checkpoint）
 REVIEWER_TOOLS = [
-    "read_file", "glob", "grep", "shell", "web_fetch",
-    "run_status", "todo_view", "todo_add", "todo_done",
-    "window_memory_read", "window_memory_write", "project_memory_read",
+    # v0.24.0：硬只读——没有 shell / write / memory_write / todo 写。
+    "read_file", "glob", "grep", "web_fetch", "run_status",
+    "window_memory_read", "project_memory_read",
     "ask_user", "notify_owner", "read_resource",
 ]
 #: 纯聊天：没有任何文件/命令/网络工具（连读文件都不给）
@@ -430,7 +430,7 @@ def register_builtin_roles() -> None:
     register_role(RoleSpec(
         name="worker_reviewer", display_name="代码审查员",
         system_prompt=REVIEWER_SYSTEM_PROMPT, tool_names=REVIEWER_TOOLS,
-        default_mode="BUILD",
+        default_mode="PLAN",
         domains=["审查", "回归", "风险"],
         can_deliver_alone=False,
         # 审查结论要被复核，所以默认每个写操作都不该有（它压根没写工具）

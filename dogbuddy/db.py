@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -842,6 +842,45 @@ def _migrate_v26(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v27(conn: sqlite3.Connection) -> None:
+    """Review 闭环（2026-11-05，0.24.0）。只增表，不接管交付。"""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS review_requests(
+      id TEXT PRIMARY KEY,
+      work_item_id TEXT DEFAULT '',
+      run_id TEXT UNIQUE,
+      status TEXT DEFAULT 'queued',
+      verdict TEXT DEFAULT '',
+      reviewer_run_id TEXT DEFAULT '',
+      reviewer_window_id TEXT DEFAULT '',
+      reviewer_model TEXT DEFAULT '',
+      attempt INTEGER DEFAULT 1,
+      summary TEXT DEFAULT '',
+      findings_json TEXT DEFAULT '',
+      created_at TEXT DEFAULT '',
+      finished_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_review_status
+      ON review_requests(status, created_at);
+    CREATE INDEX IF NOT EXISTS ix_review_work
+      ON review_requests(work_item_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS review_findings(
+      id TEXT PRIMARY KEY,
+      review_id TEXT DEFAULT '',
+      severity TEXT DEFAULT 'blocking',
+      path TEXT DEFAULT '',
+      line INTEGER DEFAULT 0,
+      message TEXT DEFAULT '',
+      evidence TEXT DEFAULT '',
+      created_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_findings_review
+      ON review_findings(review_id);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -872,6 +911,7 @@ _MIGRATIONS: dict[int, Any] = {
     24: _migrate_v24,
     25: _migrate_v25,
     26: _migrate_v26,
+    27: _migrate_v27,
 }
 
 

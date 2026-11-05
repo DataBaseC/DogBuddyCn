@@ -141,7 +141,8 @@ class KernelRouter:
             thread_id=thread_id, title=d.title or d.prompt[:80],
             description=d.prompt,
             project_id=str(getattr(w, "project_id", "") or "") if w else "",
-            window_id=str(w.id) if w else "", created_by=sender, origin="router")
+            window_id=str(w.id) if w else "", created_by=sender, origin="router",
+            review_required=True)
         wid = str(wi.get("id") or "")
         self.store.create_mandate(
             work_item_id=wid, scope=d.mandate_scope or "workspace",

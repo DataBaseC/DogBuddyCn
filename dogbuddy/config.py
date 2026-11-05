@@ -140,6 +140,13 @@ class KernelConfig(BaseModel):
     route_conversations: list[str] = []
 
 
+class ReviewConfig(BaseModel):
+    """v0.24.0：AI 审核。off / shadow（只记录）/ enforce（后续版本）。"""
+    mode: str = "off"
+    window_id: str = ""
+    reviewer_model: str = ""
+
+
 class AppConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     llm_profiles: dict[str, LLMConfig] = Field(
@@ -150,6 +157,7 @@ class AppConfig(BaseModel):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     kernel: KernelConfig = Field(default_factory=KernelConfig)
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
     panel: PanelConfig = Field(default_factory=PanelConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     notify: NotifyConfig = Field(default_factory=NotifyConfig)

@@ -107,6 +107,8 @@ class WebServices:
         self.router = kw.get("router")
         #: v0.20.0：只读进展 Watchdog
         self.watchdog = kw.get("watchdog")
+        #: v0.24.0：Review Shadow
+        self.review = kw.get("review")
         self.models = kw.get("models")
         self.iterations = kw.get("iterations")
         self.iteration_exec = kw.get("iteration_exec")
@@ -166,6 +168,8 @@ def create_app(svc: WebServices) -> FastAPI:
             "watchdog": (svc.watchdog.health() if getattr(svc, "watchdog", None) else None),
             # v0.23.0：Router Fast Path（shadow-only）
             "router": (svc.router.health() if getattr(svc, "router", None) else None),
+            # v0.24.0：Review Shadow
+            "review": (svc.review.health() if getattr(svc, "review", None) else None),
             # v0.12.1：流水线（"有没有卡住/失败"要一眼看到）
             "pipelines": (svc.pipelines.health()
                           if getattr(svc, "pipelines", None) else None),
