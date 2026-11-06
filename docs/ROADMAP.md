@@ -2647,3 +2647,10 @@ Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow
 **测试暂缓**：按 owner 要求本轮不跑测试；先完成代码，下一轮统一服务器回归。
 仍未做：Review 独立详情页、RuntimeSnapshot 只追加、QQ 并发、外部 Trigger。
 
+### 73.1 已补回归（`0.26.1`）
+
+- 服务器全量 **1040 passed / 2 skipped**；新增 auto/阈值、runtime snapshot、cache diag 测试。
+- 线上 `auto` 实测发现：闲聊也调用 Router LLM，聊天 90s 超时；增加“任务样文本”门
+  （帮我/修复/实现/测试/部署等关键词或 >80 字才进慢路径），闲聊直接走旧路径。
+- `cache.runtime_snapshot=true` 与 `kernel.route=auto` 已在生产开启（仅 default 会话）。
+
