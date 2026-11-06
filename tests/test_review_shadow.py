@@ -149,6 +149,23 @@ def test_enforce_fail_dispatches_one_rework_then_human(tmp_path):
     db.close()
 
 
+def test_owner_override_requires_reason_and_marks_done(tmp_path):
+    db, store, wi = _stack(tmp_path)
+    svc = ReviewService(store, None, None, mode="enforce", db=db)
+    req, _ = store.create_review_request(work_item_id=wi["id"], run_id="r1",
+                                         status="waiting_human")
+    try:
+        svc.override(req["id"], actor="owner", reason="")
+        assert False, "empty reason must be rejected"
+    except ValueError:
+        pass
+    out = svc.override(req["id"], actor="owner", reason="已人工核对")
+    assert out["status"] == "overridden" and out["verdict"] == "OVERRIDE"
+    got = store.get_work_item(wi["id"])
+    assert got["status"] == "done" and got["review_status"] == "overridden"
+    db.close()
+
+
 def test_review_fail_parse_rules():
     assert parse_verdict('{"verdict":"FAIL"}') is None
     assert parse_verdict(

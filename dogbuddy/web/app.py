@@ -31,6 +31,7 @@ from .routes import gateway as gateway_routes
 from .routes import groups as groups_routes
 from .routes import iterations as iterations_routes
 from .routes import runs as runs_routes
+from .routes import reviews as reviews_routes
 from .routes import ledger as ledger_routes
 from .routes import jobs as jobs_routes
 from .routes import logs as logs_routes
@@ -234,6 +235,7 @@ def create_app(svc: WebServices) -> FastAPI:
     app.include_router(projects_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(iterations_routes.router(svc, auth_deps), prefix="/api")
     app.include_router(runs_routes.router(svc, auth_deps), prefix="/api")
+    app.include_router(reviews_routes.router(svc, auth_deps), prefix="/api")
     # v0.12.1：流水线编排（定义/起跑/状态/续跑）
     app.include_router(pipelines_routes.router(svc, auth_deps), prefix="/api")
     # v0.12.2：抽检与复核

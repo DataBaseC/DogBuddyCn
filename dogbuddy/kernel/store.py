@@ -276,6 +276,13 @@ class KernelStore:
                      str(f.get("why") or f.get("evidence") or "")[:4000], now))
             self._conn.commit()
 
+    def list_review_findings(self, review_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM review_findings WHERE review_id=? ORDER BY id",
+                (review_id,)).fetchall()
+        return [dict(r) for r in rows]
+
     def list_review_requests(self, limit: int = 50,
                              status: str = "") -> list[dict[str, Any]]:
         q = "SELECT * FROM review_requests"

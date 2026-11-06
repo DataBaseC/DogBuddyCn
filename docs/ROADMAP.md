@@ -2600,3 +2600,21 @@ Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow
 服务器全量：**1034 passed / 2 skipped**（新增 4 条 enforce/run_tests 测试）。
 仍未做：owner 人工放行入口、自然语言路由、缓存诊断。
 
+---
+
+## 72. Review 人工放行 + 记录 UI（2026-11-05，`0.25.1`）
+
+- `ReviewService.override(review_id, actor, reason)`：只允许
+  `failed/error/waiting_human` 的请求；必须填 reason；请求转 `overridden`，
+  WorkItem `done` + `review_status=overridden`；写审计并发 `review.overridden`。
+- 新 API：
+  - `GET /api/reviews?status=&limit=`；
+  - `GET /api/reviews/{id}`（含 findings/work_item）；
+  - `POST /api/reviews/{id}/override` `{reason, actor}`。
+- 运行抽屉新增“AI 审核待处理”分组：显示 failed/error/waiting_human，
+  可点“人工放行”并填写原因；前端 API 封装 `A.reviews`。
+- 不改变 enforce 语义：人工放行是显式兜底，不能替代不可逆操作审批。
+
+服务器全量：**1035 passed / 2 skipped**（新增 1 条 override 测试）。
+仍未做：自然语言路由、缓存诊断、Review 详情独立页面（当前在运行抽屉里）。
+

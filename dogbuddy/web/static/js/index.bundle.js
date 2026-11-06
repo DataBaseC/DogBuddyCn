@@ -705,6 +705,18 @@
       cancel: function (id) { return request('POST', '/api/runs/' + enc(id) + '/cancel', {}); },
       retry: function (id) { return request('POST', '/api/runs/' + enc(id) + '/retry', {}); }
     },
+    /* v0.25.1：AI 审核记录 + owner 人工放行 */
+    reviews: {
+      list: function (status, limit) {
+        return request('GET', '/api/reviews' +
+          qs({ status: status || undefined, limit: limit || 50 }));
+      },
+      get: function (id) { return request('GET', '/api/reviews/' + enc(id)); },
+      override: function (id, reason) {
+        return request('POST', '/api/reviews/' + enc(id) + '/override',
+          { reason: reason, actor: 'owner' });
+      }
+    },
     groups: {
       /* GET /api/groups → {groups:[{id,name,description,lead_window_id,created_at,
          updated_at,members:[{window_id,window_name,role,joined_at,exists}]}]} */
@@ -1096,15 +1108,19 @@
   var Runs = {
     active: [],
     recent: [],
+    reviews: [],
     timer: null,
 
     /** 进页面时拉一次全量活跃运行（SSE 断线时也有底）。
         v0.10.40：同时拉最近结束的运行——"异常停下后要能唤醒"，用户得先看见它。 */
     refresh: function () {
       if (!A || !A.runs) return Promise.resolve();
-      return Promise.all([A.runs.list(true), A.runs.list(false, 8)]).then(function (res) {
+      var jobs = [A.runs.list(true), A.runs.list(false, 8)];
+      if (A.reviews) jobs.push(A.reviews.list('', 20));
+      return Promise.all(jobs).then(function (res) {
         Runs.active = (res[0] && res[0].runs) || [];
         Runs.recent = (res[1] && res[1].runs) || [];
+        Runs.reviews = (res[2] && res[2].reviews) || [];
         Runs.render();
       }).catch(function () { /* 台账不可用就当没有（不要打扰用户） */ });
     },
@@ -1250,6 +1266,24 @@
               '</div>';
           }).join('');
       }
+      var pending = (Runs.reviews || []).filter(function (r) {
+        return ['failed', 'error', 'waiting_human'].indexOf(String(r.status)) >= 0;
+      }).slice(0, 6);
+      if (pending.length) {
+        html += '<div class="runs-empty" style="margin-top:8px">AI 审核待处理（人工放行需填原因）</div>' +
+          pending.map(function (r) {
+            var label = {failed: '未通过', error: '审核异常', waiting_human: '待人工'}[r.status] || r.status;
+            return '<div class="run-row" data-review="' + U.esc(r.id) + '">' +
+              '<div class="run-main">' +
+              '<div class="run-title"><b>' + U.esc(r.work_item_id || r.id) + '</b>' +
+              '<span class="chip chip-amber">' + U.esc(label) + '</span>' +
+              '<span class="chip chip-grey">审核</span></div>' +
+              '<div class="run-sub mono">' + U.esc((r.summary || '').slice(0, 100)) + '</div>' +
+              '</div>' +
+              '<button class="btn btn-soft btn-sm" data-review-override="' + U.esc(r.id) + '">人工放行</button>' +
+              '</div>';
+          }).join('');
+      }
       box.innerHTML = html;
     },
 
@@ -1287,10 +1321,27 @@
           /* v0.10.40：唤醒未完成的运行（异常停下之后） */
           var r = ev.target.closest('[data-run-retry]');
           if (r) Runs.retry(r.getAttribute('data-run-retry'), r);
+          var o = ev.target.closest('[data-review-override]');
+          if (o) Runs.overrideReview(o.getAttribute('data-review-override'), o);
         });
       }
       Runs.refresh();
       Runs.startPolling(15000);
+    },
+
+    /* v0.25.1：owner 人工放行——必须填原因，审计留痕 */
+    overrideReview: function (id, btn) {
+      if (!A || !A.reviews) return;
+      var reason = global.prompt('人工放行原因（会写入审计）：');
+      if (!reason || !String(reason).trim()) return;
+      if (btn) { btn.disabled = true; btn.textContent = '放行中…'; }
+      A.reviews.override(id, String(reason).trim()).then(function () {
+        U.toast('success', '已人工放行 ' + id);
+        return Runs.refresh();
+      }).catch(function (e) {
+        U.toast('warn', '放行失败：' + (e && e.message ? e.message : e));
+        if (btn) { btn.disabled = false; btn.textContent = '人工放行'; }
+      });
     },
 
     /* v0.10.40：重试 = 先停掉卡住的那次，再用**落库的原始任务文本**重跑一次 */

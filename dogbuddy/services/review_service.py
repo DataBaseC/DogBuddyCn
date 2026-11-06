@@ -216,6 +216,28 @@ class ReviewService:
             self.store.update_work_item(req["work_item_id"], **fields)
         self._audit(f"review waiting human: {review_id}: {reason}")
 
+    def override(self, review_id: str, *, actor: str = "owner",
+                 reason: str = "") -> dict[str, Any]:
+        """人类放行：必须留 actor/reason，且只对未通过的请求生效。"""
+        req = self.store.get_review_request(review_id)
+        if req is None:
+            raise ValueError(f"没有这个审核请求：{review_id}")
+        if str(req.get("status") or "") not in ("failed", "error", "waiting_human"):
+            raise ValueError(f"当前审核状态不可放行：{req.get('status')}")
+        if not str(reason or "").strip():
+            raise ValueError("人工放行必须填写 reason")
+        self.store.update_review_request(
+            review_id, status="overridden", verdict="OVERRIDE",
+            summary=f"manual override by {actor}: {str(reason)[:1500]}")
+        self.store.update_work_item(
+            str(req.get("work_item_id") or ""),
+            status="done", review_status="overridden")
+        self._audit(f"review override: {review_id} actor={actor} reason={reason[:500]}")
+        self._emit("review.overridden", {"review_id": review_id,
+                                         "work_item_id": req.get("work_item_id"),
+                                         "actor": actor, "reason": reason[:1000]})
+        return self.store.get_review_request(review_id) or req
+
     def _review_prompt(self, wi: dict[str, Any], p: dict[str, Any]) -> str:
         return (
             "你是独立代码审查员，只读，不要改任何文件。\n"

@@ -323,6 +323,18 @@
       cancel: function (id) { return request('POST', '/api/runs/' + enc(id) + '/cancel', {}); },
       retry: function (id) { return request('POST', '/api/runs/' + enc(id) + '/retry', {}); }
     },
+    /* v0.25.1：AI 审核记录 + owner 人工放行 */
+    reviews: {
+      list: function (status, limit) {
+        return request('GET', '/api/reviews' +
+          qs({ status: status || undefined, limit: limit || 50 }));
+      },
+      get: function (id) { return request('GET', '/api/reviews/' + enc(id)); },
+      override: function (id, reason) {
+        return request('POST', '/api/reviews/' + enc(id) + '/override',
+          { reason: reason, actor: 'owner' });
+      }
+    },
     groups: {
       /* GET /api/groups → {groups:[{id,name,description,lead_window_id,created_at,
          updated_at,members:[{window_id,window_name,role,joined_at,exists}]}]} */
