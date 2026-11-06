@@ -114,7 +114,7 @@ class ReviewService:
             handle = self.windows.dispatch_run(
                 window_id=reviewer.id, prompt=prompt, origin="review",
                 kind="prompt", urgent=True, sender="reviewer",
-                work_item_id=wid)
+                work_item_id=wid, extra_meta={"review_id": req["id"]})
         except Exception as e:  # noqa: BLE001 — review failure cannot block delivery
             logger.warning("review dispatch failed", exc_info=True)
             self.store.update_review_request(

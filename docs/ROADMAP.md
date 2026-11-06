@@ -2669,4 +2669,6 @@ Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow
   `parse_verdict` 无法解析，Review 落到 `error`。
 - 修复：只对 `kind=review` 的 Run 放宽 summary 上限到 20000，普通运行仍 2000。
 - 未改变“解析失败不 PASS”的原则。
+- 第二次验证发现还有 `_execute` 的 800 字预截断；最终改为 review 任务 20000、
+  普通任务 800，并把 `review_id` 放入 TaskItem.meta。
 

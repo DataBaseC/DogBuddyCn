@@ -1270,8 +1270,10 @@ class WindowManager:
                 if status == "paused":
                     _runs.note_pause(run_id, 0.0)
                 else:
+                    _meta = getattr(task, "meta", None) or {}
+                    _limit = 20000 if _meta.get("review_id") else 800
                     _runs.finish(run_id, status,
-                                 summary=(prefix + str(getattr(result, "summary", "") or ""))[:800],
+                                 summary=(prefix + str(getattr(result, "summary", "") or ""))[:_limit],
                                  error_code=code)
             except Exception:  # noqa: BLE001
                 logger.debug("run finish bookkeeping failed", exc_info=True)
