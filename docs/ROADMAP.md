@@ -2661,3 +2661,12 @@ Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow
 - 运行抽屉里的审核分组保留作为快捷入口；
 - 前端 bundle 重新生成，`audit_ui.py` 通过。
 
+### 73.3 Review 全链路验证（`0.26.3`）
+
+- 临时 workspace `/tmp/review-demo` + demo worker/reviewer，真实跑通
+  `/task → Worker → run.finished → ReviewRequest → Reviewer`。
+- 发现 reviewer 的 JSON 结论超过 `runs.summary` 的 2000 字上限，被截断后
+  `parse_verdict` 无法解析，Review 落到 `error`。
+- 修复：只对 `kind=review` 的 Run 放宽 summary 上限到 20000，普通运行仍 2000。
+- 未改变“解析失败不 PASS”的原则。
+

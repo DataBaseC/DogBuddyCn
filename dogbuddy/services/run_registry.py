@@ -246,7 +246,11 @@ class RunRegistry:
                error_code: str = "") -> Run | None:
         if status not in TERMINAL_STATUSES:
             raise ValueError(f"不是终态：{status}")
-        run = self.update(run_id, status=status, summary=(summary or "")[:2000],
+        current = self._active.get(run_id) or self._load(run_id)
+        # Review 的 JSON 结论经常超过 2k；普通运行仍保持小 summary，
+        # 避免 runs/SSE 被长文本撑大。
+        limit = 20000 if (current is not None and current.kind == "review") else 2000
+        run = self.update(run_id, status=status, summary=(summary or "")[:limit],
                           error_code=error_code or "", finished_at=_now_iso())
         if run is not None:
             self._active.pop(run_id, None)
