@@ -2654,3 +2654,10 @@ Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow
   （帮我/修复/实现/测试/部署等关键词或 >80 字才进慢路径），闲聊直接走旧路径。
 - `cache.runtime_snapshot=true` 与 `kernel.route=auto` 已在生产开启（仅 default 会话）。
 
+### 73.2 Review 独立页（`0.26.2`）
+
+- 左侧导航新增「审核」；`/api/reviews` 列表、状态、verdict、摘要；
+- 待人工请求可直接填写原因人工放行；
+- 运行抽屉里的审核分组保留作为快捷入口；
+- 前端 bundle 重新生成，`audit_ui.py` 通过。
+

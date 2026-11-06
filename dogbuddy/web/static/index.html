@@ -97,6 +97,7 @@
       <button class="nav-item" data-view="windows"><svg class="ic"><use href="#ic-monitor"/></svg><span>工位</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="jobs"><svg class="ic"><use href="#ic-clock"/></svg><span>任务</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="decisions"><svg class="ic"><use href="#ic-alert"/></svg><span>待决</span><span class="badge badge-red hidden" id="nav-decisions-badge"></span><i class="nav-ind"></i></button>
+<button class="nav-item" data-view="reviews"><svg class="ic"><use href="#ic-doc"/></svg><span>审核</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="groups"><svg class="ic"><use href="#ic-layers"/></svg><span>群组</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="capabilities"><svg class="ic"><use href="#ic-zap"/></svg><span>能力</span><i class="nav-ind"></i></button>
       <button class="nav-item" data-view="projects"><svg class="ic"><use href="#ic-folder"/></svg><span>项目</span><i class="nav-ind"></i></button>
@@ -347,6 +348,21 @@
         <div class="dec-history" id="dec-history"></div>
       </section>
 
+      <!-- AI 审核记录（0.26.1） -->
+      <section class="view" id="view-reviews">
+        <div class="toolbar">
+          <div>
+            <h2 class="page-title">审核记录</h2>
+            <p class="card-sub">AI 审查结论 · findings · owner 人工放行（必须填写原因）</p>
+          </div>
+          <div class="toolbar-actions">
+            <span class="badge badge-grey" id="reviews-meta">审核 0 · 待人工 0</span>
+            <button class="btn btn-soft btn-sm" id="reviews-refresh"><svg class="ic"><use href="#ic-refresh"/></svg>刷新</button>
+          </div>
+        </div>
+        <div id="reviews-list"></div>
+      </section>
+
       <!-- 项目管理（T7.6） -->
       <section class="view" id="view-projects">
         <div class="toolbar">
@@ -527,6 +543,6 @@
 <div id="toast-root" class="toast-root"></div>
 
 <!-- 页面只加载 bundle：源文件顺序见 tools/bundle-order.json，由 tools/rebuild-bundles.py 拼接 -->
-<script src="/assets/js/index.bundle.js?v=311b7cdce7"></script>
+<script src="/assets/js/index.bundle.js?v=f1af5aaced"></script>
 </body>
 </html>
