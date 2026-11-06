@@ -75,8 +75,19 @@ def test_auto_low_confidence_asks_without_task(tmp_path):
         "action": "create_task", "confidence": 0.4, "prompt": "随便看看"})
     router = KernelRouter(store, intake, mode="auto", windows=fw,
                           llm_factory=lambda: llm)
-    r = _run(router.route_web_async(conversation="c1", text="你看着办", sender="u"))
+    r = _run(router.route_web_async(conversation="c1", text="帮我随便看看", sender="u"))
     assert r["handled"] and r["action"] == "ask"
+    assert not fw.calls and store.health()["work_items"] == 0
+    db.close()
+
+
+def test_auto_smalltalk_skips_router_llm(tmp_path):
+    db, store, intake = _stack(tmp_path)
+    fw, llm = FakeWindows(), FakeLLM({"action": "chat", "confidence": 0.9})
+    router = KernelRouter(store, intake, mode="auto", windows=fw,
+                          llm_factory=lambda: llm)
+    r = _run(router.route_web_async(conversation="c1", text="你好呀", sender="u"))
+    assert r["handled"] is False and llm.calls == 0
     assert not fw.calls and store.health()["work_items"] == 0
     db.close()
 

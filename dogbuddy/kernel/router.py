@@ -80,13 +80,26 @@ class KernelRouter:
             return self._existing_result(existing)
         decision = self.decide(text=text, thread_id=str(trigger.get("thread_id") or ""),
                                sender=sender)
-        if decision.action == "chat" and self.llm_factory is not None:
+        if (decision.action == "chat" and self.llm_factory is not None
+                and self._looks_tasky(text)):
             try:
                 decision = await self._classify(text, decision)
             except Exception:  # noqa: BLE001 — 分类失败退回聊天，绝不乱建任务
                 logger.warning("router auto classify failed", exc_info=True)
                 decision = RouterDecision(action="chat", reason="router llm failed")
         return self._apply_decision(trigger, decision, text=text, sender=sender)
+
+    @staticmethod
+    def _looks_tasky(text: str) -> bool:
+        """闲聊不烧一次 Router LLM；只有像“要干活”的消息才进慢路径。"""
+        body = str(text or "").strip().lower()
+        keys = ("帮我", "帮忙", "修复", "修一下", "改一下", "写一个", "做一个",
+                "实现", "重构", "优化", "排查", "检查一下", "跑一下", "测试",
+                "部署", "生成", "创建", "添加", "删除", "fix", "implement",
+                "refactor", "deploy", "build", "write", "create", "update")
+        if any(k in body for k in keys):
+            return True
+        return len(body) > 80
 
     async def _classify(self, text: str, fallback: RouterDecision) -> RouterDecision:
         llm = self.llm_factory()
