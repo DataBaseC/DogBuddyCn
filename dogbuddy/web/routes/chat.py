@@ -207,7 +207,11 @@ def router(svc, auth_deps) -> APIRouter:
         try:
             router = getattr(svc, "router", None)
             if router is not None:
-                decision = router.route_web(conversation=cid, text=text, sender=cid)
+                if hasattr(router, "route_web_async"):
+                    decision = await router.route_web_async(
+                        conversation=cid, text=text, sender=cid)
+                else:
+                    decision = router.route_web(conversation=cid, text=text, sender=cid)
                 if decision and decision.get("handled"):
                     return {"conversation": cid, "sender": cid,
                             "reply": decision.get("reply", ""),

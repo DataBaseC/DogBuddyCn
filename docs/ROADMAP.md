@@ -2618,3 +2618,32 @@ Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow
 服务器全量：**1035 passed / 2 skipped**（新增 1 条 override 测试）。
 仍未做：自然语言路由、缓存诊断、Review 详情独立页面（当前在运行抽屉里）。
 
+---
+
+## 73. Router auto + 缓存请求形状诊断（2026-11-06，`0.26.0`）
+
+### Router 慢路径
+
+- `kernel.route=auto` 时，Fast Path 判为 `chat` 才调用一次 Router LLM；
+- 输出结构化 action/confidence；`create_task` 置信度低于 0.75 一律转 `ask`，
+  不猜、不建任务；
+- `resume_task` 第一版只回“请用 /continue”，避免自然语言指错任务；
+- 分类失败回退 chat；普通聊天仍走旧 AdminService。
+- Web `/api/admin/chat` 改用 `route_web_async()`；非 auto 模式行为不变。
+
+### 缓存诊断 + 稳定前缀
+
+- schema 28：`cache_diagnostics`（system/dynamic/prefix/tool 哈希、model、
+  cache 命中、reset_reason）。
+- AgentLoop 每次 LLM 调用前调用 `ctx.extra["on_request_shape"]`；
+  WindowManager 计算哈希并落库，不改变请求。
+- `cache.runtime_snapshot=true` 时，ContextBuilder 把 global/window memory、
+  skills、compaction facts、resources、workstation 从首个 system 拆到第二条
+  RuntimeSnapshot；稳定角色提示保持在首个 system。
+- 默认关闭；开启后角色前缀稳定，但历史部分仍可能因快照变化失效（下一阶段再做
+  “快照只追加”）。
+- `/healthz.kernel.cache_diag` 显示最近一条请求形状。
+
+**测试暂缓**：按 owner 要求本轮不跑测试；先完成代码，下一轮统一服务器回归。
+仍未做：Review 独立详情页、RuntimeSnapshot 只追加、QQ 并发、外部 Trigger。
+

@@ -122,7 +122,8 @@ class DogBuddyApp:
             self.kernel_store, self.intake,
             mode=str(getattr(config.kernel, "route", "off") or "off"),
             route_conversations=list(getattr(
-                config.kernel, "route_conversations", []) or []))
+                config.kernel, "route_conversations", []) or []),
+            llm_factory=lambda: self.llm_factory())
         self.panel = self._build_panel()
         # T8.7：退避记忆落盘位置（每 profile "上次退避多久才成功"）
         from .llm.retry import RetryMemory
@@ -177,7 +178,8 @@ class DogBuddyApp:
             mcp_bridge=self.mcp,
             queue_store=self.kernel_store,
             route_mode=str(getattr(config.kernel, "route", "off") or "off"),
-            review_test_commands=list(getattr(config.review, "test_commands", []) or []))
+            review_test_commands=list(getattr(config.review, "test_commands", []) or []),
+            runtime_snapshot=bool(getattr(config.cache, "runtime_snapshot", False)))
         # Router 在 WindowManager 之前构造（需要 store/intake），这里补执行器。
         self.kernel_router.windows = self.windows
         self.sessions = SessionManager(self.windows, self.db)

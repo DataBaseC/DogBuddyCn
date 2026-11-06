@@ -21,7 +21,8 @@ class KernelRouter:
     MODES = ("off", "shadow", "explicit", "auto")
 
     def __init__(self, store: Any, intake: Any = None, mode: str = "off",
-                 windows: Any = None, route_conversations: list[str] | None = None):
+                 windows: Any = None, route_conversations: list[str] | None = None,
+                 llm_factory: Any = None, auto_confidence: float = 0.75):
         self.store = store
         self.intake = intake
         self.mode = str(mode or "off").lower()
@@ -29,6 +30,8 @@ class KernelRouter:
             self.mode = "off"
         self.windows = windows
         self.route_conversations = {str(x) for x in (route_conversations or [])}
+        self.llm_factory = llm_factory
+        self.auto_confidence = max(0.5, min(float(auto_confidence), 0.99))
 
     def enabled_for(self, conversation: str) -> bool:
         if self.mode == "off":
@@ -52,12 +55,82 @@ class KernelRouter:
     def route_trigger(self, trigger: dict[str, Any], *, text: str,
                       sender: str = "owner", conversation: str = "") -> dict[str, Any]:
         trigger_id = str(trigger.get("id") or "")
-        thread_id = str(trigger.get("thread_id") or "")
         existing = self.store.get_router_decision(trigger_id)
         if existing is not None:
             return self._existing_result(existing)
+        return self._apply_decision(
+            trigger, self.decide(text=text, thread_id=str(trigger.get("thread_id") or ""),
+                                 sender=sender),
+            text=text, sender=sender)
 
-        decision = self.decide(text=text, thread_id=thread_id, sender=sender)
+    async def route_web_async(self, *, conversation: str, text: str,
+                              sender: str = "owner") -> dict[str, Any] | None:
+        """auto 模式：Fast Path 判为 chat 时，才允许调用一次 Router LLM。"""
+        if self.mode != "auto":
+            return self.route_web(conversation=conversation, text=text, sender=sender)
+        if not self.enabled_for(conversation) or self.store is None or self.intake is None:
+            return None
+        trigger = self.intake.accept_web(
+            conversation=conversation, text=text, sender=sender)
+        if not trigger:
+            return None
+        trigger_id = str(trigger.get("id") or "")
+        existing = self.store.get_router_decision(trigger_id)
+        if existing is not None:
+            return self._existing_result(existing)
+        decision = self.decide(text=text, thread_id=str(trigger.get("thread_id") or ""),
+                               sender=sender)
+        if decision.action == "chat" and self.llm_factory is not None:
+            try:
+                decision = await self._classify(text, decision)
+            except Exception:  # noqa: BLE001 — 分类失败退回聊天，绝不乱建任务
+                logger.warning("router auto classify failed", exc_info=True)
+                decision = RouterDecision(action="chat", reason="router llm failed")
+        return self._apply_decision(trigger, decision, text=text, sender=sender)
+
+    async def _classify(self, text: str, fallback: RouterDecision) -> RouterDecision:
+        llm = self.llm_factory()
+        prompt = (
+            "你是任务路由器。只输出一个 JSON 对象，不要解释。\n"
+            "action 只能是 create_task / resume_task / chat / ask。\n"
+            "只有当用户明确要求做一项需要员工执行、会改文件或跑命令的任务时，"
+            "才用 create_task；问问题、闲聊、让你解释，一律 chat。\n"
+            "信息不足（目标/范围不清）用 ask。\n"
+            '格式: {"action":"chat|create_task|resume_task|ask","confidence":0.0,'
+            '"prompt":"完整任务目标","title":"短标题","reason":"一句话"}\n'
+            f"用户消息：{text[:4000]}")
+        resp = await llm.chat([{"role": "user", "content": prompt}])
+        raw = str(getattr(resp, "content", "") or "")
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end <= start:
+            return fallback
+        obj = json.loads(raw[start:end + 1])
+        action = str(obj.get("action") or "chat")
+        conf = float(obj.get("confidence") or 0)
+        if action == "create_task":
+            if conf < self.auto_confidence:
+                return RouterDecision(action="ask", reason="low confidence task",
+                                      prompt="你是想让我创建一个执行任务吗？请确认目标。",
+                                      confidence=conf)
+            goal = str(obj.get("prompt") or text).strip()
+            return RouterDecision(action="create", reason=str(obj.get("reason") or "auto"),
+                                  prompt=goal, title=str(obj.get("title") or goal[:80]),
+                                  mandate_scope="workspace", confidence=conf)
+        if action == "resume_task":
+            # 自然语言恢复容易指错任务；第一版只认 /continue。
+            return RouterDecision(action="ask", reason="resume needs explicit /continue",
+                                  prompt="请用 /continue 指定要恢复的任务。", confidence=conf)
+        if action == "ask":
+            return RouterDecision(action="ask", reason=str(obj.get("reason") or "need info"),
+                                  prompt=str(obj.get("prompt") or "请补充任务目标。"),
+                                  confidence=conf)
+        return RouterDecision(action="chat", reason=str(obj.get("reason") or "chat"),
+                              confidence=conf)
+
+    def _apply_decision(self, trigger: dict[str, Any], decision: RouterDecision,
+                        *, text: str, sender: str) -> dict[str, Any]:
+        trigger_id = str(trigger.get("id") or "")
+        thread_id = str(trigger.get("thread_id") or "")
         result: dict[str, Any] = {"handled": False, "action": decision.action,
                                   "reason": decision.reason}
         if decision.action == "create":
@@ -78,7 +151,8 @@ class KernelRouter:
         body = dict(decision.__dict__)
         body["result"] = result
         rec, _created = self.store.record_router_decision(
-            trigger_id=trigger_id, thread_id=thread_id, action=result.get("action") or decision.action,
+            trigger_id=trigger_id, thread_id=thread_id,
+            action=result.get("action") or decision.action,
             decision=body, reason=result.get("reason") or decision.reason,
             work_item_id=decision.work_item_id, window_id=decision.window_id)
         result["id"] = rec.get("id")

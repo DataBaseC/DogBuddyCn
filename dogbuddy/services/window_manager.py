@@ -8,6 +8,8 @@ and orchestrates L3 domain objects (WindowSession, AgentLoop, Compactor).
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 import uuid
@@ -139,6 +141,7 @@ class WindowManager:
         queue_store: Any = None,
         route_mode: str = "off",
         review_test_commands: list[str] | None = None,
+        runtime_snapshot: bool = False,
     ):
         self.db = db
         self.llm_factory = llm_factory
@@ -177,9 +180,11 @@ class WindowManager:
         from ..agents.core.scope import ScopeResolver
         self.scope_resolver = ScopeResolver(db)
         self.max_iterations = max_iterations
+        self.runtime_snapshot = bool(runtime_snapshot)
         self.builder = ContextBuilder(memory_service=memory,
                                       skills_root=self.skills_root,
-                                      resources=self.queue_store)
+                                      resources=self.queue_store,
+                                      runtime_snapshot=self.runtime_snapshot)
         self.threshold = threshold
         self.max_context_tokens = max_context_tokens
         #: v0.10.32：人工派单的"最后一次任务"，限速暂停后据此自动续跑
@@ -507,6 +512,32 @@ class WindowManager:
         def hook(*, iteration: int | None = None, last_tool: str = "",
                  ok: bool = True) -> None:
             runs.progress(run_id, iteration=iteration, last_tool=last_tool, ok=ok)
+        return hook
+
+    def _shape_hook(self, w: Window, run_id: str, model: str | None):
+        """v0.26.0：记录请求形状哈希（不改变请求）。"""
+        store = self.queue_store
+        if store is None:
+            return None
+
+        def _h(obj: Any) -> str:
+            raw = json.dumps(obj, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":"), default=str)
+            return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+        def hook(*, messages: list[dict[str, Any]],
+                 tools: list[dict[str, Any]] | None = None) -> None:
+            sys0 = str((messages[0] if messages else {}).get("content") or "")
+            dyn = ""
+            if len(messages) > 1 and str(messages[1].get("role")) == "system":
+                dyn = str(messages[1].get("content") or "")
+            try:
+                store.record_cache_diag(
+                    run_id=run_id, window_id=w.id, model=str(model or ""),
+                    system_hash=_h(sys0), dynamic_hash=_h(dyn),
+                    prefix_hash=_h(messages), tool_hash=_h(tools or []))
+            except Exception:  # noqa: BLE001
+                logger.debug("cache diag record failed", exc_info=True)
         return hook
 
     def _usage_hook(self, w: Window, run_id: str, model: str | None):
@@ -1145,6 +1176,8 @@ class WindowManager:
                    "approval_router": self.approval_router,
                    # v0.11.0：成本账本（每轮 LLM 调用记一笔，幂等键 = run + 轮次）
                    "on_usage": self._usage_hook(w, run_id, model),
+                   # v0.26.0：请求形状（system/dynamic/prefix/tool 哈希）
+                   "on_request_shape": self._shape_hook(w, run_id, model),
                    # v0.20.0：工具级进展（Watchdog 用，不写 token 增量）
                    "progress": self._progress_hook(run_id),
                 # v0.11.1：预算闸门（工位作用域 = 窗口 + 本次 run）

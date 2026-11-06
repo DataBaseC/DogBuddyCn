@@ -140,6 +140,12 @@ class KernelConfig(BaseModel):
     route_conversations: list[str] = []
 
 
+class CacheConfig(BaseModel):
+    """v0.26.0：缓存请求形状诊断 + 稳定前缀布局。"""
+    diagnostics: bool = True
+    runtime_snapshot: bool = False
+
+
 class ReviewConfig(BaseModel):
     """v0.24.0：AI 审核。off / shadow（只记录）/ enforce（后续版本）。"""
     mode: str = "off"
@@ -161,6 +167,7 @@ class AppConfig(BaseModel):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     kernel: KernelConfig = Field(default_factory=KernelConfig)
+    cache: CacheConfig = Field(default_factory=CacheConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     panel: PanelConfig = Field(default_factory=PanelConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)

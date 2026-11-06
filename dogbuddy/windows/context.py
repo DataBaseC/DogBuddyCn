@@ -42,15 +42,18 @@ def message_to_llm(m: Message) -> dict[str, Any]:
 
 class ContextBuilder:
     def __init__(self, memory_service: Any = None, skills_root: str = "",
-                 resources: Any = None):
+                 resources: Any = None, runtime_snapshot: bool = False):
         self.memory = memory_service
         self.skills_root = str(skills_root or "")
         #: v0.20.0：压缩归档的资源卡片；全文用 read_resource 按需读
         self.resources = resources
+        #: v0.26.0：动态记忆/技能/资源/workstation 从首个 system 拆到
+        #: RuntimeSnapshot，稳定角色提示和工具 schema 的前缀不被改写。
+        self.runtime_snapshot = bool(runtime_snapshot)
 
-    def system_block(self, session: Any) -> str:
+    def dynamic_block(self, session: Any) -> str:
         w = session.window
-        parts = [self._role_prompt(w)]
+        parts: list[str] = []
         if self.memory is not None:
             g = self.memory.recall("global")
             if g:
@@ -89,6 +92,14 @@ class ContextBuilder:
                      f"mode={w.mode}")
         return "\n\n".join(parts)
 
+    def system_block(self, session: Any, include_dynamic: bool = True) -> str:
+        parts = [self._role_prompt(session.window)]
+        if include_dynamic:
+            dynamic = self.dynamic_block(session)
+            if dynamic:
+                parts.append(dynamic)
+        return "\n\n".join(parts)
+
     @staticmethod
     def _role_prompt(w: Any) -> str:
         from ..agents.core.roles import get_role
@@ -114,7 +125,13 @@ class ContextBuilder:
         return "## Compacted conversation facts (older wording dropped)\n" + "\n\n".join(chunks)
 
     def build(self, session: Any, recent_limit: int = 400) -> list[dict[str, Any]]:
-        msgs: list[dict[str, Any]] = [{"role": "system", "content": self.system_block(session)}]
+        stable = self.system_block(session, include_dynamic=not self.runtime_snapshot)
+        msgs: list[dict[str, Any]] = [{"role": "system", "content": stable}]
+        if self.runtime_snapshot:
+            dynamic = self.dynamic_block(session)
+            if dynamic:
+                msgs.append({"role": "system",
+                             "content": "## Runtime snapshot (reference; may change)\n" + dynamic})
         # v0.10.17：**修复 tool / tool_calls 配对**。
         # 历史一旦被裁剪（recent_limit）、压缩或被外部清空，就可能出现
         # "有 tool 结果、没有配对的 assistant.tool_calls"。DeepSeek 会直接 400：

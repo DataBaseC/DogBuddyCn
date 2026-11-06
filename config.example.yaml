@@ -43,6 +43,10 @@ kernel:
   route: "off"                     # off|shadow|explicit|auto
   route_conversations: []          # explicit/auto 生效的 Web 会话；空 = 全部
 
+cache:
+  diagnostics: true                # 记录 system/prefix/tool 哈希，便于定位缓存失效
+  runtime_snapshot: false          # true = 动态记忆/技能/资源从首个 system 拆出
+
 review:
   mode: "off"                      # off|shadow|enforce
   window_id: ""                    # 审查员工位；空 = 请求进入 waiting_human

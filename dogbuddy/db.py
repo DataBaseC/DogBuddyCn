@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -881,6 +881,31 @@ def _migrate_v27(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v28(conn: sqlite3.Connection) -> None:
+    """缓存请求形状诊断（2026-11-06，0.26.0）。只增表。"""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS cache_diagnostics(
+      id TEXT PRIMARY KEY,
+      run_id TEXT DEFAULT '',
+      window_id TEXT DEFAULT '',
+      model TEXT DEFAULT '',
+      system_hash TEXT DEFAULT '',
+      dynamic_hash TEXT DEFAULT '',
+      prefix_hash TEXT DEFAULT '',
+      tool_hash TEXT DEFAULT '',
+      cache_hit INTEGER DEFAULT 0,
+      cache_miss INTEGER DEFAULT 0,
+      reset_reason TEXT DEFAULT '',
+      created_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_cache_run
+      ON cache_diagnostics(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS ix_cache_created
+      ON cache_diagnostics(created_at);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -912,6 +937,7 @@ _MIGRATIONS: dict[int, Any] = {
     25: _migrate_v25,
     26: _migrate_v26,
     27: _migrate_v27,
+    28: _migrate_v28,
 }
 
 

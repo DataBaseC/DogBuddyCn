@@ -295,6 +295,13 @@ class AgentLoop:
                 except Exception:  # noqa: BLE001 — 压缩失败不影响本轮
                     logger.warning("mid-run compaction failed", exc_info=True)
             messages = self.session.build_context(self.builder)
+            # v0.26.0：缓存请求形状诊断（只记哈希，不改请求）
+            _shape = ctx.extra.get("on_request_shape")
+            if callable(_shape):
+                try:
+                    _shape(messages=messages, tools=schemas)
+                except Exception:  # noqa: BLE001
+                    logger.debug("request shape hook failed", exc_info=True)
             # v0.20.0：每次迭代先刷一次心跳（长 LLM 调用不等于“没进展”）
             _progress = ctx.extra.get("progress")
             if callable(_progress):

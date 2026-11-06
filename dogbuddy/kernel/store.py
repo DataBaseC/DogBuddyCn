@@ -519,6 +519,33 @@ class KernelStore:
             row = self._conn.execute(q, args).fetchone()
         return int(row[0] if row else 0)
 
+    # ------------------------------------------------------- cache diagnostics
+    def record_cache_diag(self, *, run_id: str, window_id: str, model: str,
+                          system_hash: str, dynamic_hash: str, prefix_hash: str,
+                          tool_hash: str, cache_hit: int = 0,
+                          cache_miss: int = 0, reset_reason: str = "") -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO cache_diagnostics(id,run_id,window_id,model,"
+                "system_hash,dynamic_hash,prefix_hash,tool_hash,cache_hit,"
+                "cache_miss,reset_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"cd-{new_id()[:10]}", run_id[:80], window_id[:80], model[:160],
+                 system_hash, dynamic_hash, prefix_hash, tool_hash,
+                 int(cache_hit or 0), int(cache_miss or 0), reset_reason[:80],
+                 _now_iso()))
+            self._conn.commit()
+
+    def latest_cache_diag(self, run_id: str = "") -> dict[str, Any] | None:
+        q = "SELECT * FROM cache_diagnostics"
+        args: tuple = ()
+        if run_id:
+            q += " WHERE run_id=?"
+            args = (run_id,)
+        q += " ORDER BY created_at DESC LIMIT 1"
+        with self._lock:
+            row = self._conn.execute(q, args).fetchone()
+        return dict(row) if row else None
+
     # --------------------------------------------------------------- health
     def health(self) -> dict[str, Any]:
         return {"triggers": self.count_triggers(),
@@ -529,4 +556,5 @@ class KernelStore:
                 "resources": self.count_resources(),
                 "router_decisions": self.count_router_decisions(),
                 "reviews": self.count_reviews(),
-                "reviews_waiting": self.count_reviews("waiting_human")}
+                "reviews_waiting": self.count_reviews("waiting_human"),
+                "cache_diag": self.latest_cache_diag()}
