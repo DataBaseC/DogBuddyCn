@@ -326,7 +326,8 @@ class DogBuddyApp:
         self.scheduler = CronScheduler(
             store=self.job_store, run_job=self._run_job, bus=self.bus, tick_seconds=60)
         if self.adapter is not None:
-            self.router = Router(self.adapter, self.admin)
+            self.router = Router(self.adapter, self.admin,
+                                  kernel_router=self.kernel_router)
         self.web_services = WebServices(
             db=self.db, windows=self.windows, jobs=self.jobs, sessions=self.sessions,
             workspaces=self.workspaces, config=self.config_svc, memory=self.memory,

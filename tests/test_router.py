@@ -56,6 +56,66 @@ def test_route_in_replies_to_session():
     asyncio.get_event_loop().run_until_complete(main())
 
 
+class FakeKernelRouter:
+    def __init__(self, reply="已创建任务 wi-1"):
+        self.calls = []
+        self.reply = reply
+
+    async def route_web_async(self, **kw):
+        self.calls.append(kw)
+        return {"handled": True, "reply": self.reply,
+                "work_item_id": "wi-1", "run_id": "r-1", "action": "create"}
+
+
+def test_gateway_uses_kernel_router_before_admin():
+    async def main():
+        adapter = FakeAdapter()
+        admin = FakeAdmin()
+        kernel = FakeKernelRouter()
+        router = Router(adapter, admin, kernel_router=kernel)
+        event = MessageEvent(platform="onebot_v11", session_id="private:123",
+                             user_id="123", text="/task 修登录")
+        await router.route_in(event)
+        assert kernel.calls and kernel.calls[0]["conversation"] == "qq:private:123"
+        assert kernel.calls[0]["source"] == "onebot_v11"
+        assert kernel.calls[0]["session_kind"] == "private"
+        assert admin.seen == []
+        assert adapter.sent[0][2] == "已创建任务 wi-1"
+
+    asyncio.get_event_loop().run_until_complete(main())
+
+
+def test_gateway_falls_back_to_admin_when_kernel_not_handled():
+    async def main():
+        adapter = FakeAdapter()
+        admin = FakeAdmin()
+        router = Router(adapter, admin, kernel_router=None)
+        await router.route_in(MessageEvent(
+            platform="onebot_v11", session_id="group:9", user_id="123",
+            group_id="9", text="普通聊天"))
+        assert admin.seen == [("123", "普通聊天")]
+        assert adapter.sent[0][2] == "echo: 普通聊天"
+
+    asyncio.get_event_loop().run_until_complete(main())
+
+
+def test_intake_generic_qq_source(tmp_path):
+    from dogbuddy.db import Database
+    from dogbuddy.kernel import KernelStore
+    from dogbuddy.kernel.intake import ShadowIntake
+
+    db = Database(tmp_path / "qq.db")
+    store = KernelStore(db)
+    intake = ShadowIntake(store)
+    tr = intake.accept_message(source="onebot_v11", external_id="private:123",
+                               kind="private", text="你好", sender="123")
+    assert tr and tr.get("created") is True
+    row = db._conn.execute("SELECT source FROM threads WHERE id=?",
+                           (str(tr.get("thread_id")),)).fetchone()
+    assert row and row[0] == "onebot_v11"
+    db.close()
+
+
 def test_push_target_from_session():
     t = PushTarget.from_session("group:456")
     assert t.type == "group" and t.id == "456"

@@ -41,7 +41,7 @@ kernel:
   enabled: true                    # 持久队列/Outbox/Shadow 内核
   shadow: true                     # 只记录 Trigger，不接管执行（可回滚）
   route: "off"                     # off|shadow|explicit|auto
-  route_conversations: []          # explicit/auto 生效的 Web 会话；空 = 全部
+  route_conversations: []          # explicit/auto 生效的会话；空 = 全部；QQ 用 "qq:*"
 
 cache:
   diagnostics: true                # 记录 system/prefix/tool 哈希，便于定位缓存失效

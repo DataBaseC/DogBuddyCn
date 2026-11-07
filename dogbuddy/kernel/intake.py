@@ -21,20 +21,24 @@ class ShadowIntake:
         self.store = store
         self.enabled = bool(enabled)
 
-    def accept_web(self, *, conversation: str, text: str, sender: str = "owner",
-                   title: str = "") -> dict[str, Any] | None:
+    def accept_message(self, *, source: str, external_id: str, kind: str,
+                       text: str, sender: str = "owner",
+                       title: str = "") -> dict[str, Any] | None:
+        """Generic ingress: Web / OneBot / future adapters share one Trigger path."""
         if not self.enabled or self.store is None:
             return None
         body = str(text or "").strip()
         if not body:
             return None
+        src = str(source or "web")
+        ext = str(external_id or "default")
         thread = self.store.ensure_thread(
-            source="web", external_id=str(conversation or "default"),
-            kind="web", title=title or f"Web · {conversation or 'default'}")
+            source=src, external_id=ext, kind=kind or src,
+            title=title or f"{src} · {ext}")
         # 同一秒内完全相同的文本视为重复投递；跨秒允许用户重复说同一句话。
-        dedupe = f"web:{conversation}:{sender}:{_digest(body)}:{int(time.time())}"
+        dedupe = f"{src}:{ext}:{sender}:{_digest(body)}:{int(time.time())}"
         trigger, created = self.store.record_trigger(
-            source="web", external_id=str(conversation or "default"),
+            source=src, external_id=ext,
             thread_id=str(thread.get("id") or ""), kind="message",
             payload={"text": body[:8000], "sender": sender},
             dedupe_key=dedupe, status="candidate")
@@ -43,3 +47,9 @@ class ShadowIntake:
         # 的 Fast Path 决定——以前每条聊天都建 WorkItem，接管后会把历史闲聊
         # 误认成“待恢复任务”。
         return trigger
+
+    def accept_web(self, *, conversation: str, text: str, sender: str = "owner",
+                   title: str = "") -> dict[str, Any] | None:
+        return self.accept_message(
+            source="web", external_id=str(conversation or "default"),
+            kind="web", text=text, sender=sender, title=title)

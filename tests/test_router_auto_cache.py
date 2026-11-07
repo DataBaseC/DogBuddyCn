@@ -81,6 +81,20 @@ def test_auto_low_confidence_asks_without_task(tmp_path):
     db.close()
 
 
+def test_route_conversations_supports_qq_wildcard(tmp_path):
+    db, store, intake = _stack(tmp_path)
+    fw = FakeWindows()
+    router = KernelRouter(store, intake, mode="explicit", windows=fw,
+                          route_conversations=["qq:*"])
+    assert router.enabled_for("qq:private:123")
+    assert not router.enabled_for("web:default")
+    r = _run(router.route_web_async(
+        conversation="qq:private:123", text="/task 修登录", sender="123",
+        source="onebot_v11", session_kind="private"))
+    assert r["handled"] and r["action"] == "create" and len(fw.calls) == 1
+    db.close()
+
+
 def test_auto_smalltalk_skips_router_llm(tmp_path):
     db, store, intake = _stack(tmp_path)
     fw, llm = FakeWindows(), FakeLLM({"action": "chat", "confidence": 0.9})

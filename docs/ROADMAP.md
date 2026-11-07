@@ -2672,3 +2672,23 @@ Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow
 - 第二次验证发现还有 `_execute` 的 800 字预截断；最终改为 review 任务 20000、
   普通任务 800，并把 `review_id` 放入 TaskItem.meta。
 
+---
+
+## 74. QQ 最小 ingress 适配（2026-11-07，`0.27.0`）
+
+报告结论是“下一步不加功能，先修缓存/Router/Review 边界”；本次按 owner 要求
+只做 QQ 的最小入口，不新增第二套执行链：
+
+- `ShadowIntake.accept_message(source, external_id, kind, ...)`：Web / OneBot 共用
+  Trigger/Thread 落库；`accept_web` 只是它的包装。
+- `KernelRouter` 支持 `source/session_kind/title`；`route_conversations` 支持
+  `qq:*` 这类前缀通配。
+- Gateway `Router` 增加可选 `kernel_router`：QQ 消息优先走
+  `route_web_async(conversation="qq:<session>")`，`/task` 等复用 WorkItem /
+  `dispatch_run`；未命中或 Router 异常回退旧 AdminService。
+- 每个 QQ session 一条串行队列，避免一个慢回合阻塞其他私聊/群；不引入
+  mailbox 持久化、多账号或外部 Trigger。
+- 默认不改变生产行为：`route_conversations` 仍只有 `default`；QQ 要用 Router
+  需显式加入 `qq:*`。
+- 未做：QQ 官方 API、多 Thread 并发、外部主动 Trigger；这些不在本轮。
+

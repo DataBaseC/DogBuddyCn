@@ -38,15 +38,33 @@ class KernelRouter:
             return False
         if self.mode == "shadow":
             return True
-        return (not self.route_conversations
-                or str(conversation) in self.route_conversations)
+        if not self.route_conversations:
+            return True
+        cid = str(conversation)
+        for pattern in self.route_conversations:
+            if pattern == cid:
+                return True
+            if pattern.endswith("*") and cid.startswith(pattern[:-1]):
+                return True
+        return False
+
+    def _accept(self, *, conversation: str, text: str, sender: str,
+                source: str = "web", session_kind: str = "web",
+                title: str = "") -> dict[str, Any] | None:
+        if hasattr(self.intake, "accept_message"):
+            return self.intake.accept_message(
+                source=source, external_id=str(conversation), kind=session_kind,
+                text=text, sender=sender, title=title)
+        return self.intake.accept_web(
+            conversation=conversation, text=text, sender=sender, title=title)
 
     def route_web(self, *, conversation: str, text: str,
-                  sender: str = "owner") -> dict[str, Any] | None:
+                  sender: str = "owner", source: str = "web",
+                  session_kind: str = "web", title: str = "") -> dict[str, Any] | None:
         if not self.enabled_for(conversation) or self.store is None or self.intake is None:
             return None
-        trigger = self.intake.accept_web(
-            conversation=conversation, text=text, sender=sender)
+        trigger = self._accept(conversation=conversation, text=text, sender=sender,
+                               source=source, session_kind=session_kind, title=title)
         if not trigger:
             return None
         return self.route_trigger(trigger, text=text, sender=sender,
@@ -64,14 +82,17 @@ class KernelRouter:
             text=text, sender=sender)
 
     async def route_web_async(self, *, conversation: str, text: str,
-                              sender: str = "owner") -> dict[str, Any] | None:
+                              sender: str = "owner", source: str = "web",
+                              session_kind: str = "web",
+                              title: str = "") -> dict[str, Any] | None:
         """auto 模式：Fast Path 判为 chat 时，才允许调用一次 Router LLM。"""
         if self.mode != "auto":
-            return self.route_web(conversation=conversation, text=text, sender=sender)
+            return self.route_web(conversation=conversation, text=text, sender=sender,
+                                  source=source, session_kind=session_kind, title=title)
         if not self.enabled_for(conversation) or self.store is None or self.intake is None:
             return None
-        trigger = self.intake.accept_web(
-            conversation=conversation, text=text, sender=sender)
+        trigger = self._accept(conversation=conversation, text=text, sender=sender,
+                               source=source, session_kind=session_kind, title=title)
         if not trigger:
             return None
         trigger_id = str(trigger.get("id") or "")
