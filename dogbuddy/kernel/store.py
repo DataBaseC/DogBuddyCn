@@ -8,6 +8,7 @@ kernel tables out of the legacy DAO surface.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -523,24 +524,112 @@ class KernelStore:
     def record_cache_diag(self, *, run_id: str, window_id: str, model: str,
                           system_hash: str, dynamic_hash: str, prefix_hash: str,
                           tool_hash: str, cache_hit: int = 0,
-                          cache_miss: int = 0, reset_reason: str = "") -> None:
+                          cache_miss: int = 0, reset_reason: str = "",
+                          request_hash: str = "",
+                          message_hashes: list[str] | None = None,
+                          message_roles: list[str] | None = None,
+                          dynamic_parts: dict[str, str] | None = None
+                          ) -> dict[str, Any]:
+        """Persist one request shape and compare it with the same window's last."""
+        hashes = [str(x) for x in (message_hashes or [])]
+        roles = [str(x) for x in (message_roles or [])]
+        parts = {str(k): str(v) for k, v in (dynamic_parts or {}).items()}
+        now = _now_iso()
+        with self._lock:
+            prev_row = self._conn.execute(
+                "SELECT * FROM cache_diagnostics WHERE window_id=? "
+                "ORDER BY created_at DESC LIMIT 1", (window_id[:80],)).fetchone()
+            prev = dict(prev_row) if prev_row else None
+
+        shared = 0
+        prev_hashes: list[str] = []
+        if prev:
+            try:
+                prev_hashes = [str(x) for x in json.loads(
+                    prev.get("message_hashes") or "[]")]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                prev_hashes = []
+        for a, b in zip(prev_hashes, hashes):
+            if a != b:
+                break
+            shared += 1
+        first_idx = shared if shared < len(hashes) else -1
+        first_role = roles[first_idx] if 0 <= first_idx < len(roles) else ""
+
+        reason = ""
+        if prev:
+            if str(prev.get("model") or "") != str(model or ""):
+                reason = "model_switch"
+            elif str(prev.get("tool_hash") or "") != str(tool_hash or ""):
+                reason = "tool_order_changed"
+            else:
+                prev_parts: dict[str, str] = {}
+                try:
+                    prev_parts = json.loads(prev.get("dynamic_parts_json") or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    prev_parts = {}
+                for key, label in (("compaction", "compaction"),
+                                   ("skills", "skill_changed"),
+                                   ("memory", "memory_changed"),
+                                   ("resources", "resources_changed"),
+                                   ("workstation", "workstation_changed")):
+                    if str(prev_parts.get(key) or "") != parts.get(key, ""):
+                        reason = label
+                        break
+                if not reason and prev_hashes:
+                    if shared == 0:
+                        reason = "history_rewritten"
+                    elif shared < min(len(prev_hashes), len(hashes)):
+                        reason = "history_changed"
+                if not reason and str(prev.get("system_hash") or "") != system_hash:
+                    reason = "system_changed"
+        else:
+            reason = "first_request"
+        if reset_reason:
+            reason = str(reset_reason)[:80]
+
+        prefix_src = json.dumps(hashes[:shared], ensure_ascii=False)
+        phash = hashlib.sha256(prefix_src.encode("utf-8")).hexdigest()[:16] \
+            if hashes else prefix_hash
+        diag_id = f"cd-{new_id()[:10]}"
         with self._lock:
             self._conn.execute(
                 "INSERT INTO cache_diagnostics(id,run_id,window_id,model,"
                 "system_hash,dynamic_hash,prefix_hash,tool_hash,cache_hit,"
-                "cache_miss,reset_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (f"cd-{new_id()[:10]}", run_id[:80], window_id[:80], model[:160],
-                 system_hash, dynamic_hash, prefix_hash, tool_hash,
-                 int(cache_hit or 0), int(cache_miss or 0), reset_reason[:80],
-                 _now_iso()))
+                "cache_miss,reset_reason,created_at,prev_id,request_hash,"
+                "shared_prefix_messages,first_changed_index,first_changed_role,"
+                "message_hashes,dynamic_parts_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (diag_id, run_id[:80], window_id[:80], model[:160],
+                 system_hash, dynamic_hash, phash, tool_hash,
+                 int(cache_hit or 0), int(cache_miss or 0), reason[:80], now,
+                 str(prev.get("id") or "") if prev else "",
+                 request_hash, shared, first_idx, first_role,
+                 json.dumps(hashes, ensure_ascii=False),
+                 json.dumps(parts, ensure_ascii=False)))
+            self._conn.commit()
+        return {"id": diag_id, "reset_reason": reason,
+                "shared_prefix_messages": shared,
+                "first_changed_index": first_idx, "first_changed_role": first_role}
+
+    def update_cache_diag(self, diag_id: str, *, cache_hit: int,
+                          cache_miss: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE cache_diagnostics SET cache_hit=?, cache_miss=? WHERE id=?",
+                (int(cache_hit or 0), int(cache_miss or 0), diag_id))
             self._conn.commit()
 
-    def latest_cache_diag(self, run_id: str = "") -> dict[str, Any] | None:
-        q = "SELECT * FROM cache_diagnostics"
-        args: tuple = ()
+    def latest_cache_diag(self, run_id: str = "",
+                          window_id: str = "") -> dict[str, Any] | None:
+        q = "SELECT * FROM cache_diagnostics WHERE 1=1"
+        args: list[Any] = []
         if run_id:
-            q += " WHERE run_id=?"
-            args = (run_id,)
+            q += " AND run_id=?"
+            args.append(run_id)
+        if window_id:
+            q += " AND window_id=?"
+            args.append(window_id)
         q += " ORDER BY created_at DESC LIMIT 1"
         with self._lock:
             row = self._conn.execute(q, args).fetchone()

@@ -179,7 +179,8 @@ class DogBuddyApp:
             queue_store=self.kernel_store,
             route_mode=str(getattr(config.kernel, "route", "off") or "off"),
             review_test_commands=list(getattr(config.review, "test_commands", []) or []),
-            runtime_snapshot=bool(getattr(config.cache, "runtime_snapshot", False)))
+            runtime_snapshot=bool(getattr(config.cache, "runtime_snapshot", False)),
+            cache_diagnostics=bool(getattr(config.cache, "diagnostics", True)))
         # Router 在 WindowManager 之前构造（需要 store/intake），这里补执行器。
         self.kernel_router.windows = self.windows
         self.sessions = SessionManager(self.windows, self.db)

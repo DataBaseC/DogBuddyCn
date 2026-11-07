@@ -2698,3 +2698,22 @@ Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow
 - 只有 KernelRouter 非 off 且 `qq:*` 命中时显示 `kernel+admin`，否则仍 `admin_only`。
 - 生产 gateway 仍 disabled；需要 NapCat + `gateway.enabled=true` + `qq:*` 才实际接入。
 
+---
+
+## 75. 缓存诊断 P1（2026-11-07，`0.28.0`，schema 29）
+
+按复核报告 PR-C1 先修测量，不改请求布局：
+
+- `cache_diagnostics` 新增 `prev_id/request_hash/shared_prefix_messages/
+  first_changed_index/first_changed_role/message_hashes/dynamic_parts_json`。
+- 每次请求保存每条消息短哈希，与同工位上一次请求算**最长公共前缀**；
+  `prefix_hash` 改为公共前缀哈希。
+- `reset_reason` 自动归因：`memory_changed / skill_changed / compaction /
+  resources_changed / model_switch / tool_order_changed / history_changed /
+  history_rewritten / system_changed / first_request`。
+- `system_hash` 只算稳定角色提示；`dynamic_hash` 单独算动态块；
+  `dynamic_parts_json` 保存 memory/skills/compaction/resources/workstation 分项哈希。
+- `cache.diagnostics=false` 真正关闭 shape hook。
+- AgentLoop 响应后回填 `cache_hit/cache_miss`。
+- `prune_history()` 清理 `cache_diagnostics`。
+

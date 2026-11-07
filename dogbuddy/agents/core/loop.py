@@ -295,11 +295,12 @@ class AgentLoop:
                 except Exception:  # noqa: BLE001 — 压缩失败不影响本轮
                     logger.warning("mid-run compaction failed", exc_info=True)
             messages = self.session.build_context(self.builder)
-            # v0.26.0：缓存请求形状诊断（只记哈希，不改请求）
+            # v0.28.0：缓存请求形状诊断（只记哈希，不改请求）
             _shape = ctx.extra.get("on_request_shape")
+            _diag_id = ""
             if callable(_shape):
                 try:
-                    _shape(messages=messages, tools=schemas)
+                    _diag_id = str(_shape(messages=messages, tools=schemas) or "")
                 except Exception:  # noqa: BLE001
                     logger.debug("request shape hook failed", exc_info=True)
             # v0.20.0：每次迭代先刷一次心跳（长 LLM 调用不等于“没进展”）
@@ -354,6 +355,17 @@ class AgentLoop:
             tokens = _response_tokens(resp)
             self._note_usage(resp)
             cache = _cache_ints(resp)  # v0.10.43：气泡下的"缓存 x%"
+
+            # v0.28.0：回填本请求的 cache hit/miss（同一 diag id）
+            _response_shape = ctx.extra.get("on_response_shape")
+            if callable(_response_shape) and _diag_id:
+                try:
+                    _response_shape(
+                        cache_diag_id=_diag_id,
+                        cache_hit=int(cache.get("cache_hit") or 0),
+                        cache_miss=int(cache.get("cache_miss") or 0))
+                except Exception:  # noqa: BLE001
+                    logger.debug("response shape hook failed", exc_info=True)
 
             # v0.11.0：成本账本。挂在**统一记账点**（每次 LLM 响应之后），
             # 由调用方通过 ctx.extra["on_usage"] 注入 —— 与 on_tool 同构：

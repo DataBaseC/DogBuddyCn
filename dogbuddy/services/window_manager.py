@@ -142,6 +142,7 @@ class WindowManager:
         route_mode: str = "off",
         review_test_commands: list[str] | None = None,
         runtime_snapshot: bool = False,
+        cache_diagnostics: bool = True,
     ):
         self.db = db
         self.llm_factory = llm_factory
@@ -181,6 +182,7 @@ class WindowManager:
         self.scope_resolver = ScopeResolver(db)
         self.max_iterations = max_iterations
         self.runtime_snapshot = bool(runtime_snapshot)
+        self.cache_diagnostics = bool(cache_diagnostics)
         self.builder = ContextBuilder(memory_service=memory,
                                       skills_root=self.skills_root,
                                       resources=self.queue_store,
@@ -514,10 +516,11 @@ class WindowManager:
             runs.progress(run_id, iteration=iteration, last_tool=last_tool, ok=ok)
         return hook
 
-    def _shape_hook(self, w: Window, run_id: str, model: str | None):
-        """v0.26.0：记录请求形状哈希（不改变请求）。"""
+    def _shape_hook(self, w: Window, run_id: str, model: str | None,
+                    session: Any = None):
+        """v0.28.0：记录请求形状与前缀命中诊断（不改变请求）。"""
         store = self.queue_store
-        if store is None:
+        if store is None or not self.cache_diagnostics:
             return None
 
         def _h(obj: Any) -> str:
@@ -526,18 +529,40 @@ class WindowManager:
             return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
 
         def hook(*, messages: list[dict[str, Any]],
-                 tools: list[dict[str, Any]] | None = None) -> None:
-            sys0 = str((messages[0] if messages else {}).get("content") or "")
-            dyn = ""
-            if len(messages) > 1 and str(messages[1].get("role")) == "system":
-                dyn = str(messages[1].get("content") or "")
+                 tools: list[dict[str, Any]] | None = None) -> str:
+            roles = [str(m.get("role") or "") for m in messages]
+            hashes = [_h(m) for m in messages]
+            stable = self.builder.system_block(
+                session, include_dynamic=False) if session is not None else (
+                str((messages[0] if messages else {}).get("content") or ""))
+            dynamic_parts: dict[str, str] = {}
+            dynamic = ""
+            if session is not None:
+                parts = self.builder.dynamic_parts(session)
+                dynamic_parts = {k: _h(v) for k, v in parts.items()}
+                dynamic = self.builder.dynamic_block(session)
+            rec = store.record_cache_diag(
+                run_id=run_id, window_id=w.id, model=str(model or ""),
+                system_hash=_h(stable), dynamic_hash=_h(dynamic),
+                prefix_hash=_h(messages), tool_hash=_h(tools or []),
+                request_hash=_h(messages), message_hashes=hashes,
+                message_roles=roles, dynamic_parts=dynamic_parts)
+            return str(rec.get("id") or "")
+        return hook
+
+    @staticmethod
+    def _cache_response_hook(store: Any):
+        if store is None:
+            return None
+
+        def hook(*, cache_diag_id: str, cache_hit: int, cache_miss: int) -> None:
+            if not cache_diag_id:
+                return
             try:
-                store.record_cache_diag(
-                    run_id=run_id, window_id=w.id, model=str(model or ""),
-                    system_hash=_h(sys0), dynamic_hash=_h(dyn),
-                    prefix_hash=_h(messages), tool_hash=_h(tools or []))
+                store.update_cache_diag(
+                    cache_diag_id, cache_hit=cache_hit, cache_miss=cache_miss)
             except Exception:  # noqa: BLE001
-                logger.debug("cache diag record failed", exc_info=True)
+                logger.debug("cache diag response update failed", exc_info=True)
         return hook
 
     def _usage_hook(self, w: Window, run_id: str, model: str | None):
@@ -1177,7 +1202,8 @@ class WindowManager:
                    # v0.11.0：成本账本（每轮 LLM 调用记一笔，幂等键 = run + 轮次）
                    "on_usage": self._usage_hook(w, run_id, model),
                    # v0.26.0：请求形状（system/dynamic/prefix/tool 哈希）
-                   "on_request_shape": self._shape_hook(w, run_id, model),
+                   "on_request_shape": self._shape_hook(w, run_id, model, rt.session),
+                   "on_response_shape": self._cache_response_hook(self.queue_store),
                    # v0.20.0：工具级进展（Watchdog 用，不写 token 增量）
                    "progress": self._progress_hook(run_id),
                 # v0.11.1：预算闸门（工位作用域 = 窗口 + 本次 run）

@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -906,6 +906,29 @@ def _migrate_v28(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v29(conn: sqlite3.Connection) -> None:
+    """缓存前缀诊断字段（2026-11-07，0.28.0）。"""
+    cols = (
+        ("prev_id", "TEXT DEFAULT ''"),
+        ("request_hash", "TEXT DEFAULT ''"),
+        ("shared_prefix_messages", "INTEGER DEFAULT 0"),
+        ("first_changed_index", "INTEGER DEFAULT -1"),
+        ("first_changed_role", "TEXT DEFAULT ''"),
+        ("message_hashes", "TEXT DEFAULT ''"),
+        ("dynamic_parts_json", "TEXT DEFAULT ''"),
+    )
+    existing = {r[1] for r in conn.execute(
+        "PRAGMA table_info(cache_diagnostics)").fetchall()}
+    for name, decl in cols:
+        if name not in existing:
+            try:
+                conn.execute(
+                    f"ALTER TABLE cache_diagnostics ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError:
+                pass
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -938,6 +961,7 @@ _MIGRATIONS: dict[int, Any] = {
     26: _migrate_v26,
     27: _migrate_v27,
     28: _migrate_v28,
+    29: _migrate_v29,
 }
 
 
@@ -2042,6 +2066,9 @@ class Database:
             out["compactions"] = self._conn.execute(
                 "DELETE FROM compactions WHERE COALESCE(created_at,'')<>'' AND created_at < ?",
                 (cutoff,)).rowcount
+            out["cache_diagnostics"] = self._conn.execute(
+                "DELETE FROM cache_diagnostics WHERE COALESCE(created_at,'')<>'' "
+                "AND created_at < ?", (cutoff,)).rowcount
             self._conn.commit()
         return {k: int(v or 0) for k, v in out.items()}
 

@@ -51,27 +51,31 @@ class ContextBuilder:
         #: RuntimeSnapshot，稳定角色提示和工具 schema 的前缀不被改写。
         self.runtime_snapshot = bool(runtime_snapshot)
 
-    def dynamic_block(self, session: Any) -> str:
+    def dynamic_parts(self, session: Any) -> dict[str, str]:
+        """Named dynamic blocks; hashes are used for cache reset attribution."""
         w = session.window
-        parts: list[str] = []
+        out: dict[str, str] = {}
+        mem: list[str] = []
         if self.memory is not None:
             g = self.memory.recall("global")
             if g:
-                parts.append(f"## Global memory\n{g}")
+                mem.append(f"## Global memory\n{g}")
             wm = self.memory.recall_window(w.id)
             if wm:
-                parts.append(f"## Window memory ({w.name})\n{wm}")
+                mem.append(f"## Window memory ({w.name})\n{wm}")
+        if mem:
+            out["memory"] = "\n\n".join(mem)
         if self.skills_root:
             try:
                 from ..skills import format_skills, load_skills
                 skill_block = format_skills(load_skills(self.skills_root, w.id))
                 if skill_block:
-                    parts.append(skill_block)
+                    out["skills"] = skill_block
             except Exception:  # noqa: BLE001 — 坏 skill 不能拖垮整个会话
                 logger.warning("skill load failed", exc_info=True)
         facts = self.compaction_block(session)
         if facts:
-            parts.append(facts)
+            out["compaction"] = facts
         if self.resources is not None:
             try:
                 cards = self.resources.list_resources(w.id, limit=8)
@@ -86,11 +90,18 @@ class ContextBuilder:
                         f"- `{c.get('id')}` [{c.get('kind')}] {c.get('title')} — "
                         f"{(c.get('summary') or '')[:240]} "
                         f"({c.get('token_estimate') or 0} tok)")
-                parts.append("\n".join(lines))
-        parts.append(f"## Workstation\nwindow_id={w.id} name={w.name} role={w.role} "
-                     f"workspace={getattr(session, 'effective_workspace', '') or w.workspace_path} "
-                     f"mode={w.mode}")
-        return "\n\n".join(parts)
+                out["resources"] = "\n".join(lines)
+        out["workstation"] = (
+            f"## Workstation\nwindow_id={w.id} name={w.name} role={w.role} "
+            f"workspace={getattr(session, 'effective_workspace', '') or w.workspace_path} "
+            f"mode={w.mode}")
+        return out
+
+    def dynamic_block(self, session: Any) -> str:
+        parts = self.dynamic_parts(session)
+        return "\n\n".join(parts[k] for k in
+                           ("memory", "skills", "compaction", "resources",
+                            "workstation") if parts.get(k))
 
     def system_block(self, session: Any, include_dynamic: bool = True) -> str:
         parts = [self._role_prompt(session.window)]
