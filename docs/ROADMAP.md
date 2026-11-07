@@ -2692,3 +2692,9 @@ Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow
   需显式加入 `qq:*`。
 - 未做：QQ 官方 API、多 Thread 并发、外部主动 Trigger；这些不在本轮。
 
+### 74.1 `/api/gateway/status` 反映 QQ Router（`0.27.1`）
+
+- 不再写死 `routing=admin_only`；返回 `kernel_route / qq_router`。
+- 只有 KernelRouter 非 off 且 `qq:*` 命中时显示 `kernel+admin`，否则仍 `admin_only`。
+- 生产 gateway 仍 disabled；需要 NapCat + `gateway.enabled=true` + `qq:*` 才实际接入。
+

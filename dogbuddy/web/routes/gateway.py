@@ -24,14 +24,21 @@ def router(svc, auth_deps) -> APIRouter:
         gw = getattr(cfg, "gateway", None)
         enabled = bool(getattr(gw, "enabled", False))
         whitelist = list(getattr(gw, "whitelist", []) or [])
+        kr = getattr(svc, "router", None)
+        qq_routed = bool(kr is not None
+                         and getattr(kr, "mode", "off") != "off"
+                         and kr.enabled_for("qq:private:0"))
         base = {
             "enabled": enabled,
             "host": getattr(gw, "host", ""),
             "port": getattr(gw, "port", None),
             "whitelist_size": len(whitelist),
-            # 员工不直连 QQ：白名单里的号一律进管理员会话（口径见 docs/QQ接入指南.md §7）
-            "routing": "admin_only",
-            "note": ("QQ 只接管理员：白名单 QQ 全部进入管理员会话；员工经管理员派活，不直连 QQ。"),
+            # 员工不直连 QQ：聊天仍进管理员；显式 /task 才进 KernelRouter。
+            "routing": "kernel+admin" if qq_routed else "admin_only",
+            "kernel_route": (getattr(kr, "mode", "off") if kr is not None else "off"),
+            "qq_router": qq_routed,
+            "note": ("QQ 聊天走管理员；开启 kernel route 且会话命中 qq:* 时，"
+                     "/task 等命令复用 WorkItem/dispatch_run。员工不直连 QQ。"),
         }
         adapter = getattr(svc, "adapter", None)
         if adapter is None or not enabled:
