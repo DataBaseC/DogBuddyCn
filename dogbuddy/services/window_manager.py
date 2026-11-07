@@ -186,7 +186,8 @@ class WindowManager:
         self.builder = ContextBuilder(memory_service=memory,
                                       skills_root=self.skills_root,
                                       resources=self.queue_store,
-                                      runtime_snapshot=self.runtime_snapshot)
+                                      runtime_snapshot=self.runtime_snapshot,
+                                      snapshot_store=self.queue_store)
         self.threshold = threshold
         self.max_context_tokens = max_context_tokens
         #: v0.10.32：人工派单的"最后一次任务"，限速暂停后据此自动续跑

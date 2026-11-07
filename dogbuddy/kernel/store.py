@@ -620,6 +620,47 @@ class KernelStore:
                 (int(cache_hit or 0), int(cache_miss or 0), diag_id))
             self._conn.commit()
 
+    def latest_runtime_snapshot(self, window_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM runtime_snapshots WHERE window_id=? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (str(window_id),)).fetchone()
+        return dict(row) if row else None
+
+    def create_runtime_snapshot(self, *, window_id: str, content_hash: str,
+                                content: str, before_message_id: int
+                                ) -> dict[str, Any]:
+        now = _now_iso()
+        sid = f"rs-{new_id()[:10]}"
+        with self._lock:
+            prev = self._conn.execute(
+                "SELECT * FROM runtime_snapshots WHERE window_id=? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (str(window_id),)).fetchone()
+            self._conn.execute(
+                "INSERT INTO runtime_snapshots(id,window_id,content_hash,content,"
+                "before_message_id,superseded_by,created_at) VALUES(?,?,?,?,?,?,?)",
+                (sid, str(window_id), content_hash, content,
+                 int(before_message_id or 0), "", now))
+            if prev is not None:
+                self._conn.execute(
+                    "UPDATE runtime_snapshots SET superseded_by=? WHERE id=?",
+                    (sid, prev["id"]))
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM runtime_snapshots WHERE id=?", (sid,)).fetchone()
+        return dict(row) if row else {}
+
+    def list_runtime_snapshots(self, window_id: str,
+                               limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM runtime_snapshots WHERE window_id=? "
+                "ORDER BY created_at ASC, rowid ASC LIMIT ?",
+                (str(window_id), int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
     def latest_cache_diag(self, run_id: str = "",
                           window_id: str = "") -> dict[str, Any] | None:
         q = "SELECT * FROM cache_diagnostics WHERE 1=1"

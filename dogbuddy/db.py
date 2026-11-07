@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS schema_version(
 # schema changes. `manage.py update` refuses to roll forward when a migration
 # is missing; the version is recorded in the DB so an old binary started
 # against a newer DB can detect the mismatch.
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 # columns added after v1.2 — applied to existing databases at startup
 _COLUMN_MIGRATIONS = {
@@ -929,6 +929,24 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_v30(conn: sqlite3.Connection) -> None:
+    """RuntimeSnapshot append-only history (2026-11-07, 0.29.0)."""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS runtime_snapshots(
+      id TEXT PRIMARY KEY,
+      window_id TEXT DEFAULT '',
+      content_hash TEXT DEFAULT '',
+      content TEXT DEFAULT '',
+      before_message_id INTEGER DEFAULT 0,
+      superseded_by TEXT DEFAULT '',
+      created_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS ix_runtime_snapshot_window
+      ON runtime_snapshots(window_id, created_at);
+    """)
+    conn.commit()
+
+
 # version → migration callable. Applied in ascending order for any version
 # greater than what the database reports. Must be idempotent and must not
 # depend on the application layer.
@@ -962,6 +980,7 @@ _MIGRATIONS: dict[int, Any] = {
     27: _migrate_v27,
     28: _migrate_v28,
     29: _migrate_v29,
+    30: _migrate_v30,
 }
 
 

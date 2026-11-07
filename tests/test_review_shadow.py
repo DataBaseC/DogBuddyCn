@@ -57,7 +57,7 @@ def test_schema_has_review_tables(tmp_path):
     db = Database(tmp_path / "s.db")
     names = {r[0] for r in db._conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-    assert SCHEMA_VERSION == 29
+    assert SCHEMA_VERSION == 30
     assert {"review_requests", "review_findings"} <= names
     db.close()
 

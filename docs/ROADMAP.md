@@ -2717,3 +2717,13 @@ Review 从“只记录”升级到可选的强制闭环；生产仍默认 shadow
 - AgentLoop 响应后回填 `cache_hit/cache_miss`。
 - `prune_history()` 清理 `cache_diagnostics`。
 
+### 75.1 RuntimeSnapshot append-only（`0.29.0`，schema 30）
+
+- 新增 `runtime_snapshots`：content_hash / content / before_message_id /
+  superseded_by / created_at。
+- 快照不再作为历史前的第二条 system；改为 user 消息，锚定在**当轮 user 消息之前**。
+- 动态内容 hash 不变不追加；变化才追加一条，旧快照保留并标 `superseded_by`。
+- 同一快照内容不重复；压缩后锚点丢失时退化为“最新快照在历史前”。
+- `cache.runtime_snapshot=true` 才启用；无 snapshot_store 的单测/嵌入保留旧布局。
+- 测试覆盖：同内容两轮只追加一次；memory 变化旧前缀不变、只多一条快照。
+

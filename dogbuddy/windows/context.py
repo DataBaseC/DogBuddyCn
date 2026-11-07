@@ -9,6 +9,7 @@ Business rule (compression policy glue) lives here in Domain, not in L1/L2.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -42,14 +43,16 @@ def message_to_llm(m: Message) -> dict[str, Any]:
 
 class ContextBuilder:
     def __init__(self, memory_service: Any = None, skills_root: str = "",
-                 resources: Any = None, runtime_snapshot: bool = False):
+                 resources: Any = None, runtime_snapshot: bool = False,
+                 snapshot_store: Any = None):
         self.memory = memory_service
         self.skills_root = str(skills_root or "")
         #: v0.20.0：压缩归档的资源卡片；全文用 read_resource 按需读
         self.resources = resources
-        #: v0.26.0：动态记忆/技能/资源/workstation 从首个 system 拆到
-        #: RuntimeSnapshot，稳定角色提示和工具 schema 的前缀不被改写。
+        #: v0.29.0：RuntimeSnapshot 只在 hash 变化时追加为 user 消息，
+        #: 锚定在当轮 user 消息之前，不再重写历史前的 system。
         self.runtime_snapshot = bool(runtime_snapshot)
+        self.snapshot_store = snapshot_store
 
     def dynamic_parts(self, session: Any) -> dict[str, str]:
         """Named dynamic blocks; hashes are used for cache reset attribution."""
@@ -136,13 +139,48 @@ class ContextBuilder:
         return "## Compacted conversation facts (older wording dropped)\n" + "\n\n".join(chunks)
 
     def build(self, session: Any, recent_limit: int = 400) -> list[dict[str, Any]]:
+        recent = list(session.recent(recent_limit))
         stable = self.system_block(session, include_dynamic=not self.runtime_snapshot)
         msgs: list[dict[str, Any]] = [{"role": "system", "content": stable}]
+        snapshots: list[dict[str, Any]] = []
         if self.runtime_snapshot:
             dynamic = self.dynamic_block(session)
-            if dynamic:
+            if self.snapshot_store is not None and dynamic:
+                digest = hashlib.sha256(
+                    dynamic.encode("utf-8", "replace")).hexdigest()[:16]
+                latest = self.snapshot_store.latest_runtime_snapshot(
+                    session.window.id)
+                if latest is None or str(latest.get("content_hash") or "") != digest:
+                    anchor = 0
+                    for m in reversed(recent):
+                        if getattr(m, "role", "") == "user":
+                            anchor = int(getattr(m, "id", 0) or 0)
+                            break
+                    self.snapshot_store.create_runtime_snapshot(
+                        window_id=session.window.id, content_hash=digest,
+                        content=dynamic, before_message_id=anchor)
+                snapshots = self.snapshot_store.list_runtime_snapshots(
+                    session.window.id)
+            elif dynamic:
+                # 无 snapshot_store（单测/嵌入）时保留旧布局，生产总是注入 store。
                 msgs.append({"role": "system",
-                             "content": "## Runtime snapshot (reference; may change)\n" + dynamic})
+                             "content": "## Runtime snapshot (reference; may change)\n"
+                                        + dynamic})
+
+        by_anchor: dict[int, list[dict[str, Any]]] = {}
+        unmatched: list[dict[str, Any]] = []
+        recent_ids = {int(getattr(m, "id", 0) or 0) for m in recent}
+        for s in snapshots:
+            aid = int(s.get("before_message_id") or 0)
+            if aid and aid in recent_ids:
+                by_anchor.setdefault(aid, []).append(s)
+            else:
+                unmatched.append(s)
+        if unmatched:
+            snap = unmatched[-1]
+            msgs.append({"role": "user",
+                         "content": "## Runtime snapshot (reference; may change)\n"
+                                    + str(snap.get("content") or "")})
         # v0.10.17：**修复 tool / tool_calls 配对**。
         # 历史一旦被裁剪（recent_limit）、压缩或被外部清空，就可能出现
         # "有 tool 结果、没有配对的 assistant.tool_calls"。DeepSeek 会直接 400：
@@ -160,7 +198,13 @@ class ContextBuilder:
                              "content": "(tool result not available in this context)"})
             pending.clear()
 
-        for m in session.recent(recent_limit):
+        for m in recent:
+            mid = int(getattr(m, "id", 0) or 0)
+            for s in by_anchor.get(mid, []):
+                flush_missing()
+                msgs.append({"role": "user",
+                             "content": "## Runtime snapshot (reference; may change)\n"
+                                        + str(s.get("content") or "")})
             item = message_to_llm(m)
             role = item.get("role")
             if role == "assistant":
